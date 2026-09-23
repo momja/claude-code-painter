@@ -1,0 +1,9 @@
+.git
+.venv
+runs
+.env
+pi-painter/node_modules
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
