@@ -238,7 +238,7 @@ tests/
 
 ## Archive viewer
 
-`viewer.html` is a single-file static site (only dependency: sql.js from a CDN) that reads a run database entirely in the browser. Drop in a `.db` file or point it at a CORS-friendly URL (`viewer.html?db=./demo.db`), and it shows the instrument archive grid plus a replay player that animates each painting stroke by stroke from the logged calls and canvas snapshots — the *how*, not just the result. `demo.db` is the first real run, trimmed to everything the viewer needs. To share a full run, checkpoint it first (`sqlite3 run.db 'PRAGMA wal_checkpoint(TRUNCATE);'`) and host the `.db` next to the page.
+`viewer.html` is a single-file static site (only dependency: sql.js from a CDN) that reads a run database entirely in the browser. Drop in a `.db` file or point it at a CORS-friendly URL (`viewer.html?db=./demo.db`), and it shows the instrument archive grid plus a replay player that animates each painting stroke by stroke from the logged calls and canvas snapshots — the *how*, not just the result. `demo.db` holds two runs (bb08db1e4f7b, c82ad7cbb927), trimmed to what the viewer needs: heatmaps dropped, snapshot keyframes thinned to ~every 10 calls. To share a full run, checkpoint it first (`sqlite3 run.db 'PRAGMA wal_checkpoint(TRUNCATE);'`) and host the `.db` next to the page.
 
 ## Known limits
 

@@ -216,6 +216,7 @@ async function openBuffer(buf,name){
 }
 async function loadFile(f){if(!f)return;setStatus(`reading ${f.name} (${(f.size/1048576).toFixed(1)} MB)…`);const buf=await f.arrayBuffer();await openBuffer(buf,f.name);}
 function canonDbUrl(u){
+  u=String(u||"").trim().replace(/\s+/g,""); // stray tabs/newlines from rich-text pastes are never valid in a URL
   // github.com/…/raw/… and …/blob/… URLs 302-redirect without CORS headers, so a
   // sandboxed page (origin null) can't fetch them. Rewrite to raw.githubusercontent.com,
   // which serves Access-Control-Allow-Origin: *.
@@ -234,8 +235,14 @@ async function loadURL(u){
   let r;
   try{r=await fetch(u);}
   catch(e){throw new Error(`fetch blocked — the host must allow cross-origin reads (Access-Control-Allow-Origin). For a GitHub file use its raw.githubusercontent.com URL.`);}
-  if(!r.ok)throw new Error(`HTTP ${r.status} — the host must send Access-Control-Allow-Origin`);
-  const buf=await r.arrayBuffer();await openBuffer(buf,u.split("/").pop()||"remote.db");
+  if(!r.ok){
+    if(lsGet(LS_DB_URL)===u)lsDel(LS_DB_URL); // a bad stored URL must not brick repeat visits
+    throw new Error(r.status===404
+      ? `HTTP 404 — nothing at that URL. Check owner/repo/branch/path: ${u}`
+      : `HTTP ${r.status} — the host must send Access-Control-Allow-Origin`);
+  }
+  try{const buf=await r.arrayBuffer();await openBuffer(buf,u.split("/").pop()||"remote.db");}
+  catch(e){if(lsGet(LS_DB_URL)===u)lsDel(LS_DB_URL);throw e;}
   lsSet(LS_DB_URL,u); // remember for repeat visits (?db= overrides this)
 }
 
