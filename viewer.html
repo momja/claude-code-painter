@@ -69,6 +69,17 @@ tr.clickable{cursor:pointer} tr.clickable:hover{background:var(--bg)} tr.sel{bac
 details>summary{cursor:pointer;color:var(--muted)}
 .kv{display:grid;grid-template-columns:max-content 1fr;gap:2px 12px;font-size:13px}
 .kv dt{color:var(--muted)} .kv dd{margin:0}
+#loader{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:rgba(20,18,12,.45)}
+#loader[hidden]{display:none}
+.load-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:22px 26px;width:min(430px,90vw);text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.25)}
+.spin{width:38px;height:38px;margin:0 auto 12px;border-radius:50%;border:4px solid var(--line);border-top-color:var(--accent);animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#loadMsg{font-weight:600}
+#loadSub{font-size:12.5px;color:var(--muted);min-height:1.4em;margin-top:2px;overflow-wrap:anywhere}
+.load-track{height:8px;border-radius:99px;background:var(--code);margin-top:12px;overflow:hidden}
+#loadBar{height:100%;width:0%;border-radius:99px;background:var(--accent);transition:width .15s ease}
+#loadBar.ind{width:30%;animation:slide 1.1s ease-in-out infinite alternate}
+@keyframes slide{from{margin-left:-30%}to{margin-left:100%}}
 </style>
 </head>
 <body>
@@ -150,6 +161,7 @@ details>summary{cursor:pointer;color:var(--muted)}
   </section>
 </main>
 
+<div id="loader" hidden><div class="load-card"><div class="spin"></div><div id="loadMsg">Loading…</div><div id="loadSub"></div><div class="load-track"><div id="loadBar" class="ind"></div></div></div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.js"></script>
 <script>
 "use strict";
@@ -195,6 +207,7 @@ function compactArgs(a){
 /* ---------- load ---------- */
 async function ensureSQL(){
   if(SQL)return SQL;
+  showLoad("Loading sql.js…","fetching the SQLite engine (CDN, first visit only)");
   setStatus("loading sql.js…");
   SQL=await initSqlJs({locateFile:f=>`https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/${f}`});
   setStatus("sql.js ready — pick a .db file or URL");
@@ -203,9 +216,12 @@ async function ensureSQL(){
 async function openBuffer(buf,name){
   await ensureSQL();revokeURLs();
   stop();
-  db=new SQL.Database(new Uint8Array(buf));
+  const bytes=buf instanceof Uint8Array?buf:new Uint8Array(buf);
+  showLoad("Parsing database…",`${name} · ${(bytes.length/1048576).toFixed(1)} MB — copying into memory, large files take a while`);
+  await paint();await paint(); // let the spinner paint before the blocking parse
+  db=new SQL.Database(bytes);
   const runs=qAll("SELECT id,name,started FROM runs ORDER BY started DESC");
-  if(!runs.length){setStatus("no runs in this database","err");return;}
+  if(!runs.length){hideLoad();setStatus("no runs in this database","err");return false;}
   $("#runsSec").hidden=false;
   $("#runSel").innerHTML=runs.map(r=>`<option value="${esc(r.id)}">${esc(r.name||r.id)} · ${new Date(r.started*1000).toLocaleString()} · ${esc(r.id.slice(0,8))}</option>`).join("");
   const want=new URLSearchParams(location.search).get("run");
@@ -213,8 +229,16 @@ async function openBuffer(buf,name){
   $("#runSel").value=state.run;
   setStatus(`${name}: ${runs.length} run(s)`,"ok");
   selectRun(state.run);
+  hideLoad();
+  return true;
 }
-async function loadFile(f){if(!f)return;setStatus(`reading ${f.name} (${(f.size/1048576).toFixed(1)} MB)…`);const buf=await f.arrayBuffer();await openBuffer(buf,f.name);}
+async function loadFile(f){if(!f)return;
+  showLoad("Reading file…",`${f.name} · ${(f.size/1048576).toFixed(1)} MB`);
+  try{
+    const bytes=f.stream?await readStream(f.stream(),f.size,"Reading"):new Uint8Array(await f.arrayBuffer());
+    await openBuffer(bytes,f.name);
+  }catch(e){hideLoad();throw e;}
+}
 function canonDbUrl(u){
   u=String(u||"").trim().replace(/\s+/g,""); // stray tabs/newlines from rich-text pastes are never valid in a URL
   // github.com/…/raw/… and …/blob/… URLs 302-redirect without CORS headers, so a
@@ -227,23 +251,42 @@ function canonDbUrl(u){
 const LS_DB_URL="conveyor-viewer-db-url";
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}
 function lsSet(k,v){try{localStorage.setItem(k,v);}catch(e){}}
+function lsDel(k){try{localStorage.removeItem(k);}catch(e){}}
+const paint=()=>new Promise(r=>requestAnimationFrame(()=>setTimeout(r,0)));
+function showLoad(msg,sub){$("#loader").hidden=false;$("#loadMsg").textContent=msg;$("#loadSub").textContent=sub||"";setLoad(null);}
+function setLoad(frac,sub){const b=$("#loadBar");if(sub!=null)$("#loadSub").textContent=sub;
+  if(frac==null||!isFinite(frac)){b.classList.add("ind");b.style.width="";}else{b.classList.remove("ind");b.style.width=(Math.max(0,Math.min(1,frac))*100).toFixed(1)+"%";}}
+function hideLoad(){$("#loader").hidden=true;}
+async function readStream(stream,total,label){
+  const reader=stream.getReader();const chunks=[];let got=0;
+  for(;;){const{done,value}=await reader.read();if(done)break;
+    chunks.push(value);got+=value.length;
+    setLoad(total?got/total:null,`${label} · ${(got/1048576).toFixed(1)}${total?` of ${(total/1048576).toFixed(1)}`:""} MB`);}
+  const out=new Uint8Array(got);let off=0;
+  for(const c of chunks){out.set(c,off);off+=c.length;}
+  return out;
+}
 async function loadURL(u){
   if(!u)return;
   u=canonDbUrl(u);
   if($("#url").value.trim()!==u)$("#url").value=u;
+  showLoad("Downloading…",u);
   setStatus(`fetching ${u}…`);
   let r;
   try{r=await fetch(u);}
-  catch(e){throw new Error(`fetch blocked — the host must allow cross-origin reads (Access-Control-Allow-Origin). For a GitHub file use its raw.githubusercontent.com URL.`);}
+  catch(e){hideLoad();throw new Error(`fetch blocked — the host must allow cross-origin reads (Access-Control-Allow-Origin). For a GitHub file use its raw.githubusercontent.com URL.`);}
   if(!r.ok){
+    hideLoad();
     if(lsGet(LS_DB_URL)===u)lsDel(LS_DB_URL); // a bad stored URL must not brick repeat visits
     throw new Error(r.status===404
       ? `HTTP 404 — nothing at that URL. Check owner/repo/branch/path: ${u}`
       : `HTTP ${r.status} — the host must send Access-Control-Allow-Origin`);
   }
-  try{const buf=await r.arrayBuffer();await openBuffer(buf,u.split("/").pop()||"remote.db");}
-  catch(e){if(lsGet(LS_DB_URL)===u)lsDel(LS_DB_URL);throw e;}
-  lsSet(LS_DB_URL,u); // remember for repeat visits (?db= overrides this)
+  try{
+    const total=+r.headers.get("content-length")||0;
+    const bytes=r.body?await readStream(r.body,total,"Downloading"):new Uint8Array(await r.arrayBuffer());
+    if(await openBuffer(bytes,u.split("/").pop()||"remote.db"))lsSet(LS_DB_URL,u); // remember for repeat visits (?db= overrides this)
+  }catch(e){hideLoad();if(lsGet(LS_DB_URL)===u)lsDel(LS_DB_URL);throw e;}
 }
 
 /* ---------- run / archive ---------- */
@@ -495,7 +538,8 @@ document.addEventListener("keydown",e=>{
 ensureSQL().then(()=>{
   const u=new URLSearchParams(location.search).get("db")||lsGet(LS_DB_URL);
   if(u){$("#url").value=u;loadURL(u).catch(err=>setStatus(String(err.message||err),"err"));}
-}).catch(err=>setStatus("could not load sql.js: "+err.message,"err"));
+  else hideLoad();
+}).catch(err=>{hideLoad();setStatus("could not load sql.js: "+err.message,"err");});
 </script>
 </body>
 </html>
