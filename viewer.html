@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>conveyor · instrument archive viewer</title>
+<style>
+:root{
+  --bg:#f4efe6; --surface:#fbf8f2; --line:#ddd4c4; --ink:#1f2328; --muted:#6a6e75; --faint:#9a9da2;
+  --accent:#2f4b8f; --good:#2f7d4f; --bad:#b3401a; --warn:#a86a0c; --code:#efe8db;
+  color-scheme:light;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+header{position:sticky;top:0;z-index:10;background:var(--surface);border-bottom:1px solid var(--line);padding:10px 18px;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center}
+header h1{font-size:16px;margin:0;letter-spacing:.02em}
+header h1 span{color:var(--muted);font-weight:400}
+main{max-width:1400px;margin:0 auto;padding:16px 18px 80px;display:grid;gap:16px}
+section{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px;min-width:0}
+section>h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 10px;font-weight:600}
+.muted{color:var(--muted)} .faint{color:var(--faint)} .good{color:var(--good)} .bad{color:var(--bad)} .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+code,pre{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+pre{background:var(--code);padding:10px 12px;border-radius:6px;overflow:auto;max-height:420px;white-space:pre-wrap;word-break:break-word}
+button{font:inherit;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:6px;padding:4px 12px;cursor:pointer}
+button:hover{border-color:var(--accent)} button.on{border-color:var(--accent);color:var(--accent)}
+button:disabled{opacity:.45;cursor:default}
+input[type=text],select{font:inherit;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
+#drop{border:2px dashed var(--line);border-radius:10px;padding:22px;text-align:center;color:var(--muted);background:var(--surface)}
+#drop.over{border-color:var(--accent);color:var(--accent)}
+.grid2{display:grid;gap:16px;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr)}
+@media(max-width:1000px){.grid2{grid-template-columns:1fr}}
+.archive{display:grid;grid-template-columns:86px repeat(6,minmax(0,1fr));gap:6px;align-items:stretch}
+.archive .head{font-size:11px;color:var(--muted);text-align:center;align-self:end}
+.archive .side{font-size:12px;color:var(--muted);align-self:center}
+.cell{border:1px solid var(--line);border-radius:7px;padding:5px;min-height:96px;font-size:12px;cursor:pointer;background:var(--bg);display:flex;flex-direction:column;gap:3px}
+.cell.empty{border-style:dashed;cursor:default;color:var(--faint);justify-content:center;align-items:center;text-align:center}
+.cell.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.cell img{width:100%;border-radius:4px;image-rendering:pixelated;background:#fff}
+.cell:hover:not(.empty){border-color:var(--accent)}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+tr.clickable{cursor:pointer} tr.clickable:hover{background:var(--bg)} tr.sel{background:var(--code)}
+.tag{display:inline-block;font-size:11.5px;padding:0 6px;border-radius:4px;background:var(--code);color:var(--muted);white-space:nowrap}
+.imgs{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start}
+.imgs img{max-width:min(100%,440px);border-radius:6px;border:1px solid var(--line);image-rendering:pixelated;background:#fff}
+.imgs figure{margin:0} .imgs figcaption{font-size:12px;color:var(--muted)}
+.stage{display:grid;gap:12px;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr)}
+@media(max-width:1000px){.stage{grid-template-columns:1fr}}
+.canvas-wrap{position:relative;background:#fff;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.canvas-wrap img.frame{display:block;width:100%;image-rendering:pixelated}
+.canvas-wrap img.ghost{position:absolute;inset:0;width:100%;height:100%;image-rendering:pixelated;opacity:.0;pointer-events:none}
+.dotmark{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1.5px rgba(0,0,0,.55),0 0 10px rgba(0,0,0,.35);pointer-events:none}
+.dotmark::after{content:"";position:absolute;inset:-9px;border-radius:50%;border:1.5px solid currentColor;opacity:.7;animation:ring 1.2s ease-out infinite}
+@keyframes ring{from{transform:scale(.4);opacity:.9}to{transform:scale(1.15);opacity:0}}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.controls input[type=range]{flex:1;min-width:180px}
+.strip{display:flex;gap:6px;overflow-x:auto;padding:6px 2px}
+.strip img{width:72px;height:72px;object-fit:contain;background:#fff;border:2px solid var(--line);border-radius:5px;image-rendering:pixelated;cursor:pointer;flex:none}
+.strip img.cur{border-color:var(--accent)}
+.strokes{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.strokes table{font-size:12.5px}
+.swatch{display:inline-block;width:12px;height:12px;border-radius:3px;border:1px solid rgba(0,0,0,.35);vertical-align:-1px;margin-right:4px}
+.pill{display:inline-flex;gap:6px;align-items:baseline;padding:2px 9px;border:1px solid var(--line);border-radius:99px;font-size:12.5px;color:var(--muted);white-space:nowrap}
+.pill b{color:var(--ink)}
+.hint{font-size:12.5px;color:var(--muted)}
+.err{color:var(--bad)} .ok{color:var(--good)}
+details>summary{cursor:pointer;color:var(--muted)}
+.kv{display:grid;grid-template-columns:max-content 1fr;gap:2px 12px;font-size:13px}
+.kv dt{color:var(--muted)} .kv dd{margin:0}
+</style>
+</head>
+<body>
+<header>
+  <h1>conveyor <span>· instrument archive viewer — static, single file</span></h1>
+  <label class="pill">.db file <input id="file" type="file" accept=".db,.sqlite,.sqlite3,application/x-sqlite3" style="max-width:220px"></label>
+  <input id="url" type="text" placeholder="https://…/run.db (CORS-friendly)" size="34">
+  <button id="loadUrl">Load URL</button>
+  <span id="status" class="hint">sql.js loading…</span>
+</header>
+<main>
+  <div id="drop">Drop a <b>.db</b> file here, pick one above, or paste a CORS-friendly URL to a hosted <b>.db</b> file.
+    <div class="hint">Everything runs locally in your browser (sql.js). Nothing is uploaded. 500&nbsp;MB+ files need a desktop browser and patience.</div>
+  </div>
+
+  <section id="runsSec" hidden>
+    <h2>Run</h2>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <select id="runSel" style="max-width:70ch"></select>
+      <span id="runMeta" class="muted"></span>
+    </div>
+    <div class="hint" style="margin-top:6px">Tip: host a <b>.db</b> next to this page with <span class="mono">Access-Control-Allow-Origin: *</span> and open <span class="mono">viewer.html?db=./run.db</span>. If a run was just writing, checkpoint first: <span class="mono">sqlite3 run.db 'PRAGMA wal_checkpoint(TRUNCATE);'</span> — the browser can only read the main file, not the <span class="mono">-wal</span> sidecar.</div>
+  </section>
+
+  <section id="archSec" hidden>
+    <h2 id="archTitle">Instrument archive</h2>
+    <div class="hint" style="margin:-4px 0 10px">Best instrument per niche (highest scored painting). Rows: does any tool keep state between calls. Columns: scalar vs list arguments, and how far one call reaches.</div>
+    <div class="archive" id="archive"></div>
+  </section>
+
+  <div class="grid2">
+    <section id="orgSec" hidden>
+      <h2>Instruments</h2>
+      <div class="hint" style="margin-bottom:8px">Sorted by best painting score. Click to inspect + replay.</div>
+      <div style="max-height:520px;overflow:auto"><table><thead><tr><th></th><th>niche</th><th class="num">score</th><th>operator</th><th>summary</th></tr></thead><tbody id="orgRows"></tbody></table></div>
+    </section>
+    <section id="detSec" hidden>
+      <h2 id="detTitle">Instrument</h2>
+      <div id="detBody"></div>
+    </section>
+  </div>
+
+  <section id="playSec" hidden>
+    <h2 id="playTitle">Painting replay — how it was painted</h2>
+    <div id="playMeta" class="muted" style="margin-bottom:8px"></div>
+    <div class="stage">
+      <div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <figure style="margin:0;flex:1;min-width:220px"><div class="canvas-wrap"><img id="frame" class="frame" alt="canvas replay"><div id="mark"></div></div><figcaption class="hint" id="frameCap"></figcaption></figure>
+          <figure style="margin:0;width:220px"><img id="target" style="width:100%;border-radius:8px;border:1px solid var(--line);image-rendering:pixelated;background:#fff" alt="target"><figcaption class="hint">target (cropped from pair)</figcaption></figure>
+        </div>
+        <div class="controls" style="margin-top:10px">
+          <button id="bStart" title="first">⏮</button>
+          <button id="bPrev" title="previous (←)">◀</button>
+          <button id="bPlay" title="play/pause (space)">▶ play</button>
+          <button id="bNext" title="next (→)">▶|</button>
+          <button id="bEnd" title="last">⏭</button>
+          <input id="scrub" type="range" min="0" max="100" value="0" step="1">
+          <select id="speed" title="strokes per second">
+            <option value="2">2/s</option><option value="5" selected>5/s</option><option value="10">10/s</option><option value="25">25/s</option><option value="60">60/s</option>
+          </select>
+          <label class="hint"><input id="loop" type="checkbox" checked> loop</label>
+        </div>
+        <div class="hint" id="strokeInfo" style="margin-top:8px"></div>
+        <div id="spark" style="margin-top:6px"></div>
+        <div class="hint" style="margin-top:4px">Keyframes are the canvas snapshots stored in the db (about every 5 calls) plus the final painting. Scrubbing between keyframes shows the nearest earlier snapshot and counts the strokes since it — the stroke list below shows every call in order.</div>
+        <div class="strip" id="film"></div>
+      </div>
+      <div>
+        <h2 style="font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 8px">Every call, in order</h2>
+        <div class="strokes"><table><thead><tr><th class="num">#</th><th>tool</th><th>args</th><th class="num">Δscore</th><th></th></tr></thead><tbody id="strokeRows"></tbody></table></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="paintSec" hidden>
+    <h2>Paintings of this instrument</h2>
+    <div class="imgs" id="paintList"></div>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.js"></script>
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt=(x,d=3)=>x==null||isNaN(x)?"–":Number(x).toFixed(d);
+const short=id=>id?String(id).slice(0,6):"–";
+let SQL=null, db=null, artCache=new Map();
+const state={run:null,orgs:[],bestByOrg:{},selOrg:null,selEval:null,strokes:[],frames:[],frameByStroke:[],pos:0,playing:false,lastT:0,eval:null,session:null};
+
+function setStatus(t,cls){const e=$("#status");e.textContent=t;e.className=cls||"hint";}
+function revokeURLs(){artCache=new Map();}
+// Images are served as data: URLs (not blob:) so the page works under a
+// restrictive Content-Security-Policy such as `img-src data: https://...`.
+function bytesToDataURL(bytes,mime){
+  const b=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);
+  let bin="";const CH=0x8000;
+  for(let i=0;i<b.length;i+=CH)bin+=String.fromCharCode.apply(null,b.subarray(i,i+CH));
+  return `data:${mime};base64,`+btoa(bin);
+}
+function qAll(sql,params){const st=db.prepare(sql);st.bind(params||[]);const out=[];while(st.step())out.push(st.getAsObject());st.free();return out;}
+function qOne(sql,params){const r=qAll(sql,params);return r[0]||null;}
+function artifactURL(name){
+  if(!name)return null;
+  if(artCache.has(name))return artCache.get(name);
+  const r=qOne("SELECT data FROM artifacts WHERE name=?",[name]);
+  if(!r||!r.data)return null;
+  const u=bytesToDataURL(r.data,name.endsWith(".jpg")?"image/jpeg":"image/png");
+  artCache.set(name,u);return u;
+}
+function compactArgs(a){
+  if(a==null)return"";
+  if(typeof a!=="object")return String(a);
+  return Object.entries(a).map(([k,v])=>{
+    if(typeof v==="number")return `${k}=${+v.toFixed(2)}`;
+    if(typeof v==="string"&&/^#[0-9a-f]{3,6}$/i.test(v))return `${k}=${v}`;
+    if(typeof v==="string"&&v.length>40)return `${k}=(…${v.length}ch)`;
+    if(Array.isArray(v))return `${k}=[${v.length}]`;
+    return `${k}=${JSON.stringify(v)}`;
+  }).join(" ");
+}
+
+/* ---------- load ---------- */
+async function ensureSQL(){
+  if(SQL)return SQL;
+  setStatus("loading sql.js…");
+  SQL=await initSqlJs({locateFile:f=>`https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/${f}`});
+  setStatus("sql.js ready — pick a .db file or URL");
+  return SQL;
+}
+async function openBuffer(buf,name){
+  await ensureSQL();revokeURLs();
+  stop();
+  db=new SQL.Database(new Uint8Array(buf));
+  const runs=qAll("SELECT id,name,started FROM runs ORDER BY started DESC");
+  if(!runs.length){setStatus("no runs in this database","err");return;}
+  $("#runsSec").hidden=false;
+  $("#runSel").innerHTML=runs.map(r=>`<option value="${esc(r.id)}">${esc(r.name||r.id)} · ${new Date(r.started*1000).toLocaleString()} · ${esc(r.id.slice(0,8))}</option>`).join("");
+  const want=new URLSearchParams(location.search).get("run");
+  state.run=runs.find(r=>r.id===want)?.id||runs[0].id;
+  $("#runSel").value=state.run;
+  setStatus(`${name}: ${runs.length} run(s)`,"ok");
+  selectRun(state.run);
+}
+async function loadFile(f){if(!f)return;setStatus(`reading ${f.name} (${(f.size/1048576).toFixed(1)} MB)…`);const buf=await f.arrayBuffer();await openBuffer(buf,f.name);}
+async function loadURL(u){
+  if(!u)return;setStatus(`fetching ${u}…`);
+  const r=await fetch(u);if(!r.ok)throw new Error(`HTTP ${r.status} — the host must send Access-Control-Allow-Origin`);
+  const buf=await r.arrayBuffer();await openBuffer(buf,u.split("/").pop()||"remote.db");
+}
+
+/* ---------- run / archive ---------- */
+function selectRun(run){
+  state.run=run;state.selOrg=null;state.selEval=null;
+  const cfg=qOne("SELECT config FROM runs WHERE id=?",[run]);
+  const nOrg=qOne("SELECT count(*) c FROM organisms WHERE run_id=?",[run]).c;
+  const nEv=qOne("SELECT count(*) c FROM evaluations WHERE run_id=?",[run]).c;
+  $("#runMeta").textContent=`${nOrg} organisms · ${nEv} evaluations`;
+  // instruments + best viable score each
+  const orgs=qAll("SELECT id,node,parent_id,parent2_id,mutator,created,summary,genome,niche,traits,sheet,viable,note FROM organisms WHERE run_id=? AND node='instrument' ORDER BY created",[run]);
+  const best={};
+  for(const e of qAll("SELECT organism_id,score,viable,artifacts,session_id,reason FROM evaluations WHERE run_id=?",[run])){
+    if(!e.viable||e.score==null)continue;
+    let art={};try{art=JSON.parse(e.artifacts||"{}")}catch(_){}
+    if(!best[e.organism_id]||e.score>best[e.organism_id].score)best[e.organism_id]={score:e.score,painting:art.painting,pair:art.pair,heat:art.heat,session:e.session_id,reason:e.reason};
+  }
+  state.orgs=orgs;state.bestByOrg=best;
+  renderArchive();renderOrgs();
+  $("#archSec").hidden=false;$("#orgSec").hidden=false;$("#detSec").hidden=true;$("#playSec").hidden=true;$("#paintSec").hidden=true;
+}
+const NICHES=(()=>{const o=[];for(const s of["stateless","stateful"])for(const g of["scalar","list"])for(const r of["short","medium","long"])o.push(`${s}/${g}/${r}`);return o;})();
+function renderArchive(){
+  const cells={};
+  for(const o of state.orgs){
+    if(!o.niche||o.viable===0)continue;
+    const b=state.bestByOrg[o.id];
+    const cur=cells[o.niche];
+    const sc=b?b.score:null;
+    if(!cur||(sc!=null&&(cur.score==null||sc>cur.score)))cells[o.niche]={id:o.id,score:sc,mutator:o.mutator,summary:o.summary,painting:b?.painting,sheet:o.sheet};
+  }
+  const filled=Object.keys(cells).length;
+  $("#archTitle").textContent=`Instrument archive · ${filled} of 12 niches filled`;
+  let h=`<div></div>`+["scalar · short","scalar · medium","scalar · long","list · short","list · medium","list · long"].map(t=>`<div class="head">${t}</div>`).join("");
+  for(const s of["stateless","stateful"]){
+    h+=`<div class="side">${s}</div>`;
+    for(const g of["scalar","list"])for(const r of["short","medium","long"]){
+      const c=cells[`${s}/${g}/${r}`];
+      h+=c?`<div class="cell${state.selOrg===c.id?" sel":""}" data-org="${esc(c.id)}" title="${esc(c.summary||"")}">
+        ${c.painting||c.sheet?`<img loading="lazy" src="${esc(artifactURL(c.painting||c.sheet)||"")}">`:""}
+        <div><b>${c.score==null?"unpainted":fmt(c.score)}</b> <span class="faint">${short(c.id)}</span></div>
+        <div class="faint">${esc((c.mutator||"seed").split(":").pop())}</div></div>`
+        :`<div class="cell empty">empty</div>`;
+    }
+  }
+  $("#archive").innerHTML=h;
+  $("#archive").querySelectorAll("[data-org]").forEach(el=>el.onclick=()=>selectInstrument(el.dataset.org));
+}
+function renderOrgs(){
+  const rows=state.orgs.map(o=>({o,b:state.bestByOrg[o.id]})).sort((a,b)=>(b.b?.score??-1)-(a.b?.score??-1));
+  const shown=rows.slice(0,80);
+  $("#orgRows").innerHTML=shown.map(({o,b})=>`<tr class="clickable${state.selOrg===o.id?" sel":""}" data-org="${esc(o.id)}">
+    <td>${b?.painting?`<img loading="lazy" src="${esc(artifactURL(b.painting)||"")}" style="width:52px;height:52px;object-fit:contain;background:#fff;border-radius:4px;image-rendering:pixelated">`:`<span class="faint">–</span>`}</td>
+    <td>${o.niche?`<span class="tag">${esc(o.niche)}</span>`:`<span class="faint">–</span>`}</td>
+    <td class="num"><b>${b?fmt(b.score):"–"}</b></td>
+    <td><span class="tag">${esc((o.mutator||"seed").split(":").pop())}</span></td>
+    <td>${esc((o.summary||"").slice(0,110))} <span class="faint mono">${short(o.id)}</span></td></tr>`).join("")+ (rows.length>shown.length?`<tr><td colspan="5" class="muted">… ${rows.length-shown.length} more — pick a niche cell above to jump to one</td></tr>`:"");
+  $("#orgRows").querySelectorAll("[data-org]").forEach(el=>el.onclick=()=>selectInstrument(el.dataset.org));
+}
+
+/* ---------- instrument detail ---------- */
+function selectInstrument(id){
+  state.selOrg=id;state.selEval=null;stop();
+  renderArchive();renderOrgs();
+  const o=qOne("SELECT * FROM organisms WHERE id=?",[id]);
+  const b=state.bestByOrg[id];
+  let genome={};try{genome=JSON.parse(o.genome||"{}")}catch(_){}
+  let traits={};try{traits=JSON.parse(o.traits||"{}")}catch(_){}
+  const src=genome.source||genome.prompt||"";
+  $("#detTitle").textContent=`${short(id)} · ${o.niche||"no niche"} · ${b!=null?fmt(b.score):"unpainted"}`;
+  $("#detBody").innerHTML=`
+    <dl class="kv"><dt>operator</dt><dd><span class="tag">${esc(o.mutator||"seed")}</span></dd>
+    ${o.parent_id?`<dt>parent</dt><dd class="mono">${short(o.parent_id)}${o.parent2_id?" + "+short(o.parent2_id):""}</dd>`:""}
+    <dt>traits</dt><dd class="muted">${esc(Object.entries(traits).filter(([k])=>k!=="wanted_niche"&&k!=="tools").map(([k,v])=>`${k}: ${typeof v==="number"?+v.toFixed(3):v}`).join(" · "))}</dd>
+    ${o.summary?`<dt>summary</dt><dd>${esc(o.summary)}</dd>`:""}</dl>
+    <div class="imgs" style="margin:8px 0">${o.sheet?`<figure><img src="${esc(artifactURL(o.sheet)||"")}"><figcaption>demo sheet</figcaption></figure>`:""}
+    ${b?.painting?`<figure><img src="${esc(artifactURL(b.painting)||"")}"><figcaption>best painting · ${fmt(b.score)}</figcaption></figure>`:""}</div>
+    <details><summary>instrument source (${(src.length/1024).toFixed(1)} KB)</summary><pre>${esc(src.slice(0,12000))}</pre></details>`;
+  $("#detSec").hidden=false;
+  // paintings of this instrument
+  const evs=qAll("SELECT id,reason,score,viable,session_id,artifacts,ended FROM evaluations WHERE organism_id=? ORDER BY ended DESC",[id]);
+  $("#paintList").innerHTML=evs.map(e=>{let a={};try{a=JSON.parse(e.artifacts||"{}")}catch(_){}
+    return `<figure style="margin:0;cursor:pointer" data-ev="${esc(e.id)}"><img src="${esc(artifactURL(a.painting)||"")}" style="width:150px"><figcaption>${e.viable?fmt(e.score):"not viable"} · ${esc(e.reason||"")} · <span class="mono">${short(e.session_id)}</span></figcaption></figure>`;}).join("")||`<span class="muted">No paintings yet.</span>`;
+  $("#paintSec").hidden=false;
+  $("#paintList").querySelectorAll("[data-ev]").forEach(el=>el.onclick=()=>selectPainting(el.dataset.ev));
+  const first=evs.find(e=>e.viable&&e.score!=null);
+  if(first)selectPainting(first.id,true);
+  else{$("#playSec").hidden=true;}
+  document.getElementById("detSec").scrollIntoView({behavior:"smooth",block:"nearest"});
+}
+
+/* ---------- replay ---------- */
+function selectPainting(evalId,auto){
+  state.selEval=evalId;stop();
+  const e=qOne("SELECT * FROM evaluations WHERE id=?",[evalId]);
+  let art={};try{art=JSON.parse(e.artifacts||"{}")}catch(_){}
+  state.eval={...e,art};
+  state.session=qOne("SELECT id,purpose,model,status FROM sessions WHERE id=?",[e.session_id])||{id:e.session_id};
+  const raw=qAll("SELECT idx,data,snapshot FROM strokes WHERE session_id=? ORDER BY idx",[e.session_id]);
+  state.strokes=raw.map(r=>{let d={};try{d=JSON.parse(r.data)}catch(_){}return{...d,snap:r.snapshot,idx:r.idx};});
+  if(!state.strokes.length){$("#playSec").hidden=false;$("#playMeta").textContent="No strokes logged for this session.";return;}
+  // frames: blank + snapshots + final
+  const frames=[{at:0,name:null,url:null,label:"blank canvas"}];
+  const seen=new Set();
+  for(const s of state.strokes)if(s.snap&&!seen.has(s.snap)){seen.add(s.snap);frames.push({at:s.idx??s.i,name:s.snap,url:artifactURL(s.snap),label:`after stroke ${s.idx??s.i}`});}
+  if(art.painting&&!seen.has(art.painting))frames.push({at:state.strokes.length,name:art.painting,url:artifactURL(art.painting),label:"final painting"});
+  state.frames=frames;
+  // map each stroke pos -> frame index
+  state.frameByStroke=state.strokes.map(s=>{let f=0;frames.forEach((fr,i)=>{if(fr.at<=(s.idx??s.i))f=i;});return f;});
+  state.pos=0;
+  renderPlayer();renderStrokes();renderFilm();renderSpark();
+  $("#playSec").hidden=false;
+  const org=state.orgs.find(o=>o.id===state.selOrg);
+  $("#playTitle").textContent=`Painting replay — ${org?org.niche+" · ":""}${fmt(e.score)} · ${state.strokes.length} calls`;
+  $("#playMeta").innerHTML=`session <span class="mono">${short(e.session_id)}</span> · ${esc(state.session?.purpose||"paint")} · ${esc(state.session?.model||"")} · ${esc(e.reason||"")} · instrument <span class="mono">${short(state.selOrg)}</span>`;
+  // target from pair
+  loadTarget(art.pair);
+  seek(0);
+  if(!auto)document.getElementById("playSec").scrollIntoView({behavior:"smooth"});
+}
+async function loadTarget(pairName){
+  const img=$("#target");img.removeAttribute("src");
+  if(!pairName)return;
+  const u=artifactURL(pairName);if(!u)return;
+  const im=new Image();im.onload=()=>{
+    try{
+      const half=Math.round((im.naturalWidth-4)/2);
+      const c=document.createElement("canvas");c.width=half;c.height=im.naturalHeight;
+      c.getContext("2d").drawImage(im,0,0,half,im.naturalHeight,0,0,half,im.naturalHeight);
+      img.src=c.toDataURL("image/png");
+    }catch(e){img.src=u;}
+  };im.onerror=()=>{img.src=u;};im.src=u;
+}
+function curFrame(){const f=state.frameByStroke[Math.min(state.pos,state.strokes.length-1)]??0;return state.frames[f];}
+function strokeXY(a){
+  if(!a)return null;
+  if(typeof a.x==="number"&&typeof a.y==="number")return[a.x,a.y];
+  if(Array.isArray(a.points)&&a.points[0])return a.points[0];
+  if(Array.isArray(a.offsets)&&a.offsets[0])return null;
+  return null;
+}
+function renderPlayer(){
+  $("#scrub").max=Math.max(0,state.strokes.length-1);
+  $("#bPlay").textContent=state.playing?"⏸ pause":"▶ play";
+}
+function seek(p){
+  state.pos=Math.max(0,Math.min(state.strokes.length-1,p));
+  const s=state.strokes[state.pos],fr=curFrame();
+  const img=$("#frame");
+  if(fr.url){if(img.dataset.f!==fr.url){img.src=fr.url;img.dataset.f=fr.url;}}
+  else{img.removeAttribute("src");img.dataset.f="";drawBlank(img);}
+  $("#scrub").value=state.pos;
+  const since=state.pos-(fr.at||0);
+  $("#frameCap").textContent=`stroke ${state.pos+1}/${state.strokes.length} · showing ${fr.label}${since>0?` · +${since} stroke${since>1?"s":""} since this snapshot (params below)`:fr.at?" · exact":""}`;
+  // marker + color
+  const m=$("#mark");m.innerHTML="";
+  const xy=strokeXY(s?.args);
+  if(xy&&fr.url){const W=128,H=128;const[x,y]=xy;
+    if(x>=-W&&x<=2*W&&y>=-H&&y<=2*H){const d=document.createElement("div");d.className="dotmark";
+      d.style.left=(x/W*100)+"%";d.style.top=(y/H*100)+"%";
+      const col=s.args?.color;if(typeof col==="string"&&/^#/.test(col))d.style.color=col;else d.style.color="#2f4b8f";
+      if(typeof col==="string"&&/^#/.test(col))d.style.background=col;
+      m.appendChild(d);}}
+  const col=s?.args?.color;
+  $("#strokeInfo").innerHTML=`<b>#${state.pos+1} ${esc(s?.tool||"")}</b> ${s?.status==="rejected"?'<span class="tag">rejected</span>':""} ${s?.snap?'<span class="tag">snapshot</span>':""}
+    ${typeof col==="string"?`<span class="swatch" style="background:${esc(col)}"></span><span class="mono">${esc(col)}</span>`:""}
+    <span class="mono muted">${esc(compactArgs(s?.args).slice(0,180))}</span><br>
+    <span class="${(s?.score_after-s?.score_before)>=0?"ok":"err"}">score ${fmt(s?.score_after)} (${(s?.score_after-s?.score_before)>=0?"+":""}${fmt((s?.score_after??0)-(s?.score_before??0),4)})</span>
+    <span class="muted"> · pixel err ${s?.error_after} (${(s?.error_after-s?.error_before)>=0?"+":""}${fmt((s?.error_after??0)-(s?.error_before??0),1)}) · area ${s?.area??"–"}${s?.dry?" · ran dry":""}</span>
+    ${s?.note?`<br><span class="muted">“${esc(s.note)}”</span>`:""}`;
+  // highlight row + spark
+  document.querySelectorAll("#strokeRows tr").forEach((tr,i)=>tr.classList.toggle("sel",i===state.pos));
+  const cur=document.querySelector("#strokeRows tr.sel");if(cur)cur.scrollIntoView({block:"nearest"});
+  updateSpark();
+}
+function drawBlank(img){
+  const c=document.createElement("canvas");c.width=c.height=128;
+  const g=c.getContext("2d");g.fillStyle="#f0e8d6";g.fillRect(0,0,128,128);
+  img.src=c.toDataURL("image/png");
+}
+function renderStrokes(){
+  $("#strokeRows").innerHTML=state.strokes.map((s,i)=>{
+    const d=(s.score_after??0)-(s.score_before??0);
+    const col=s.args?.color;
+    return `<tr class="clickable" data-i="${i}"><td class="num">${i+1}</td>
+      <td><b>${esc(s.tool||"")}</b>${s.snap?` <span class="tag">◉</span>`:""}${s.status==="rejected"?` <span class="tag">rejected</span>`:""}</td>
+      <td class="mono muted">${typeof col==="string"?`<span class="swatch" style="background:${esc(col)}"></span>`:""}${esc(compactArgs(s.args).slice(0,120))}</td>
+      <td class="num ${d>=0?"ok":"err"}">${(d>=0?"+":"")}${fmt(d,3)}</td><td></td></tr>`;}).join("");
+  $("#strokeRows").querySelectorAll("tr").forEach(tr=>tr.onclick=()=>{stop();seek(+tr.dataset.i);});
+}
+function renderFilm(){
+  $("#film").innerHTML=state.frames.map((f,i)=>f.url?`<img data-f="${i}" src="${esc(f.url)}" title="${esc(f.label)}" loading="lazy">`:"").join("");
+  $("#film").querySelectorAll("img").forEach(im=>im.onclick=()=>{stop();const at=state.frames[+im.dataset.f].at;seek(at<=0?0:Math.max(0,at-1));});
+}
+function renderSpark(){
+  const pts=state.strokes.map(s=>s.score_after).filter(v=>v!=null);
+  if(!pts.length){$("#spark").innerHTML="";return;}
+  const W=560,H=64,P=6,lo=Math.min(...pts),hi=Math.max(...pts),rg=Math.max(1e-6,hi-lo);
+  const X=i=>P+i/(pts.length-1||1)*(W-2*P),Y=v=>H-P-(v-lo)/rg*(H-2*P);
+  const d=pts.map((v,i)=>(i?"L":"M")+X(i).toFixed(1)+","+Y(v).toFixed(1)).join("");
+  $("#spark").innerHTML=`<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:64px;display:block;background:var(--bg);border:1px solid var(--line);border-radius:6px">
+    <path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.5"/><circle id="sparkDot" r="3.5" fill="var(--accent)"/></svg>
+    <div class="hint">critic score after each call · ${fmt(lo)} → ${fmt(hi)}</div>`;
+  updateSpark();
+}
+function updateSpark(){
+  const dot=document.getElementById("sparkDot");if(!dot)return;
+  const pts=state.strokes.map(s=>s.score_after).filter(v=>v!=null);if(!pts.length)return;
+  const W=560,H=64,P=6,lo=Math.min(...pts),hi=Math.max(...pts),rg=Math.max(1e-6,hi-lo);
+  const i=Math.min(state.pos,pts.length-1);
+  dot.setAttribute("cx",P+i/(pts.length-1||1)*(W-2*P));dot.setAttribute("cy",H-P-(pts[i]-lo)/rg*(H-2*P));
+  document.querySelectorAll("#film img").forEach((im,k)=>im.classList.toggle("cur",k===(state.frameByStroke[state.pos]??0)));
+}
+function tick(t){
+  if(!state.playing)return;
+  const dt=(t-state.lastT)/1000;state.lastT=t;
+  state._frac=(state._frac||0)+dt*+$("#speed").value;
+  let advanced=false;
+  while(state._frac>=1){state._frac-=1;
+    if(state.pos>=state.strokes.length-1){if($("#loop").checked){seek(0);}else{stop();renderPlayer();return;} }
+    else seek(state.pos+1);
+    advanced=true;
+  }
+  requestAnimationFrame(tick);
+}
+function play(){if(!state.strokes.length)return;state.playing=true;state._frac=0;state.lastT=performance.now();renderPlayer();requestAnimationFrame(tick);}
+function stop(){state.playing=false;renderPlayer();}
+
+/* ---------- wire up ---------- */
+$("#file").addEventListener("change",e=>loadFile(e.target.files[0]).catch(err=>setStatus(String(err.message||err),"err")));
+$("#loadUrl").onclick=()=>loadURL($("#url").value.trim()).catch(err=>setStatus(String(err.message||err),"err"));
+$("#runSel").addEventListener("change",e=>selectRun(e.target.value));
+document.addEventListener("dragover",e=>{e.preventDefault();$("#drop").classList.add("over");});
+document.addEventListener("dragleave",()=>$("#drop").classList.remove("over"));
+document.addEventListener("drop",e=>{e.preventDefault();$("#drop").classList.remove("over");const f=e.dataTransfer.files?.[0];if(f)loadFile(f).catch(err=>setStatus(String(err.message||err),"err"));});
+$("#bPlay").onclick=()=>state.playing?stop():play();
+$("#bStart").onclick=()=>{stop();seek(0);};
+$("#bEnd").onclick=()=>{stop();seek(state.strokes.length-1);};
+$("#bPrev").onclick=()=>{stop();seek(state.pos-1);};
+$("#bNext").onclick=()=>{stop();seek(state.pos+1);};
+$("#scrub").addEventListener("input",e=>{stop();seek(+e.target.value);});
+document.addEventListener("keydown",e=>{
+  if(!state.strokes.length||$("#playSec").hidden)return;
+  if(e.target.matches("input,select,textarea"))return;
+  if(e.code==="Space"){e.preventDefault();state.playing?stop():play();}
+  if(e.key==="ArrowLeft"){stop();seek(state.pos-1);}
+  if(e.key==="ArrowRight"){stop();seek(state.pos+1);}
+});
+ensureSQL().then(()=>{
+  const u=new URLSearchParams(location.search).get("db");
+  if(u){$("#url").value=u;loadURL(u).catch(err=>setStatus(String(err.message||err),"err"));}
+}).catch(err=>setStatus("could not load sql.js: "+err.message,"err"));
+</script>
+</body>
+</html>

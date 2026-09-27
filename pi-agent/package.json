@@ -1,0 +1,11 @@
+{
+  "name": "conveyor-pi-agent",
+  "version": "1.0.0",
+  "description": "Pi agent sidecar for conveyor: a drop-in for claude -p",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.85.1",
+    "@earendil-works/pi-ai": "^0.85.1"
+  }
+}

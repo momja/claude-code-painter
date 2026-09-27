@@ -1,0 +1,830 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>conveyor</title>
+<style>
+:root {
+  --bg: #f4efe6; --surface: #fbf8f2; --line: #ddd4c4; --ink: #1f2328; --muted: #6a6e75; --faint: #9a9da2;
+  --accent: #2f4b8f; --good: #2f7d4f; --bad: #b3401a; --warn: #a86a0c; --code: #efe8db; --shadow: 0 1px 2px rgba(40,30,10,.06);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #15171b; --surface: #1d2025; --line: #30343b; --ink: #e7e4dd; --muted: #a0a3a8; --faint: #6f737a;
+    --accent: #8fa9e8; --good: #6cc08f; --bad: #ec8a64; --warn: #e0b060; --code: #23262c; --shadow: none; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+a { color: var(--accent); text-decoration: none; cursor: pointer; }
+a:hover { text-decoration: underline; }
+code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+pre { background: var(--code); padding: 10px 12px; border-radius: 6px; overflow-x: auto; margin: 6px 0; white-space: pre-wrap; word-break: break-word; }
+header { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px;
+  padding: 10px 20px; background: var(--surface); border-bottom: 1px solid var(--line); }
+header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+select { font: inherit; padding: 3px 6px; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; max-width: 46ch; }
+.pill { display: inline-flex; gap: 6px; align-items: baseline; padding: 2px 9px; border: 1px solid var(--line); border-radius: 99px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.pill b { color: var(--ink); font-weight: 600; }
+.pill.live b::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--good); animation: pulse 1.6s infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+main { padding: 16px 20px 60px; max-width: 1500px; margin: 0 auto; display: grid; gap: 18px; }
+section { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; box-shadow: var(--shadow); min-width: 0; }
+section > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+.row { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+.muted { color: var(--muted); } .faint { color: var(--faint); } .good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+.alarms { display: grid; gap: 6px; }
+.alarm { padding: 7px 12px; border-radius: 7px; border-left: 3px solid var(--warn); background: var(--surface); }
+.alarm.bad { border-color: var(--bad); } .alarm.info { border-color: var(--accent); }
+.node { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 14px; align-items: start; }
+.node h3 { margin: 0 0 4px; font-size: 17px; }
+.node img { width: 100%; border-radius: 6px; border: 1px solid var(--line); image-rendering: pixelated; background: #fff; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; font-size: 13px; margin-top: 8px; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; }
+.status { font-size: 12px; padding: 1px 7px; border-radius: 99px; background: var(--code); color: var(--muted); }
+.status.evolving, .status.rescoring { color: var(--good); }
+.archive { display: grid; grid-template-columns: 90px repeat(6, minmax(0, 1fr)); gap: 6px; align-items: stretch; }
+.archive .head { font-size: 11.5px; color: var(--muted); text-align: center; align-self: end; }
+.archive .side { font-size: 12px; color: var(--muted); align-self: center; }
+.cell { border: 1px solid var(--line); border-radius: 7px; padding: 5px; min-height: 92px; font-size: 12px; cursor: pointer; background: var(--bg); display: flex; flex-direction: column; gap: 3px; }
+.cell.empty { border-style: dashed; cursor: default; color: var(--faint); justify-content: center; align-items: center; text-align: center; }
+.cell img { width: 100%; border-radius: 4px; image-rendering: pixelated; background: #fff; }
+.cell:hover:not(.empty) { border-color: var(--accent); }
+.live-list { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); }
+.live-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); font-size: 13px; min-width: 0; }
+.live-card .ev { margin-top: 5px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.clickable:hover { background: var(--bg); cursor: pointer; }
+.scroll { overflow-x: auto; }
+.tag { display: inline-block; font-size: 11.5px; padding: 0 6px; border-radius: 4px; background: var(--code); color: var(--muted); white-space: nowrap; }
+.chart svg { width: 100%; height: 240px; display: block; }
+.chart .legend { font-size: 12px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+#drawer { position: fixed; inset: 0 0 0 auto; width: min(1100px, 96vw); background: var(--surface); border-left: 1px solid var(--line);
+  box-shadow: -8px 0 30px rgba(0,0,0,.18); transform: translateX(105%); transition: transform .2s ease; z-index: 20; display: flex; flex-direction: column; }
+#drawer.open { transform: none; }
+#drawer .bar { display: flex; gap: 10px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+#drawer .bar .title { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#drawer .body { overflow-y: auto; padding: 14px 18px 60px; display: grid; gap: 14px; align-content: start; }
+button { font: inherit; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+button.on { border-color: var(--accent); color: var(--accent); }
+.imgs { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; }
+.imgs img { max-width: min(100%, 460px); border-radius: 6px; border: 1px solid var(--line); image-rendering: pixelated; background: #fff; }
+.imgs figure { margin: 0; } .imgs figcaption { font-size: 12px; color: var(--muted); }
+.event { border-left: 2px solid var(--line); padding: 3px 0 3px 12px; margin: 2px 0; font-size: 13px; }
+.event.thinking { color: var(--muted); font-style: italic; border-color: var(--faint); }
+.event.text { border-color: var(--accent); }
+.event.call { border-color: var(--good); }
+.event.call.err { border-color: var(--bad); }
+.event.meta { border-color: transparent; color: var(--faint); font-size: 12px; }
+.call-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.call-head .name { font-weight: 600; }
+.call-args { color: var(--muted); overflow-wrap: anywhere; }
+.delta-neg { color: var(--good); } .delta-pos { color: var(--bad); }
+.diff .add { background: rgba(47,125,79,.16); display: block; } .diff .del { background: rgba(179,64,26,.14); display: block; text-decoration: line-through; text-decoration-color: rgba(179,64,26,.45); }
+.diff .ctx { display: block; }
+details > summary { cursor: pointer; color: var(--muted); }
+.replay { display: grid; gap: 6px; max-width: 400px; }
+.replay input { width: 100%; }
+.eval { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); }
+.note { white-space: pre-wrap; background: var(--code); border-radius: 6px; padding: 8px 10px; font-size: 13px; }
+.empty-state { color: var(--muted); padding: 30px 0; text-align: center; }
+[data-slot] { display: contents; }
+/* lineage: one row per organism, a git-style graph on the left, the same-size paintings beside it */
+.op-seed { --op: var(--ink); } .op-refine { --op: #2f4b8f; } .op-invent { --op: #b3401a; } .op-recombine { --op: #2f7d4f; }
+.op-strategy { --op: #7b4fa6; } .op-jitter { --op: #8a6d3b; } .op-other { --op: var(--muted); }
+@media (prefers-color-scheme: dark) {
+  .op-refine { --op: #8fa9e8; } .op-invent { --op: #ec8a64; } .op-recombine { --op: #6cc08f; } .op-strategy { --op: #c3a0ea; } .op-jitter { --op: #c9a66b; }
+}
+.optag { color: var(--op); font-weight: 600; }
+.lineage-bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: -2px 0 12px; font-size: 12.5px; }
+.lineage-bar input { font: inherit; padding: 3px 8px; width: min(260px, 100%); border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); }
+.lineage-bar .legend { display: flex; gap: 12px; flex-wrap: wrap; color: var(--muted); }
+.lineage-bar .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--op); margin-right: 4px; vertical-align: middle; }
+.lineage { --gw: 40px; overflow-x: auto; }
+.lhead, .lrow { display: grid; grid-template-columns: var(--gw) 64px 176px 172px minmax(220px, 1fr) 40px; column-gap: 12px; align-items: center; }
+.lineage.no-sheet .lhead, .lineage.no-sheet .lrow { grid-template-columns: var(--gw) 64px 172px minmax(220px, 1fr) 40px; }
+.lhead { font-size: 11.5px; color: var(--muted); padding-bottom: 6px; align-items: end; }
+.lbody { position: relative; }
+.lbody svg.lgraph { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+.lrow { height: 76px; cursor: pointer; border-radius: 6px; }
+.lrow:hover { background: var(--bg); }
+.lthumb { width: 64px; height: 64px; object-fit: contain; image-rendering: pixelated; border-radius: 3px; background: #fff; display: block; }
+.lthumb.none { background: transparent; border: 1px dashed var(--line); display: flex; align-items: center; justify-content: center; text-align: center; font-size: 10.5px; line-height: 1.2; color: var(--faint); }
+.lsheet { height: 64px; width: 176px; object-fit: contain; object-position: left; border-radius: 3px; display: block; }
+.lscore { display: flex; align-items: center; align-self: stretch; gap: 6px; }
+.lscore .num { width: 52px; text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; line-height: 1.25; }
+.lscore .num .d { font-size: 11.5px; }
+.lscore svg { width: 114px; height: 100%; display: block; overflow: visible; }
+.strip .ref { stroke: var(--ink); stroke-opacity: .28; stroke-dasharray: 2 3; }
+.strip .up { stroke: var(--good); stroke-width: 2; } .strip .down { stroke: var(--bad); stroke-width: 2; }
+.strip .ptick { stroke: var(--muted); stroke-width: 1.5; }
+.strip .sdot { fill: var(--op); }
+.ltext { min-width: 0; font-size: 12.5px; }
+.lmeta { display: flex; gap: 7px; align-items: center; white-space: nowrap; overflow: hidden; }
+.lsum { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; margin-top: 2px; }
+.lnow { color: var(--good); } .lnow::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 4px; border-radius: 50%; background: var(--good); animation: pulse 1.6s infinite; vertical-align: middle; }
+.lgraph .edge { fill: none; stroke: var(--faint); stroke-width: 1.5; }
+.lgraph .edge.trunk { stroke: var(--ink); stroke-width: 2.2; }
+.lgraph .edge.merge { stroke-dasharray: 4 3; }
+.lgraph .ldot { fill: var(--op); stroke: var(--surface); stroke-width: 1.5; }
+.lgraph .ldot.open { fill: var(--surface); stroke: var(--op); stroke-width: 1.8; }
+.lgraph .ldot.dead { fill: var(--surface); stroke: var(--bad); stroke-width: 1.8; }
+.lgraph .ring { fill: none; stroke: var(--ink); stroke-width: 1.5; }
+.niche-glyph rect { fill: var(--line); } .niche-glyph rect.from { fill: var(--faint); } .niche-glyph rect.at { fill: var(--op); }
+.niche-glyph rect.asked { fill: none; stroke: var(--warn); stroke-width: 1.2; }
+.lineage.focusing .lrow:not(.in) { opacity: .28; }
+.lineage.focusing .edge:not(.in), .lineage.focusing .ldot:not(.in), .lineage.focusing .ring:not(.in) { opacity: .15; }
+.lineage.focusing .edge.in { stroke: var(--accent); stroke-width: 2.4; }
+.lrow.dim { opacity: .28; }
+/* the ancestry strip in the drawer: the same small multiples, left to right from the seed */
+.anc-strip { display: flex; flex-wrap: wrap; gap: 4px; align-items: flex-start; margin-top: 6px; }
+.anc { display: grid; gap: 1px; width: 92px; font-size: 11.5px; color: var(--ink); padding: 3px; border-radius: 6px; border: 1px solid transparent; }
+.anc:hover { text-decoration: none; border-color: var(--line); }
+.anc.self { border-color: var(--accent); }
+.anc .lthumb { width: 84px; height: 84px; }
+.anc-arrow { align-self: center; color: var(--faint); padding-top: 0; margin-top: -30px; font-size: 13px; }
+@media (max-width: 900px) {
+  .lhead, .lrow, .lineage.no-sheet .lhead, .lineage.no-sheet .lrow { grid-template-columns: var(--gw) 64px 150px minmax(160px, 1fr); }
+  .lsheetcell, .lage { display: none; }
+  .lscore svg { width: 92px; }
+}
+@media (max-width: 760px) {
+  .node { grid-template-columns: 1fr; }
+  .archive { grid-template-columns: 60px repeat(3, minmax(0, 1fr)); }
+  .archive .wide-only { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>conveyor</h1>
+  <select id="run"></select>
+  <span id="pills" style="display:flex;flex-wrap:wrap;gap:8px"></span>
+</header>
+<main id="main"><div class="empty-state">Loading…</div></main>
+<aside id="drawer" aria-hidden="true">
+  <div class="bar"><span class="title" id="drawer-title"></span><button id="drawer-close">Close</button></div>
+  <div class="body" id="drawer-body"></div>
+</aside>
+<script>
+"use strict";
+const $ = (sel, el = document) => el.querySelector(sel);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const img = (name, cls = "", alt = "") => name ? `<img src="/artifacts/${esc(name)}" class="${cls}" alt="${esc(alt)}" loading="lazy">` : "";
+const fmt = (x, d = 3) => x == null || Number.isNaN(x) ? "–" : Number(x).toFixed(d);
+const money = (x) => x == null ? "–" : "$" + (x > 0 && x < 0.1 ? Number(x).toFixed(4) : Number(x).toFixed(2));
+const ago = (ts) => { if (!ts) return "–"; const s = Math.max(0, Date.now() / 1000 - ts); return s < 90 ? `${s.toFixed(0)}s` : s < 5400 ? `${(s / 60).toFixed(0)}m` : `${(s / 3600).toFixed(1)}h`; };
+const dur = (a, b) => { if (!a) return "–"; const s = (b || Date.now() / 1000) - a; return s < 90 ? `${s.toFixed(0)}s` : `${(s / 60).toFixed(1)}m`; };
+const short = (id) => id ? String(id).slice(0, 6) : "–";
+const NODE_COLORS = { instrument: "#2f4b8f", painter: "#b3401a" };
+async function get(url) { const r = await fetch(url); if (!r.ok) throw new Error(`${r.status} ${url}`); return r.json(); }
+
+let state = { run: null, overview: null, timer: null, drawer: null, drawerTimer: null, slots: {}, orgs: [],
+  lineage: { node: "instrument", newest: true, filter: "", focus: null }, layout: null, targets: {} };
+
+// ---- runs --------------------------------------------------------------------------------------------------
+async function loadRuns() {
+  const runs = await get("/api/runs");
+  const sel = $("#run");
+  const want = new URLSearchParams(location.search).get("run");
+  sel.innerHTML = runs.map((r) => `<option value="${esc(r.id)}">${esc(r.name)} · ${new Date(r.started * 1000).toLocaleString()} · ${r.n_organisms} organisms${r.finished ? "" : " · running"}</option>`).join("");
+  if (!runs.length) { $("#main").innerHTML = `<div class="empty-state">No runs in this database yet.</div>`; return; }
+  state.run = runs.find((r) => r.id === want)?.id || runs[0].id;
+  sel.value = state.run;
+  sel.onchange = () => { state.run = sel.value; history.replaceState(null, "", `?run=${state.run}${location.hash}`); refresh(); };
+  await refresh();  // the drawer's ancestry reads the organisms this loads
+}
+
+async function refresh() {
+  clearTimeout(state.timer);
+  try {
+    const [ov, hist, muts, orgs] = await Promise.all([
+      get(`/api/runs/${state.run}`), get(`/api/runs/${state.run}/history`),
+      get(`/api/runs/${state.run}/mutators`), get(`/api/runs/${state.run}/organisms`),
+    ]);
+    state.overview = ov;
+    render(ov, hist, muts, orgs);
+    if (!ov.finished) state.timer = setTimeout(refresh, 3000);
+  } catch (e) {
+    $("#main").innerHTML = `<div class="empty-state">Couldn't load the run: ${esc(e.message)}</div>`;
+    state.timer = setTimeout(refresh, 5000);
+  }
+}
+
+function pills(ov) {
+  const p = [];
+  const running = !ov.finished;
+  const status = !running ? "finished" : ov.stopping ? "stopping" : ov.waiting && !ov.spend.running ? "waiting" : "running";
+  p.push(`<span class="pill ${running && ov.spend.running ? "live" : ""}"><b>${status}</b></span>`);
+  if (running && !ov.stopping && ov.waiting) {
+    const until = new Date(ov.waiting.until * 1000);
+    const day = until.toDateString() === new Date().toDateString() ? "" : until.toLocaleDateString([], {weekday: "short"}) + " ";
+    p.push(`<span class="pill" title="${esc(ov.waiting.reason)}">resumes <b>${day}${until.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}</b></span>`);
+  }
+  if (ov.cycle) p.push(`<span class="pill">cycle <b>${ov.cycle.cycle + 1}/${ov.cycle.of}</b></span>`);
+  const budget = ov.spend.budget ? ` of ${money(ov.spend.budget)}` : "";
+  p.push(`<span class="pill" title="List price. On a subscription this measures rate-limit use, not a bill.">spend <b>${money(ov.spend.cost)}</b>${budget}</span>`);
+  const extra = [ov.spend.running ? `${ov.spend.running} running` : "", ov.spend.errors ? `<span class="bad">${ov.spend.errors} failed</span>` : ""].filter(Boolean).join(", ");
+  p.push(`<span class="pill">sessions <b>${ov.spend.sessions}</b>${extra ? `<span>(${extra})</span>` : ""}</span>`);
+  const rl = ov.rate_limit;
+  if (rl && rl.status) {
+    const windows = Object.entries(rl.unifiedWindows || {}).map(([k, w]) => `${k.replace("_", "-")} ${Math.round((w.utilization || 0) * 100)}%`).join(", ");
+    p.push(`<span class="pill" title="Claude Code rate-limit windows">limit <b class="${rl.status === "rejected" ? "bad" : ""}">${esc(windows || rl.status)}</b></span>`);
+  }
+  if (ov.finished?.reason || ov.stopping?.reason) p.push(`<span class="pill">${esc(ov.finished?.reason || ov.stopping?.reason)}</span>`);
+  $("#pills").innerHTML = p.join("");
+}
+
+// ---- main view ---------------------------------------------------------------------------------------------
+// Each section is patched only when its HTML changes, so images don't reload and the lineage keeps its hover
+// state between refreshes.
+const SLOTS = ["alarms", "nodes", "archive", "live", "lineage", "chart", "mutators"];
+function render(ov, hist, muts, orgs) {
+  pills(ov);
+  state.orgs = orgs;
+  const html = {
+    alarms: ov.alarms.length ? `<div class="alarms">${ov.alarms.map((a) => `<div class="alarm ${a.level}">${esc(a.text)}</div>`).join("")}</div>` : "",
+    nodes: ov.nodes.length ? `<div class="row">${ov.nodes.map(nodeCard).join("")}</div>` : "",
+    archive: ov.archive.niches?.length ? archiveView(ov.archive) : "",
+    live: liveView(ov.live),
+    lineage: lineageView(orgs, ov),
+    chart: hist.evaluations.length ? chartView(hist, ov) : "",
+    mutators: muts.length ? mutatorView(muts) : "",
+  };
+  const main = $("#main");
+  if (!main.querySelector("[data-slot]")) { main.innerHTML = SLOTS.map((k) => `<div data-slot="${k}"></div>`).join(""); state.slots = {}; }
+  for (const k of SLOTS) patch(k, html[k]);
+  updateAges();
+}
+
+function patch(key, html) {
+  if (state.slots[key] === html) return;
+  const el = $(`#main [data-slot="${key}"]`);
+  const active = document.activeElement, keep = active && el.contains(active) && active.id ? [active.id, active.selectionStart] : null;
+  el.innerHTML = html; state.slots[key] = html;
+  bindLinks(el);
+  if (key === "lineage") bindLineage(el);
+  if (keep) { const again = document.getElementById(keep[0]); if (again) { again.focus(); again.selectionStart = again.selectionEnd = keep[1]; } }
+}
+
+function updateAges() { for (const el of document.querySelectorAll("[data-ago]")) el.textContent = ago(+el.dataset.ago); }
+
+function nodeCard(n) {
+  const c = n.champion;
+  const picture = n.name === "instrument" ? (c?.sheet || c?.painting) : (c?.painting || c?.sheet);
+  const other = n.name === "instrument" ? c?.painting : null;
+  return `<section class="node">
+    <div>${picture ? `<a data-org="${esc(c.id)}">${img(picture, "", n.name)}</a>` : `<div class="empty-state">no champion yet</div>`}
+      ${other ? `<div style="margin-top:8px"><a data-org="${esc(c.id)}">${img(other, "", "painting")}</a></div>` : ""}</div>
+    <div>
+      <h3>${esc(n.name)} <span class="status ${esc(n.status)}">${esc(n.fixed ? "fixed" : n.status)}</span></h3>
+      <div class="muted" style="font-size:13px">${esc(n.description)}</div>
+      <dl class="kv">
+        <dt>champion</dt><dd>${c ? `<a data-org="${esc(c.id)}">${short(c.id)}</a> · <b>${fmt(c.score)}</b>${c.samples > 1 ? ` <span class="muted" title="${esc((c.scores || []).map((v) => fmt(v)).join(", "))}">mean of ${c.samples} paintings</span>` : ""}` : "–"}</dd>
+        ${c?.niche ? `<dt>niche</dt><dd><span class="tag">${esc(c.niche)}</span></dd>` : ""}
+        <dt>since</dt><dd>${c ? ago(c.since) + " ago" : "–"}</dd>
+        <dt>organisms</dt><dd>${n.organisms}</dd>
+        <dt>iterations</dt><dd>${n.iterations}</dd>
+        ${n.mutators?.length ? `<dt>mutators</dt><dd>${n.mutators.map((m) => `<span class="tag">${esc(m)}</span>`).join(" ")}</dd>` : ""}
+        ${c?.summary ? `<dt>last change</dt><dd>${esc(c.summary)}</dd>` : ""}
+      </dl>
+    </div></section>`;
+}
+
+function archiveView(a) {
+  const states = ["stateless", "stateful"], args = ["scalar", "list"], reach = ["short", "medium", "long"];
+  const filled = Object.keys(a.cells).length;
+  let html = `<section><h2>Instrument archive · ${filled} of ${a.niches.length} niches filled</h2>
+    <div class="muted" style="font-size:12.5px;margin:-4px 0 10px">Best instrument per niche. Rows: does any tool keep state between calls. Columns: does any tool take a list (a path, a set of offsets), and how far one call reaches.</div>
+    <div class="archive"><div></div>`;
+  for (const g of args) for (const r of reach) html += `<div class="head">${g} · ${r}</div>`;
+  for (const s of states) {
+    html += `<div class="side">${s}</div>`;
+    for (const g of args) for (const r of reach) {
+      const key = `${s}/${g}/${r}`, c = a.cells[key];
+      html += c ? `<div class="cell" data-org="${esc(c.id)}" title="${esc(c.summary || "")}">
+          ${img(c.painting || c.sheet)}
+          <div><b>${c.score == null ? "unpainted" : fmt(c.score)}</b> <span class="faint">${short(c.id)}${c.count > 1 ? ` · ${c.count} here` : ""}</span></div>
+          <div class="faint">${esc(c.mutator || "seed")}</div></div>`
+        : `<div class="cell empty">empty</div>`;
+    }
+  }
+  return html + `</div></section>`;
+}
+
+function liveView(live) {
+  if (!live.length) return `<section><h2>Sessions running</h2><div class="muted">None right now.</div></section>`;
+  return `<section><h2>Sessions running · ${live.length}</h2><div class="live-list">${live.map((s) => {
+    const evs = s.events.map((e) => {
+      const d = e.data;
+      if (e.kind === "thinking") return `<div class="ev faint"><i>${esc(d.text)}</i></div>`;
+      if (e.kind === "text") return `<div class="ev">${esc(d.text)}</div>`;
+      if (e.kind === "tool_use") return `<div class="ev"><b>${esc(d.name)}</b> <span class="muted mono">${esc(compactArgs(d.input, 140))}</span></div>`;
+      if (e.kind === "tool_result") return `<div class="ev ${d.is_error ? "bad" : "muted"}">→ ${esc((d.text || "").slice(0, 160))}${d.images?.length ? " [image]" : ""}</div>`;
+      return "";
+    }).join("");
+    return `<div class="live-card"><div class="call-head"><a data-session="${esc(s.id)}"><b>${esc(s.purpose)}</b></a>
+      <span class="tag">${esc(s.harness || "claude")}</span><span class="muted">${esc(s.model)}</span>
+      <span class="muted">${dur(s.started)} · ${s.tool_calls} tool calls · last event ${ago(s.last_ts)} ago</span></div>${evs || `<div class="ev faint">starting…</div>`}</div>`;
+  }).join("")}</div></section>`;
+}
+
+function chartView(hist, ov) {
+  const evs = hist.evaluations.filter((e) => e.viable && e.score != null);
+  if (!evs.length) return "";
+  const W = 1000, H = 240, P = { l: 40, r: 14, t: 12, b: 26 };
+  const t0 = Math.min(...evs.map((e) => e.ended)), t1 = Math.max(...evs.map((e) => e.ended), t0 + 1);
+  const s0 = Math.min(...evs.map((e) => e.score)), s1 = Math.max(...evs.map((e) => e.score));
+  const lo = Math.max(0, s0 - 0.02), hi = Math.min(1, s1 + 0.02) || 1;
+  const x = (t) => P.l + (t - t0) / (t1 - t0) * (W - P.l - P.r);
+  const y = (s) => H - P.b - (s - lo) / Math.max(1e-6, hi - lo) * (H - P.t - P.b);
+  let svg = "";
+  for (let k = 0; k <= 4; k++) {
+    const v = lo + (hi - lo) * k / 4;
+    svg += `<line x1="${P.l}" x2="${W - P.r}" y1="${y(v)}" y2="${y(v)}" stroke="currentColor" stroke-opacity=".12"/><text x="${P.l - 6}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="currentColor" fill-opacity=".55">${v.toFixed(2)}</text>`;
+  }
+  const nodes = [...new Set(evs.map((e) => e.node))];
+  for (const [ni, node] of nodes.entries()) {
+    const color = NODE_COLORS[node] || "#777";
+    // The champion line follows the champion's standing: the mean of its paintings since its partner last
+    // changed, as the conductor keeps it. A repeat moves it, and so does a rescore against a new partner.
+    const steps = [
+      ...hist.champions.filter((c) => c.node === node).map((c) => ({ t: c.ts, champ: c.organism_id, score: c.data.score })),
+      ...evs.filter((e) => e.node === node).map((e) => ({ t: e.ended, org: e.organism_id, score: e.score, repeat: e.reason === "confirm" })),
+    ].sort((a, b) => a.t - b.t);
+    let path = "", champ = null, last = null;
+    const latest = {}, tally = {};
+    for (const st of steps) {
+      if (st.org) {
+        const t = tally[st.org] = st.repeat && tally[st.org] ? { sum: tally[st.org].sum + st.score, n: tally[st.org].n + 1 } : { sum: st.score, n: 1 };
+        latest[st.org] = t.sum / t.n;
+      } else { champ = st.champ; if (st.score != null) latest[champ] = latest[champ] ?? st.score; }
+      const sc = champ ? latest[champ] : null;
+      if (sc == null || sc === last) continue;
+      const cx = x(Math.max(t0, Math.min(t1, st.t)));
+      path += last == null ? `M${cx},${y(sc)}` : `H${cx}V${y(sc)}`; last = sc;
+    }
+    // One painting scores both nodes, so their champion lines often coincide; dash the second so both show.
+    if (path) svg += `<path d="${path}H${x(t1)}" fill="none" stroke="${color}" stroke-width="2" stroke-opacity=".75"${ni ? ' stroke-dasharray="6 5"' : ""}/>`;
+    for (const e of evs.filter((e) => e.node === node)) {
+      const rescore = String(e.reason || "").startsWith("rescore"), repeat = e.reason === "confirm";
+      svg += `<circle cx="${x(e.ended)}" cy="${y(e.score)}" r="${rescore || repeat ? 2.6 : 4.5}" fill="${rescore ? "none" : color}" stroke="${color}" fill-opacity="${repeat ? .45 : .7}" stroke-opacity="${repeat ? .45 : 1}" data-org="${esc(e.organism_id)}" style="cursor:pointer"><title>${esc(node)} ${short(e.organism_id)} ${fmt(e.score)} · ${esc(e.mutator || "seed")} · ${esc(e.reason)}${e.niche ? " · " + esc(e.niche) : ""}</title></circle>`;
+    }
+  }
+  return `<section class="chart"><h2>Scores over time</h2><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${svg}</svg>
+    <div class="legend">${nodes.map((n) => `<span><span class="dot" style="background:${NODE_COLORS[n] || "#777"}"></span>${esc(n)}</span>`).join("")}<span>line: the champion's mean score · small: a repeat painting to confirm a challenger or the champion · hollow: rescore after the partner changed</span></div></section>`;
+}
+
+function mutatorView(muts) {
+  return `<section><h2>Mutators</h2><div class="scroll"><table><thead><tr><th>node</th><th>mutator</th><th class="num">tries</th><th class="num">errors</th>
+    <th class="num">children</th><th class="num">viable</th><th class="num">beat parent</th><th class="num">new niche</th><th class="num">hit asked niche</th><th class="num">cost</th></tr></thead><tbody>
+    ${muts.map((m) => `<tr><td>${esc(m.node)}</td><td><span class="tag">${esc(m.mutator)}</span></td><td class="num">${m.tries}</td>
+      <td class="num ${m.errors ? "bad" : ""}">${m.errors}</td><td class="num">${m.children}</td><td class="num">${m.viable}</td>
+      <td class="num">${m.compared ? `${m.beat_parent}/${m.compared}` : "–"}</td><td class="num">${m.new_niche}</td>
+      <td class="num">${m.asked_niche ? `${m.hit_niche}/${m.asked_niche}` : "–"}</td><td class="num">${money(m.cost)}</td></tr>`).join("")}
+    </tbody></table></div></section>`;
+}
+
+// ---- lineage -----------------------------------------------------------------------------------------------
+// One row per organism, oldest to newest or the reverse, with a git-style graph on the left: a dot per organism,
+// a line to its parent, a dashed line to a recombine's second parent. The champion's line of descent runs
+// straight down the first lane. Every row shows its painting at the same size and a score on a shared axis,
+// so reading down the column shows how the work changed along a branch.
+const ROW = 76, LANE = 13, GPAD = 9, SW = 114;
+const OPS = ["seed", "refine", "invent", "recombine", "strategy", "jitter"];
+const opOf = (m) => m ? String(m).split(":").pop() : "seed";
+const opClass = (m) => `op-${OPS.includes(opOf(m)) ? opOf(m) : "other"}`;
+const STATES = ["stateless", "stateful"], ARGS = ["scalar", "list"], REACH = ["short", "medium", "long"];
+
+function lineageLayout(orgs, champId) {
+  const rows = orgs.slice().sort((a, b) => a.created - b.created || (a.id < b.id ? -1 : 1));
+  const by = new Map(rows.map((o, row) => [o.id, { o, row, children: [], lane: 0 }]));
+  for (const n of by.values()) {
+    const p = by.get(n.o.parent_id), p2 = by.get(n.o.parent2_id);
+    if (p) p.children.push(n);
+    if (p2 && p2 !== p) p2.children.push(n);
+  }
+  // A parent's line runs down to its last child. Each child branches off it at its own row, and the last one, if
+  // the parent is its first parent, carries the line on. Children of one parent share its line, so an old parent
+  // that keeps getting picked costs one lane, not one per child.
+  const taken = new Set();
+  for (const n of by.values()) {
+    n.children.sort((a, b) => a.row - b.row);
+    const last = n.children[n.children.length - 1];
+    n.next = last && last.o.parent_id === n.o.id ? last : null;
+    if (n.next) taken.add(n.next);
+    n.end = last ? last.row : n.row;
+  }
+  const laneEnd = [];
+  for (const head of rows.map((o) => by.get(o.id)).filter((n) => !taken.has(n))) {
+    let tail = head;
+    while (tail.next) tail = tail.next;
+    let lane = laneEnd.findIndex((end) => end < head.row);
+    if (lane < 0) { lane = laneEnd.length; laneEnd.push(0); }
+    laneEnd[lane] = tail.end;
+    for (let n = head; n; n = n.next) n.lane = lane;
+  }
+  // The champion's ancestry through first parents, drawn heavier.
+  const lineOf = new Set();
+  for (let n = by.get(champId); n; n = by.get(n.o.parent_id)) lineOf.add(n.o.id);
+  return { rows, by, lanes: Math.max(1, laneEnd.length), lineOf, champ: champId };
+}
+
+function lineageGraph(lay, newest) {
+  const n = lay.rows.length;
+  const X = (lane) => GPAD + lane * LANE, Y = (row) => ((newest ? n - 1 - row : row) + 0.5) * ROW;
+  const edges = { merge: "", plain: "", trunk: "" };
+  let dots = "";
+  for (const p of lay.by.values()) for (const c of p.children) {
+    const xp = X(p.lane), yp = Y(p.row), xc = X(c.lane), yc = Y(c.row), s = Math.sign(yc - yp);
+    const d = xp === xc ? `M${xp},${yp}V${yc}`
+      : `M${xp},${yp}V${yc - s * ROW * .5}C${xp},${yc - s * ROW * .2} ${xc},${yc - s * ROW * .3} ${xc},${yc}`;
+    const kind = c.o.parent_id !== p.o.id ? "merge" : lay.lineOf.has(p.o.id) && lay.lineOf.has(c.o.id) ? "trunk" : "plain";
+    edges[kind] += `<path class="edge${kind === "plain" ? "" : " " + kind}" data-a="${esc(p.o.id)}" data-b="${esc(c.o.id)}" d="${d}"/>`;
+  }
+  for (const m of lay.by.values()) {
+    const o = m.o, x = X(m.lane), y = Y(m.row);
+    const kind = o.viable === 0 ? " dead" : o.score == null ? " open" : "";
+    if (o.id === lay.champ) dots += `<circle class="ring" data-id="${esc(o.id)}" cx="${x}" cy="${y}" r="8.5"/>`;
+    dots += `<circle class="ldot ${opClass(o.mutator)}${kind}" data-id="${esc(o.id)}" cx="${x}" cy="${y}" r="${o.mutator ? 4.6 : 5.5}"/>`;
+  }
+  const w = GPAD * 2 + (lay.lanes - 1) * LANE;
+  // Dashed second-parent lines go underneath, so where one shares a parent's line the solid line shows.
+  return { w, svg: `<svg class="lgraph" width="${w}" height="${n * ROW}" viewBox="0 0 ${w} ${n * ROW}"><g class="edges">${edges.merge}${edges.plain}${edges.trunk}</g><g>${dots}</g></svg>` };
+}
+
+function nicheGlyph(at, from, asked, op) {
+  const key = (s, g, r) => `${s}/${g}/${r}`;
+  let rects = "";
+  STATES.forEach((s, row) => ARGS.forEach((g, gi) => REACH.forEach((r, ri) => {
+    const k = key(s, g, r), col = gi * 3 + ri;
+    const cls = k === at ? "at" : k === from ? "from" : "";
+    rects += `<rect class="${cls}" x="${col * 7 + (gi ? 3 : 0)}" y="${row * 7}" width="6" height="6" rx="1"/>`;
+    if (asked && k === asked && k !== at) rects += `<rect class="asked" x="${col * 7 + (gi ? 3 : 0) + .5}" y="${row * 7 + .5}" width="5" height="5" rx="1"/>`;
+  })));
+  const tip = `${at || "no niche"}${from && from !== at ? ` (parent: ${from})` : ""}${asked && asked !== at ? `, asked for ${asked}` : ""}`;
+  return `<svg class="niche-glyph ${op}" width="45" height="13" viewBox="0 0 45 13"><title>${esc(tip)}</title>${rects}</svg>`;
+}
+
+function lineageView(orgs, ov) {
+  const L = state.lineage;
+  const names = ov.nodes.map((n) => n.name).filter((name) => orgs.some((o) => o.node === name));
+  if (!names.length) return "";
+  if (!names.includes(L.node)) L.node = names[0];
+  const mine = orgs.filter((o) => o.node === L.node);
+  const champ = ov.nodes.find((n) => n.name === L.node)?.champion;
+  const lay = state.layout = lineageLayout(mine, champ?.id);
+  const { w, svg } = lineageGraph(lay, L.newest);
+  const archive = ov.nodes.find((n) => n.name === L.node)?.archive;
+  const sheets = mine.some((o) => o.sheet);
+
+  const scores = mine.filter((o) => o.score != null).map((o) => o.score);
+  const lo0 = Math.min(...scores), hi0 = Math.max(...scores), pad = Math.max(0.005, (hi0 - lo0) * 0.04);
+  const lo = scores.length ? lo0 - pad : 0, hi = scores.length ? hi0 + pad : 1;
+  const sx = (v) => 5 + (v - lo) / (hi - lo) * (SW - 10);
+  const champScore = champ?.score;
+
+  const busy = {};
+  for (const s of ov.live) if (s.organism_id) (busy[s.organism_id] ||= []).push(s.purpose);
+  const pair = mine.find((o) => o.pair)?.pair || orgs.find((o) => o.pair)?.pair;
+
+  const ordered = L.newest ? lay.rows.slice().reverse() : lay.rows;
+  const rows = ordered.map((o) => {
+    const parent = lay.by.get(o.parent_id)?.o, p2 = lay.by.get(o.parent2_id)?.o;
+    const dScore = o.score != null && parent?.score != null ? o.score - parent.score : null;
+    let strip = champScore != null ? `<line class="ref" x1="${sx(champScore)}" x2="${sx(champScore)}" y1="0" y2="${ROW}"/>` : "";
+    if (dScore != null) strip += `<line class="${dScore >= 0 ? "up" : "down"}" x1="${sx(parent.score)}" x2="${sx(o.score)}" y1="${ROW / 2}" y2="${ROW / 2}"/>`
+      + `<line class="ptick" x1="${sx(parent.score)}" x2="${sx(parent.score)}" y1="${ROW / 2 - 5}" y2="${ROW / 2 + 5}"/>`;
+    if (o.score != null) strip += `<circle class="sdot ${opClass(o.mutator)}" cx="${sx(o.score)}" cy="${ROW / 2}" r="3.8"/>`;
+    const jobs = (busy[o.id] || []).map((p) => p.startsWith("paint") ? "painting now" : `child in progress${p.includes("(") ? ": " + p.slice(p.indexOf("(") + 1, -1) : ""}`);
+    const thumb = o.painting ? `<img class="lthumb" src="/artifacts/${esc(o.painting)}" loading="lazy" alt="">`
+      : `<div class="lthumb none">${o.viable === 0 ? "not viable" : jobs.includes("painting now") ? "painting…" : "not painted"}</div>`;
+    const niche = archive ? nicheGlyph(o.niche, parent?.niche, o.wanted_niche, opClass(o.mutator)) : "";
+    const moved = o.niche && parent?.niche && o.niche !== parent.niche;
+    const text = [o.id, o.node, o.niche, o.mutator || "seed", opOf(o.mutator), o.summary, o.note].join(" ").toLowerCase();
+    return `<div class="lrow" data-id="${esc(o.id)}" data-org="${esc(o.id)}" data-text="${esc(text)}">
+      <div></div>
+      <div>${thumb}</div>
+      ${sheets ? `<div class="lsheetcell">${o.sheet ? `<img class="lsheet" src="/artifacts/${esc(o.sheet)}" loading="lazy" alt="">` : ""}</div>` : ""}
+      <div class="lscore"><div class="num">${o.viable === 0 ? `<span class="bad">✗</span>` : o.score == null ? `<span class="faint">–</span>` : `<b>${fmt(o.score)}</b>`}
+          ${dScore != null ? `<div class="d ${dScore > 0 ? "good" : dScore < 0 ? "bad" : "muted"}">${dScore >= 0 ? "+" : "−"}${Math.abs(dScore).toFixed(3)}</div>` : ""}
+          ${o.samples > 1 ? `<div class="d muted" style="white-space:nowrap" title="the mean of ${o.samples} paintings: ${esc((o.scores || []).map((v) => fmt(v)).join(", "))}">avg of ${o.samples}</div>` : ""}</div>
+        <svg class="strip" viewBox="0 0 ${SW} ${ROW}" preserveAspectRatio="none">${strip}</svg></div>
+      <div class="ltext"><div class="lmeta"><span class="optag ${opClass(o.mutator)}">${esc(opOf(o.mutator))}</span>${niche}
+          ${o.niche ? `<span class="${moved ? "" : "faint"}">${esc(o.niche)}</span>` : ""}
+          ${o.wanted_niche ? (o.niche === o.wanted_niche ? `<span class="good">hit</span>` : `<span class="warn">missed ${esc(o.wanted_niche)}</span>`) : ""}
+          ${p2 ? `<span class="muted">× <a data-org="${esc(p2.id)}" class="mono">${short(p2.id)}</a></span>` : ""}
+          <span class="mono faint">${short(o.id)}</span>${jobs.map((j) => `<span class="lnow">${esc(j)}</span>`).join("")}</div>
+        <div class="lsum ${o.viable === 0 ? "bad" : ""}">${esc(o.viable === 0 ? o.note : o.summary || (o.mutator ? "" : "the seed"))}</div></div>
+      <div class="lage faint" data-ago="${o.created}"></div></div>`;
+  }).join("");
+
+  const tabs = names.map((name) => `<button data-lnode="${esc(name)}" class="${name === L.node ? "on" : ""}">${esc(name)}</button>`).join("");
+  const legend = OPS.filter((op) => mine.some((o) => opOf(o.mutator) === op))
+    .map((op) => `<span class="op-${op}"><i></i>${op}</span>`).join("");
+  return `<section><h2>Lineage · ${mine.length} ${esc(L.node)} organisms</h2>
+    <div class="lineage-bar">${tabs}<button data-lorder>${L.newest ? "newest first" : "oldest first"}</button>
+      <input id="lineage-filter" placeholder="dim all but: niche, operator, text" value="${esc(L.filter)}">
+      <span class="legend">${legend}<span>ringed: champion · thick line: its ancestry · dashed: a recombine's second parent · hollow: not painted yet · hover a row for its family</span></span></div>
+    <div class="lineage ${sheets ? "" : "no-sheet"}" style="--gw:${w}px">
+      <div class="lhead"><div></div><div>${pair ? `<img class="lthumb" data-target="${esc(pair)}" alt="target">` : ""}<div>target</div></div>
+        ${sheets ? `<div class="lsheetcell">demo sheet</div>` : ""}
+        <div><div>score, and change from parent</div>${scores.length ? `<svg width="${SW + 58}" height="26" style="display:block"><text x="${58 + sx(lo0)}" y="10" font-size="10" fill="currentColor" text-anchor="middle">${lo0.toFixed(2)}</text><text x="${58 + sx(hi0)}" y="10" font-size="10" fill="currentColor" text-anchor="middle">${hi0.toFixed(2)}</text>${champScore != null ? `<text x="${58 + sx(champScore) + (sx(champScore) > SW - 30 ? 3 : 0)}" y="23" font-size="9.5" fill="currentColor" text-anchor="${sx(champScore) > SW - 30 ? "end" : "middle"}">champion ↓</text>` : ""}</svg>` : ""}</div>
+        <div>operator${archive ? " · niche" : ""} · what changed</div><div class="lage">age</div></div>
+      <div class="lbody">${svg}${rows}</div></div></section>`;
+}
+
+function bindLineage(root) {
+  const L = state.lineage;
+  for (const b of root.querySelectorAll("[data-lnode]")) b.onclick = () => { L.node = b.dataset.lnode; L.focus = null; rerenderLineage(); };
+  const order = root.querySelector("[data-lorder]");
+  if (order) order.onclick = () => { L.newest = !L.newest; rerenderLineage(); };
+  const filter = root.querySelector("#lineage-filter");
+  if (filter) filter.oninput = () => { L.filter = filter.value; filterLineage(); };
+  const body = root.querySelector(".lbody");
+  if (body) {
+    for (const row of body.querySelectorAll(".lrow")) row.onmouseenter = () => focusLineage(row.dataset.id);
+    body.onmouseleave = () => focusLineage(null);
+  }
+  const target = root.querySelector("img[data-target]");
+  if (target) cropTarget(target);
+  filterLineage();
+  focusLineage(L.focus);
+}
+
+function rerenderLineage() {
+  if (state.overview) patch("lineage", lineageView(state.orgs, state.overview));
+  updateAges();
+}
+
+function filterLineage() {
+  const q = state.lineage.filter.trim().toLowerCase();
+  for (const row of document.querySelectorAll(".lineage .lrow")) row.classList.toggle("dim", !!q && !row.dataset.text.includes(q));
+}
+
+// Hovering a row lights up its whole family: every ancestor through both parents, every descendant.
+function focusLineage(id) {
+  const root = $(".lineage"), lay = state.layout;
+  state.lineage.focus = id && lay?.by.has(id) ? id : null;
+  if (!root) return;
+  root.classList.toggle("focusing", !!state.lineage.focus);
+  const family = new Set();
+  if (state.lineage.focus) {
+    family.add(id);
+    for (const stack = [id]; stack.length;) {
+      const m = lay.by.get(stack.pop());
+      for (const p of [m.o.parent_id, m.o.parent2_id]) if (p && lay.by.has(p) && !family.has(p)) { family.add(p); stack.push(p); }
+    }
+    for (const stack = [lay.by.get(id)]; stack.length;) {
+      for (const c of stack.pop().children) if (!family.has(c.o.id)) { family.add(c.o.id); stack.push(c); }
+    }
+  }
+  for (const el of root.querySelectorAll(".lrow, .ldot, .ring")) el.classList.toggle("in", family.has(el.dataset.id));
+  for (const el of root.querySelectorAll(".edge")) {
+    const on = family.has(el.dataset.a) && family.has(el.dataset.b);
+    el.classList.toggle("in", on);
+    if (on) el.parentNode.appendChild(el);
+  }
+}
+
+// The target isn't stored on its own; every evaluation's pair image has it on the left, a 2 px gap at scale 2,
+// then the painting.
+function cropTarget(el) {
+  const name = el.dataset.target;
+  if (state.targets[state.run]) { el.src = state.targets[state.run]; return; }
+  const im = new Image();
+  im.onload = () => {
+    const w = Math.round((im.naturalWidth - 4) / 2), c = document.createElement("canvas");
+    c.width = w; c.height = im.naturalHeight;
+    c.getContext("2d").drawImage(im, 0, 0, w, im.naturalHeight, 0, 0, w, im.naturalHeight);
+    state.targets[state.run] = c.toDataURL("image/png");
+    for (const t of document.querySelectorAll("img[data-target]")) t.src = state.targets[state.run];
+  };
+  im.src = `/artifacts/${name}`;
+}
+
+// The drawer's ancestry: the same thumbnails, left to right from the seed to this organism, then its children.
+function ancestryView(o) {
+  const by = new Map(state.orgs.map((x) => [x.id, x]));
+  const line = [];
+  for (let cur = by.get(o.id), guard = 0; cur && guard < 500; cur = by.get(cur.parent_id), guard++) line.unshift(cur);
+  if (!line.length) return "";
+  const card = (x, prev, self) => {
+    const d = prev && x.score != null && prev.score != null ? x.score - prev.score : null;
+    const p2 = x.parent2_id ? by.get(x.parent2_id) : null;
+    return `<a class="anc${self ? " self" : ""}" data-org="${esc(x.id)}">
+      ${x.painting ? `<img class="lthumb" src="/artifacts/${esc(x.painting)}" loading="lazy" alt="">` : `<div class="lthumb none">${x.viable === 0 ? "not viable" : "not painted"}</div>`}
+      <span class="optag ${opClass(x.mutator)}">${esc(opOf(x.mutator))}</span>
+      <span>${x.viable === 0 ? `<span class="bad">✗</span>` : `<b>${fmt(x.score)}</b>`}${d != null ? ` <span class="${d > 0 ? "good" : d < 0 ? "bad" : "muted"}">${d >= 0 ? "+" : "−"}${Math.abs(d).toFixed(3)}</span>` : ""}</span>
+      ${x.niche ? `<span class="faint" style="font-size:10.5px;line-height:1.2">${esc(x.niche).replaceAll("/", "/<wbr>")}</span>` : ""}
+      ${p2 ? `<span class="faint">× ${short(p2.id)}</span>` : ""}</a>`;
+  };
+  const strip = line.map((x, i) => (i ? `<span class="anc-arrow">→</span>` : "") + card(x, line[i - 1], x.id === o.id)).join("");
+  const me = by.get(o.id);
+  const kids = state.orgs.filter((x) => x.parent_id === o.id || x.parent2_id === o.id).sort((a, b) => a.created - b.created);
+  return `<div><b>Ancestry</b> <span class="muted" style="font-size:12.5px">${line.length - 1} generation${line.length === 2 ? "" : "s"} from the seed; each change is against the one before it</span>
+      <div class="anc-strip">${strip}</div></div>
+    ${kids.length ? `<div><b>Children</b> <span class="muted" style="font-size:12.5px">${kids.length}; change against this one</span><div class="anc-strip">${kids.map((k) => card(k, me, false)).join("")}</div></div>` : ""}`;
+}
+
+function compactArgs(input, max = 200) {
+  if (input == null) return "";
+  const s = typeof input === "string" ? input : Object.entries(input).map(([k, v]) => {
+    if (typeof v === "string" && v.length > 60) return `${k}=(${v.length} chars)`;
+    return `${k}=${typeof v === "number" ? +v.toFixed(2) : JSON.stringify(v)}`;
+  }).join(" ");
+  return s.length > max ? s.slice(0, max) + "…" : s;
+}
+
+function bindLinks(root) {
+  for (const el of root.querySelectorAll("[data-org]")) el.onclick = (e) => { e.stopPropagation(); openDrawer("org", el.dataset.org); };
+  for (const el of root.querySelectorAll("[data-session]")) el.onclick = (e) => { e.stopPropagation(); openDrawer("session", el.dataset.session); };
+}
+
+// ---- drawer ------------------------------------------------------------------------------------------------
+function openDrawer(kind, id, push = true) {
+  state.drawer = { kind, id };
+  if (push) history.pushState(null, "", `?run=${state.run}#${kind}=${id}`);
+  $("#drawer").classList.add("open");
+  $("#drawer").setAttribute("aria-hidden", "false");
+  $("#drawer-body").innerHTML = `<div class="muted">Loading…</div>`;
+  loadDrawer();
+}
+function closeDrawer(push = true) {
+  state.drawer = null; clearTimeout(state.drawerTimer);
+  $("#drawer").classList.remove("open"); $("#drawer").setAttribute("aria-hidden", "true");
+  if (push) history.pushState(null, "", `?run=${state.run}`);
+}
+$("#drawer-close").onclick = () => closeDrawer();
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.drawer) closeDrawer(); });
+window.addEventListener("popstate", () => routeHash());
+function routeHash() {
+  const m = location.hash.match(/^#(org|session)=([\w-]+)/);
+  if (m) openDrawer(m[1], m[2], false); else if (state.drawer) closeDrawer(false);
+}
+
+async function loadDrawer() {
+  clearTimeout(state.drawerTimer);
+  const d = state.drawer; if (!d) return;
+  const body = $("#drawer-body");
+  const scroll = body.scrollTop;
+  try {
+    if (d.kind === "org") {
+      const o = await get(`/api/organisms/${d.id}`);
+      if (state.drawer !== d) return;
+      $("#drawer-title").textContent = `${o.node} ${short(o.id)}${o.niche ? " · " + o.niche : ""}`;
+      body.innerHTML = organismDetail(o);
+      bindDiff(o);
+    } else {
+      const s = await get(`/api/sessions/${d.id}`);
+      if (state.drawer !== d) return;
+      $("#drawer-title").textContent = `${s.purpose} · ${short(s.id)}`;
+      body.innerHTML = sessionDetail(s);
+      bindReplay(s);
+      if (s.status === "running") state.drawerTimer = setTimeout(loadDrawer, 3000);
+    }
+    body.scrollTop = scroll;
+    bindLinks(body);
+  } catch (e) { body.innerHTML = `<div class="bad">${esc(e.message)}</div>`; }
+}
+
+function organismDetail(o) {
+  const g = o.genome || {};
+  const text = g.source || g.prompt || "";
+  const lang = g.source ? "python" : "text";
+  const head = `<div class="call-head"><span class="tag">${esc(o.node)}</span>${o.niche ? `<span class="tag">${esc(o.niche)}</span>` : ""}
+    <span>${o.mutator ? `made by <span class="tag">${esc(o.mutator)}</span>` : "seed"}</span>
+    ${o.parent ? `<span>from <a data-org="${esc(o.parent.id)}">${short(o.parent.id)}</a>${o.parent.niche ? ` (${esc(o.parent.niche)})` : ""}</span>` : ""}
+    ${o.parent2 ? `<span>and <a data-org="${esc(o.parent2.id)}">${short(o.parent2.id)}</a> (${esc(o.parent2.niche || "")})</span>` : ""}
+    ${o.writer ? `<span>· written in <a data-session="${esc(o.writer.id)}">session ${short(o.writer.id)}</a> (${money(o.writer.cost)})</span>` : ""}
+    <span class="muted">${new Date(o.created * 1000).toLocaleString()}</span></div>`;
+  const wanted = o.traits?.wanted_niche ? `<div>asked for <span class="tag">${esc(o.traits.wanted_niche)}</span>, landed in <span class="tag">${esc(o.niche || "–")}</span> ${o.niche === o.traits.wanted_niche ? `<span class="good">hit</span>` : `<span class="warn">miss</span>`}</div>` : "";
+  const traits = o.traits && Object.keys(o.traits).length ? `<div class="muted" style="font-size:12.5px">${Object.entries(o.traits).filter(([k]) => k !== "wanted_niche" && k !== "tools").map(([k, v]) => `${esc(k)}: <b>${esc(typeof v === "number" ? +v.toFixed(3) : v)}</b>`).join(" · ")}</div>` : "";
+  const evals = o.evaluations.map((ev) => {
+    const d = ev.details || {}, c = d.critic || {}, st = d.stats || {};
+    const uses = Object.entries(st.tool_use || {}).map(([k, v]) => `${esc(k)} ×${v}`).join(", ");
+    return `<div class="eval"><div class="call-head"><b>${ev.viable ? fmt(ev.score) : `<span class="bad">not viable</span>`}</b>
+      <span class="tag">${esc(ev.reason)}</span>
+      ${ev.partner ? `<span>with ${esc(ev.partner.node)} <a data-org="${esc(ev.partner.id)}">${short(ev.partner.id)}</a></span>` : ""}
+      ${ev.session_id ? `<a data-session="${esc(ev.session_id)}">painting session ${short(ev.session_id)}</a>` : ""}
+      <span class="muted">${d.seconds ? d.seconds + "s" : ""}</span></div>
+      ${ev.error ? `<div class="bad">${esc(ev.error)}</div>` : ""}
+      <div class="imgs" style="margin-top:8px">${ev.artifacts?.pair ? `<figure>${img(ev.artifacts.pair)}<figcaption>target · painting</figcaption></figure>` : ""}
+        ${ev.artifacts?.heat ? `<figure>${img(ev.artifacts.heat, "", "error")}<figcaption>error</figcaption></figure>` : ""}</div>
+      ${c.total != null ? `<div class="muted" style="font-size:12.5px;margin-top:6px">pixel ${fmt(c.pixel)} (${(c.scales || []).map((s) => `1/${s.factor}: rmse ${fmt(s.rmse)}`).join(", ")}) · style ${fmt(c.style)} (${Object.entries(c.style_distance || {}).map(([k, v]) => `${k} ${fmt(v, 2)}`).join(", ")})</div>` : ""}
+      ${st.actions_used != null ? `<div class="muted" style="font-size:12.5px">${st.actions_used}/${st.actions_budget} actions (${uses || "none"}) · ${st.looks_used} looks · ${st.refused} refused · ${st.ran_dry} ran dry${st.finished ? "" : " · never called finish"}</div>` : ""}
+      ${d.judge && d.judge.scores ? `<div style="margin-top:6px"><div class="muted" style="font-size:12px">judge: likeness ${d.judge.scores.likeness} · colour ${d.judge.scores.colour} · brushwork ${d.judge.scores.brushwork} · overall ${d.judge.scores.overall} → ${fmt(d.judge.score)}, weight ${d.judge.weight}${d.judge.session_id ? ` · <a data-session="${esc(d.judge.session_id)}">session</a>` : ""}</div><div class="note">${esc(d.judge.critique)}</div></div>` : ""}
+      ${d.judge && d.judge.error ? `<div class="warn" style="font-size:12.5px;margin-top:6px">${esc(d.judge.error)}</div>` : ""}
+      ${d.note ? `<div style="margin-top:6px"><div class="muted" style="font-size:12px">painter's note</div><div class="note">${esc(d.note)}</div></div>` : ""}
+    </div>`;
+  }).join("");
+  return `${head}
+    ${o.summary ? `<div><b>What changed:</b> ${esc(o.summary)}</div>` : ""}${wanted}${traits}
+    ${ancestryView(o)}
+    ${o.viable === 0 ? `<div class="bad">Not viable: ${esc(o.note)}</div>` : ""}
+    ${o.sheet ? `<div class="imgs">${img(o.sheet, "", "demo sheet")}</div>` : ""}
+    <div><div class="call-head"><b>${g.source ? "Instrument source" : "Strategy prompt"}</b>
+      ${o.parent?.text ? `<button id="diff-toggle">diff against parent</button>` : ""}</div>
+      <pre id="genome" class="${lang}">${esc(text)}</pre></div>
+    ${evals ? `<div><b>Evaluations</b><div style="display:grid;gap:10px;margin-top:6px">${evals}</div></div>` : `<div class="muted">Not evaluated.</div>`}`;
+}
+
+function lineDiff(a, b) {
+  const A = a.split("\n"), B = b.split("\n");
+  if (A.length * B.length > 400000) return null;
+  const n = A.length, m = B.length, L = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = A[i] === B[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out = []; let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { out.push(["ctx", A[i]]); i++; j++; }
+    else if (L[i + 1][j] >= L[i][j + 1]) out.push(["del", A[i++]]); else out.push(["add", B[j++]]);
+  }
+  while (i < n) out.push(["del", A[i++]]); while (j < m) out.push(["add", B[j++]]);
+  return out;
+}
+function bindDiff(o) {
+  const btn = $("#diff-toggle"); if (!btn) return;
+  const text = o.genome.source || o.genome.prompt || "";
+  btn.onclick = () => {
+    const pre = $("#genome"), on = btn.classList.toggle("on");
+    if (!on) { pre.classList.remove("diff"); pre.innerHTML = esc(text); return; }
+    const d = lineDiff(o.parent.text || "", text);
+    if (!d) { pre.textContent = "Too long to diff here."; return; }
+    pre.classList.add("diff");
+    pre.innerHTML = d.map(([k, line]) => `<span class="${k}">${k === "add" ? "+ " : k === "del" ? "- " : "  "}${esc(line)}</span>`).join("");
+  };
+}
+
+function sessionDetail(s) {
+  const req = s.request || {};
+  const usage = s.usage || {};
+  const strokesById = {};
+  for (const st of s.strokes) if (st.data.tool_use_id) strokesById[st.data.tool_use_id] = st;
+  const results = {};
+  for (const e of s.events) if (e.kind === "tool_result") results[e.data.tool_use_id] = e.data;
+  const head = `<div class="call-head"><span class="tag">${esc(s.status)}</span><span class="tag">${esc(req.harness || "claude")}</span><span>${esc(s.model)} · effort ${esc(s.effort || "–")}</span>
+    <span>${money(s.cost)}</span><span>${s.num_turns ?? "–"} turns</span><span>${dur(s.started, s.ended || s.now)}</span>
+    ${s.organism ? `<span>for ${esc(s.organism.node)} <a data-org="${esc(s.organism.id)}">${short(s.organism.id)}</a></span>` : ""}
+    ${usage.output_tokens ? `<span class="muted">${usage.input_tokens + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0)} tokens in (${usage.cache_read_input_tokens || 0} cached), ${usage.output_tokens} out${usage.output_tokens_details?.thinking_tokens ? `, ${usage.output_tokens_details.thinking_tokens} thinking` : ""}</span>` : ""}</div>
+    ${s.error ? `<div class="bad">${esc(s.error)}</div>` : ""}`;
+  const request = `<details><summary>System prompt (${(req.system || "").length} chars)</summary><pre>${esc(req.system || "")}</pre></details>
+    <div><b>First message</b>${(req.content || []).map((c) => c.type === "image" ? `<div class="imgs">${img(c.artifact)}</div>` : `<pre>${esc(c.text)}</pre>`).join("")}</div>
+    ${req.argv ? `<details><summary>Command line</summary><pre>${esc(req.argv.join(" "))}</pre></details>` : ""}`;
+  const replay = s.strokes.some((st) => st.snapshot) ? `<div class="replay"><b>Replay</b><img id="replay-img" style="image-rendering:pixelated;width:100%;border-radius:6px;border:1px solid var(--line)"><input id="replay-range" type="range" min="0"><div id="replay-caption" class="muted mono"></div></div>` : "";
+  const timeline = s.events.map((e) => {
+    const d = e.data;
+    if (e.kind === "thinking") return `<div class="event thinking">${esc(d.text)}</div>`;
+    if (e.kind === "text") return `<div class="event text">${esc(d.text)}</div>`;
+    if (e.kind === "tool_use") {
+      const r = results[d.id], st = strokesById[d.id]?.data;
+      const long = d.input && typeof d.input.source === "string";
+      let effect = "";
+      if (st && st.score_before != null) {
+        const ds = st.score_after - st.score_before;
+        effect = `<span class="${ds > 0 ? "delta-neg" : ds < 0 ? "delta-pos" : "muted"} mono">score ${fmt(st.score_after, 4)} (${ds >= 0 ? "+" : ""}${ds.toFixed(4)})</span>`;
+      } else if (st && st.error_before != null) {
+        const delta = st.error_after - st.error_before;
+        effect = `<span class="${delta < 0 ? "delta-neg" : delta > 0 ? "delta-pos" : "muted"} mono">error ${fmt(st.error_after, 1)} (${delta >= 0 ? "+" : ""}${delta.toFixed(1)})</span>`;
+      }
+      if (st?.dry) effect += ` <span class="warn">ran dry</span>`;
+      return `<div class="event call ${r?.is_error ? "err" : ""}"><div class="call-head"><span class="name">${esc(d.name)}</span>
+        <span class="call-args mono">${esc(compactArgs(d.input))}</span> ${effect}</div>
+        ${long ? `<details><summary>source (${d.input.source.length} chars)</summary><pre>${esc(d.input.source)}</pre></details>` : ""}
+        ${r ? `<div class="${r.is_error ? "bad" : "muted"} mono" style="white-space:pre-wrap;font-size:12px">${esc(r.text)}</div>${r.images?.length ? `<div class="imgs">${r.images.map((n) => img(n)).join("")}</div>` : ""}` : `<div class="faint">waiting for the result…</div>`}
+        ${st?.pen ? `<div class="faint mono" style="font-size:11.5px">pen ${esc(st.pen)}</div>` : ""}</div>`;
+    }
+    if (e.kind === "result") return `<div class="event meta">result: ${esc(d.subtype)} · ${d.num_turns} turns · ${money(d.total_cost_usd)} · ${esc(d.terminal_reason || "")}${d.errors?.length ? " · " + esc(d.errors.join("; ")) : ""}</div>`;
+    if (e.kind === "rate_limit") return `<div class="event meta">rate limit: ${esc(d.status)} ${Object.entries(d.unifiedWindows || {}).map(([k, w]) => `${k} ${Math.round((w.utilization || 0) * 100)}%`).join(", ")}</div>`;
+    if (e.kind === "init") return `<div class="event meta">started: ${esc(d.model)} · tools ${esc((d.tools || []).join(", "))}${(d.mcp_servers || []).map((m) => ` · ${esc(m.name)} ${esc(m.status)}`).join("")}</div>`;
+    if (e.kind === "tool_result") return "";
+    return `<div class="event meta">${esc(e.kind)} ${esc(JSON.stringify(d).slice(0, 300))}</div>`;
+  }).join("");
+  const offline = !s.events.length && s.strokes.length ? `<div class="muted">An offline painting: no model, so no transcript. ${s.strokes.length} calls.</div>` : "";
+  return `${head}${request}${replay}${offline}<div><b>Transcript</b>${timeline || `<div class="muted">No events yet.</div>`}</div>`;
+}
+
+function bindReplay(s) {
+  const range = $("#replay-range"); if (!range) return;
+  const snaps = s.strokes.filter((st) => st.snapshot);
+  range.max = snaps.length - 1;
+  const prev = state.replayIndex?.[s.id];
+  range.value = prev != null && prev < snaps.length ? prev : snaps.length - 1;
+  const show = () => {
+    const st = snaps[+range.value];
+    $("#replay-img").src = `/artifacts/${st.snapshot}`;
+    const d = st.data;
+    $("#replay-caption").textContent = `call ${d.i}: ${d.tool} ${compactArgs(d.args, 160)} → ` +
+      (d.score_after != null ? `score ${fmt(d.score_after, 4)}` : `error ${fmt(d.error_after, 1)}`);
+    state.replayIndex = { ...(state.replayIndex || {}), [s.id]: +range.value };
+  };
+  range.oninput = show; show();
+}
+
+loadRuns().then(routeHash);
+</script>
+</body>
+</html>

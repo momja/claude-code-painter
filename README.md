@@ -1,198 +1,251 @@
 # conveyor
 
-Run a graph of [darwinian_evolver](https://github.com/imbue-ai/darwinian_evolver) nodes and watch what each node is doing.
-
-Each evolving node owns its own `Evolver` and population. Nodes score their organisms against the current champions of their partner nodes. When a champion changes, the nodes that depend on it get their top organisms rescored, because their stored scores were measured against a partner that's gone. Every mutation, evaluation, rescore, and tool call goes into one SQLite event log, and a local dashboard reads that log while the run goes.
-
-The repo ships with a working example: the two-component robotic painting problem, with van Gogh's *Self-Portrait* (1889) as the training target and *The Starry Night* (1889) held out. It runs on numpy and needs no API keys.
+Co-evolve two things that depend on each other, and watch every step. The problem here is painting. One node evolves the **instrument**: a small program that defines the tools a painter gets, what each call takes, and what it draws. The other node evolves the **painter's strategy prompt**. A model copies van Gogh's *Self-Portrait* of 1889 using only the instrument's tools, other models mutate both nodes, and a judge scores the result. Each of those roles runs on Claude Code or on Pi, with whatever model you pick. Everything goes into one SQLite file, and a local dashboard reads it while the run goes.
 
 ## Quick start
 
 ```sh
 uv sync
-uv run conveyor demo            # runs 25 cycles and serves http://127.0.0.1:8765 while it runs
-uv run conveyor serve           # browse earlier runs in runs/conveyor.db
-uv run --group dev pytest       # tests
+uv run conveyor run --offline --cycles 3          # no model: a greedy painter and a scripted mutator, about 5 s
+uv run conveyor paint round --actions 40          # one real painting with the round-brush seed, about 1 minute
+uv run conveyor mutate round --operator invent -n 3 --lanes 3   # three inventions from the round brush, no painting
+uv run conveyor run --cycles 4 --budget 20        # the real co-evolution, dashboard at http://127.0.0.1:8765
+uv run conveyor serve                             # browse earlier runs
+uv run conveyor run --harness pi --cycles 4        # the same run on GLM through Pi (see Harnesses)
+uv run --group dev pytest                         # 47 tests, about 10 s, no model calls
 ```
 
-A 30-cycle demo takes about a minute and a half on a laptop.
+The Pi harness needs Node 20 or later and a one-time `(cd pi-agent && npm install)`.
 
-## Painting with an LLM
+You need Claude Code installed and logged in, so `claude --version` has to work. conveyor uses whatever auth your `claude` uses. On a subscription the dollar figures are list price, not a bill, but they're the best single measure of how much of your plan's rate limit a run eats. Every session reports the five-hour and weekly usage windows. The dashboard shows them, and `--max-usage` (default 0.85) stops a run from starting new sessions once either window is that full, so a run never takes the last of a window you share with your own Claude use. On the plan these numbers come from, a five-hour window held roughly $13 to $15 of list-price Opus usage.
 
-The painter runs through [OpenCode Go](https://opencode.ai/docs/go/) by default, and OpenRouter is still
-wired up. Put the key for whichever you use in `.env` at the project root (it's gitignored):
+With `--wait`, a full window pauses the run instead of stopping it. New sessions wait until the window resets, plus a minute of grace, and the dashboard shows the run as waiting, with the time it resumes. A session the limit ends partway (two lanes can start at 84% and finish past 100%) doesn't count. Whatever it was painting or mutating runs again after the reset. `--wait` only waits for resets up to 6 hours away, which covers the five-hour window; the weekly window still stops the run. `--wait 200` waits for that one too. Raise `--budget` to match, since a run that waits can go on for many windows.
 
-```
-OPENCODE_API_KEY=...        # default
-OPENROUTER_API_KEY=sk-or-...   # for --provider openrouter
-```
+Numbers from runs on this laptop:
 
-Then:
+| What | Time | List price |
+|---|---|---|
+| One painting, 40 actions, pen instrument | 65 s | $0.25 |
+| One painting, 60 actions | 100 to 134 s | $0.41 to $0.48 |
+| One strategy mutation | 21 s | $0.05 |
+| One `invent` mutation with the task budget | 87 to 149 s | $0.35 to $0.58 |
+| One `invent` mutation before the task budget | 11 min | $0.86 |
+| One full cycle: seed painting, strategy mutation and its painting, one invention and its painting | about 9 min | $1.97 |
+| Three cycles at 120 actions, two instrument mutations per cycle, stopped by `--budget 10` | about 70 min | $10.27 |
+
+By that rate a 200-action painting is around 7 minutes and $1.50. `--lanes` sets how many Claude sessions run at once. The default is 2, because they share one rate limit.
+
+## Harnesses
+
+Every model interaction is a job run by a harness, and there are two:
+
+- **`claude`** runs Claude Code headless, `claude -p`, with your Claude login. The default model is Claude Opus 5.5.
+- **`pi`** runs Pi's agent loop in a Node sidecar (`pi-agent/agent.mjs`) against any model on OpenCode Go or OpenRouter. Put `OPENCODE_API_KEY=...` or `OPENROUTER_API_KEY=...` in the environment or in a `.env` file here or in a parent directory. The default model is `glm-5.3-flash` on OpenCode Go; pick the provider with `--provider`.
+
+`--harness`, `--model` and `--effort` set every role. `--paint-*`, `--mutate-*` and `--judge-*` override one:
 
 ```sh
-(cd pi-painter && npm install)                              # once: the Pi harness needs Node 20+
-uv run conveyor demo --painter llm                          # glm-5.3-flash on OpenCode Go, Pi harness, 20 cycles, $5 budget
-uv run conveyor demo --painter llm --parents 6 --concurrency 12   # wider: more paintings at once
-uv run conveyor demo --painter llm --harness stateless      # the older fresh-request-per-turn painter
-uv run conveyor compare --repeats 2                         # paint one target with each harness, print a table
-uv run conveyor demo --painter llm --cycles 6 --budget 3 --reasoning none
-uv run conveyor demo --painter llm --model qwen3.8-max      # any catalogued model that takes images and tools
-uv run conveyor demo --painter llm --provider openrouter   # same run, called through OpenRouter instead
-uv run conveyor demo --painter llm --paint-model muse-spark-1.3-contributor   # paint and mutate on different models
+uv run conveyor run --harness pi --model qwen3.8-max                       # everything on Qwen through Pi
+uv run conveyor run --harness pi --judge-harness claude                    # paint and mutate on GLM, judge on Opus
+uv run conveyor run --paint-harness pi --mutate-effort medium              # paint on GLM, the rest on Claude Code
 ```
 
-Both providers speak OpenAI-compatible `/chat/completions`, but not identically, and `llm.py:Provider` holds
-the three differences: OpenRouter takes `reasoning: {"effort": ...}` and prices each reply in `usage.cost`
-when asked; OpenCode Go takes a plain `reasoning_effort`, wants `stream_options` to report usage at all, and
-sends no prices. So spend on OpenCode Go is worked out here, from tokens and the per-million rates in
-[models.dev](https://models.dev) (`catalog.py`). `--budget` means the same thing on both. A model the catalog
-doesn't list runs fine but reports no cost, and the CLI says so rather than letting `--budget` look enforced.
+A role on a different harness from `--harness` doesn't inherit `--model`, because a Claude model id means nothing to Pi and the other way round. Roles that ask for the same harness, model and effort share one runner.
 
-Efforts differ too. Each model publishes the ones it takes (`glm-5.3-flash` takes low, high and max), and an
-effort outside that list is dropped rather than sent and rejected, leaving the model to decide. Only
-OpenRouter reads `--reasoning none` as thinking off.
+The Pi sidecar is a drop-in for `claude -p`. It launches the same MCP servers (the paint server, the workbench), hands their tools to the model, and prints Claude Code's stream-json events, so the recording, the dashboard and the stroke logs don't know which harness ran a session except by its label. Where Claude Code has `--json-schema`, the sidecar gives the model a `respond` tool and returns what it's called with. A job names the tools that end it (`finish`, `submit_instrument`), since Pi's loop otherwise runs until the model stops calling tools. On OpenCode Go, which takes at most 8 images per request, the sidecar drops the oldest canvas views and never the target.
 
-In this mode:
+Spend is tracked across both harnesses against one `--budget`. Rate limits are tracked per harness: an exhausted Claude window stops Claude sessions and leaves Pi ones running. A 30-action painting on `glm-5.3-flash` cost $0.003, and its judge verdict $0.0001.
 
-- **The agent node is a real LLM painter.** Each turn it sees the target and its canvas as images, plus the error per region, and answers with brush calls. Each brush in the current toolkit is one tool. Each painting gets 500 strokes (`--strokes`). The cap stays fixed during a run: extra strokes almost always lower pixel error, so a budget evolution could change would only grow. The oracle fitter gets at least the same budget per patch, so it never loses to the agent it's judging.
-- **The LLM painter starts with fine brushes.** Besides the wash and the round, the toolkit starts with an edge brush and a liner. All four are plain capsules, so a run starts from the only mark the old parameter-only toolkit could make and has to write the rest. At 64 px the eyes and the dark lapel lines are 2 to 3 px wide. With only 7 and 14 px brushes, a live run found that every dark stroke raised the error, and it washed the painting out instead. The scripted demo keeps the thin toolkit so it can show the toolkit evolving liners.
-- **The held-out painting is for champions only.** Ordinary evaluations paint just the training target. When an organism becomes champion, the runner paints *The Starry Night* for it once and records a `holdout` event, which the overfitting alarm reads. It checks the first champion and then every `holdout_every`-th one (3 for the LLM painter, since champions change often early and each check costs a full painting). Before this, every evaluation painted both targets, which doubled the cost for a number only the champion alarm used.
-- **Error regions are labelled with pixel ranges** ("x 32-48, y 0-16"), both in the grid the painter sees and in the worst-regions text.
-- **The canvas is 128 px for the LLM painter** (`--width`), and brush sizes and their limits scale with it, so a wash covers the same fraction of the picture as it did at 64 px and 500 strokes still cover the canvas.
-- **The model's images carry a coordinate grid.** The target, the starting canvas, and every `look` get about eight labelled divisions across (16 px apart at 128), in a margin whose size and font scale with the image. At 64 px the labels were too cramped to read, and one live run placed a 4 px ear 10 px off.
-- **Strokes take a `pressure`** from 0.1 to 1 (default 1), which scales how much pigment goes down, so detail can be a light touch instead of a dark bar. The oracle fitter samples pressure too, so it still covers everything the painter can do.
-- **The agent's organism is its prompt.** `LLMPromptMutator` rewrites the prompt using the regions the painter got wrong and the learning log.
-- **The toolkit node mixes mutators.** `LLMToolkitMutator` writes brush code and competes with the rule-based ones. The mutator table shows both what each one's children achieve and what it costs.
-- **Every model call is recorded** with tokens, cost, latency, and errors. The header shows total spend, each node card shows its own, and the replay shows each call's reasoning next to the strokes it made. An alarm fires when more than 10% of a node's calls fail.
-- **You can watch the model work.** The client streams every call and stores it in full: the exact request (the images the model saw are kept), the complete thinking, the reply, every tool call with its arguments, what happened to each one (applied and how it changed error, rejected and why, or ignored for going over the per-turn limit), and tokens, thinking tokens, cost, time to first token, and latency.
-  - "Model calls in flight" on the main page shows each running call with its thinking as it streams.
-  - Any call opens as a transcript. You can get there from the node's recent-calls list, from an organism's evaluations, from any stroke in the replay (it links to the call that made it), and from an organism an LLM mutator wrote (it links to the call that wrote it).
-  - `--reasoning` controls thinking effort. With `none` there's no thinking to show.
-- **`--budget` is soft.** Once spend passes it, the run stops after the current iteration. At 1.5 times the budget, calls fail outright.
+## How a painting runs
 
-### The harnesses
+On the Claude Code harness each painting is one `claude -p` process:
 
-**Pi (default).** Each painting is one conversation run by [Pi](https://github.com/badlogic/pi-mono)'s `Agent`, in a Node sidecar (`pi-painter/painter.mjs`, one process per painting). The model gets one tool per brush, plus `look` and `finish`. A stroke's result says how it changed the total error. `look` returns the canvas as an image, along with the error for each region. A painting gets one look per 40 strokes, and at least 6, so 13 at 500 strokes. A provider's image limit trims that: the conversation keeps every image it sends, and GLM through OpenCode Go takes 8 per request (400 `too_many_images` above it), so with the target and the starting canvas always present a painting there gets 6 looks. The sidecar also drops the oldest images if a conversation somehow goes over. The rules ask the model to put up to 40 brush calls in each reply, because every turn re-sends the whole conversation. `PiHarness(min_stroke_fraction=...)` can refuse `finish` until most strokes are used, but it's off by default. With blunt brushes it only bought filler: in one live run the model spent its last 150 required strokes on beige washes that faded the painting. `finish`, or using the last stroke, ends the conversation. Python (`painting/pi_harness.py`) owns the canvas: the sidecar sends each tool call over stdio and waits for the result. Each model turn streams back and gets recorded as a call in the same conversation.
+```
+claude -p --input-format stream-json --output-format stream-json --verbose
+       --model claude-opus-5-5 --effort high --thinking-display summarized
+       --system-prompt <strategy + rules + the instrument's reference>
+       --tools "" --setting-sources "" --strict-mcp-config
+       --mcp-config <python -m conveyor.painting.paintserver SESSION_DIR>
+       --allowedTools mcp__canvas__<each tool>,mcp__canvas__look,mcp__canvas__finish
+       --no-session-persistence --disable-slash-commands --max-budget-usd 8
+```
 
-Caching comes from Pi's `sessionId`, which Pi sends upstream as `x-session-id`. That keeps every turn of a painting on the same provider, so the provider's prefix cache can hit. The conversation is never trimmed, since dropping old canvas images would change the prefix and throw the cache away. Every transcript shows how many input tokens came from the cache, and the header shows the run's total share. Pi ships its own table for both providers; for a model the installed pi-ai predates, `pi_harness.py` builds the definition, prices included, from the same models.dev catalog the Python client uses.
+- `--tools ""` removes the built-in tools. A painter with Read or Bash could open the target file.
+- `--setting-sources ""` keeps this machine's hooks, CLAUDE.md files and settings out of the painting.
+- `--strict-mcp-config` loads only conveyor's server. Without it the account's claude.ai connectors load too, and a probe call cost ten times as much in tool definitions alone.
+- `--thinking-display summarized` is a hidden flag. In print mode thinking comes back empty without it. If a CLI version refuses the flag, conveyor retries without it and the transcripts lose the reasoning.
 
-**Stateless.** `painting/llm_agent.py:llm_paint` sends a fresh request every turn, containing the prompt, the target, the canvas, the error grid, and recent strokes, and offers one tool per brush with `tool_choice: "required"`. It's simpler, but the model re-derives the whole scene every turn and only sees what its strokes did when the next turn starts.
+The first user message goes in over stdin, because stream-json is how it carries images: the target with a labelled coordinate grid, and the instrument's demo sheet. Then stdin closes and the CLI runs the agent loop until the painter calls `finish`.
 
-**Comparing them.** `conveyor compare` paints the same target with both harnesses under the same prompt, brushes, and stroke budget. It prints score, time, calls, cost, cache share, and thinking tokens, and the dashboard shows the same table with each painting and a link to its transcript.
+Claude Code launches the paint server, `painting/paintserver.py`, as a child process and talks MCP to it over stdio. The paint server owns the canvas and the instrument's `pen` state. It applies each call and answers with the critic's score and how the call changed it, the pixel error, and the actions left. It logs every call to `calls.jsonl` with its arguments, its effect, the pen's state after it, and a canvas snapshot every five calls. Claude Code runs the tool calls of one reply one at a time, in order, which a probe confirmed, so strokes land in the order the model wrote them.
 
-The mutators each make one forced tool call (`revise_prompt`, `revise_toolkit`) through `conveyor/llm.py`, which handles HTTP, streaming, retries, and recording for everything that isn't Pi.
+The painter ends with a note for the instrument's designer saying what the target needed that the tools couldn't do. That note goes to the next mutation. Here is part of the first real one, from the pen seed:
 
-## Brushes are programs
+> The area limit wasn't described in the tool docs. I only learned about it from the "stopped early" messages. ... What would have helped: a fill or wash tool for the ground colour, or a much larger brush radius.
 
-A brush is not a row of sliders. It is a name, how far its mark reaches from the stroke path (`radius`), how
-long that path is (`length`), and a small Python program that draws the mark:
+The first complaint was a gap in my rules, not in the instrument, and the rules now state the limit.
+
+## Instruments
+
+An instrument is one Python module. It declares its tools, their parameters, any state they share, and example calls. The painter gets exactly these tools as MCP tools:
 
 ```python
-def alpha(u, v, rng, radius, length):
-    """A broken line of separate dots."""
-    period = max(radius * 2.20, 0.5)
-    phase = np.abs(np.mod(u, period) - period * 0.5)   # distance to the nearest dot centre
-    d = np.hypot(phase, v)
-    ramp = max(radius * 0.35, 0.5)
-    a = np.clip((max(radius * 0.55, 0.5) - d) / ramp + 0.5, 0.0, 1.0)
-    a = a * ((u > -radius) & (u < length + radius))     # dots only along the path, not past its ends
-    return np.clip(a * 0.80, 0.0, 1.0)
+"""What the painter should know. It reads this cold."""
+
+STATE = {"down": False, "x": 0.0, "y": 0.0}
+
+TOOLS = {
+    "start": {"doc": "Put the pen down at (x, y).",
+              "params": {"x": {"type": "number", "min": 0, "max": "width"},
+                         "y": {"type": "number", "min": 0, "max": "height"},
+                         "color": {"type": "color"}}},
+    "move": {"doc": "Drag the pen by (dx, dy).", "params": {"dx": {"type": "number"}, "dy": {"type": "number"}}},
+    "stop": {"doc": "Lift the pen.", "params": {}},
+}
+
+EXAMPLES = [[["start", {"x": 12, "y": 30, "color": "#2b4c7e"}], ["move", {"dx": 20, "dy": -6}], ["stop", {}]]]
+
+def start(args, pen, canvas, rng):
+    pen.update(down=True, x=args["x"], y=args["y"], color=args["color"])
 ```
 
-`u` is distance along the path, `v` is distance across it, both in canvas pixels, and the return value is how
-much pigment lands at each one. Everything else stays with the caller: where the stroke goes, its angle, the
-bounding box, clipping, compositing. This is the whole reason a mutator can invent a mark rather than retune
-one. Modulating on `u` breaks a line into dots. Modulating on `v` gives the parallel bristles that make up
-most of a van Gogh surface. Scaling the reach by `u / length` tapers the stroke to a point. None of those
-were reachable when a brush was six numbers fed to one fixed capsule.
+Parameter types are number, integer, boolean, color, choice, points and numbers. A points parameter is a path of up to 64 `[x, y]` pairs. Tools draw only through `canvas.dab`, `canvas.stamp` for any small mask, `canvas.smudge`, and `canvas.pick`, which reads the canvas and never the target. `painting/seeds.py` has two complete examples. `round` is one stateless straight stroke. `pen` is the start/move/stop plotter above, with a brush that runs out of paint as it travels.
 
-- **The scripted mutators write code too**, so the no-API-key demo still evolves. `TargetedToolkitMutator`
-  fills templates (`brushcode.py:TEMPLATES`) for the mark the failure type calls for, and keeps which
-  template and which numbers it used, so a later edit can still change "softness" by name.
-  `RandomToolkitMutator` mostly scales one numeric literal in the source, which works just as well on code an
-  LLM wrote, where there are no named knobs at all.
-- **`LLMToolkitMutator` writes free-form source.** It gets the contract, the sandbox rules, and a plain
-  capsule to work from, and returns whole brushes.
-- **The sandbox is not a security boundary.** Brush code runs in this process with no imports, no `while`, no
-  underscored names, and nothing in scope but `np`, `math`, `rng` and a few builtins, with module attributes
-  on an allowlist because numpy has plain-named doors out (`np.ctypeslib.ctypes`). That is enough to stop a
-  mutator wandering somewhere it shouldn't by accident. It would not stop someone trying. Don't point it at
-  brush code you didn't generate.
-- **A brush that misbehaves costs its toolkit, not the run.** `physics_violations` compiles every brush and
-  runs it once on a small grid, so code that won't compile, returns the wrong shape, leaves 0 to 1, or lays
-  no pigment marks the toolkit non-viable with a reason the dashboard shows. A brush that only breaks on some
-  later grid shape lays nothing and gets selected out. The size limits still bite: whatever the program does,
-  it only draws inside the box `radius` and `length` bought it.
-- **It costs about 9% per stroke** over the fixed capsule it replaced, measured against the old inline
-  version of the same maths.
+The physics puts one limit on a call: it may touch at most 8% of the canvas, which is 1310 px at 128 x 128. That keeps a tool a brush rather than a printer. It says nothing about what a call takes or whether calls share state, so the interface stays free to evolve. Each call also runs under a one-second limit, in the paint server's process, never in the process that runs the evolution. The sandbox refuses imports, classes, try/except, print, underscored names and any attribute off an allowlist. It stops accidents. It is not a security boundary.
 
-## What the dashboard shows
+## Why the old toolkit didn't vary, and what changed
 
-- **Graph.** One card per node, showing what its current champion produces. The toolkit node shows a swatch sheet of its brushes, the agent node its painting, and the critic its error map. Cards also show score, iteration count, and live status (evolving, rescoring after a partner changed, waiting). Edges show artifact flow and failure feedback.
-- **Alarms.** Stalled champions, mutators whose children rarely beat their parent, mutators whose proposals fail verification, mutators that throw, bursts of non-viable organisms, training score rising while held-out falls, and rescores that drop because a partner changed.
-- **Who gets the blame.** How many patches the critic blamed on the toolkit and on the agent over time.
-- **Per node.** Score percentiles with champion changes marked, failures by type, the full lineage tree (crossover drawn dashed, non-viable organisms hollow), a mutator yield table, the learning log, and the rescore history.
-- **Per organism.** Click any organism. The panel shows its sub-scores, what changed and why, a diff against its parent, output images, the critic's breakdown at each resolution (target, painting, and error map side by side, with the numbers that add up to the score), the failing patches (target, what the oracle managed with these tools, the painting), every evaluation with the partner versions it ran against, and a replay of each tool call in the painting run.
+The question was how to get the mutator to vary the toolkit's inputs, for example with tools that start at a point and move in some direction until a stop tool runs. The old design could never produce that, and prompt changes alone wouldn't have fixed it. The cause was in the harness.
 
-## Wiring your own nodes
+1. **The interface wasn't in the genome.** `brush_tools()` and the Pi sidecar gave every brush the same `x, y, angle, color, pressure`. The mutator's output schema held a name, a radius, a length and an alpha-mask program. No mutation could change what a call takes.
+2. **A brush was a pure function of one straight segment.** `alpha(u, v, rng, radius, length)` had no state, no path, and no way to read the canvas.
+3. **The verification gate rejected anything the oracle couldn't drive.** The oracle fitter placed brushes at random `(x, y, angle)` inside 16 px patches, and `verify_mutations=True` kept a toolkit only if the oracle's error on the failing patches dropped. A tool with a different interface can't pass that test.
+4. **The prompt asked for small changes.** It said "Keep brushes that work. Change as little as fixes the failures."
+5. **The feedback was per-patch RMSE,** which points at thinner liners and softer washes.
 
-```python
-from conveyor import Board, Conductor, Edge, EventSink, Node, artifact, current_trace
+The recorded runs show the result. Every LLM toolkit mutation in `big2.db`, 20 of them, was a variation on one capsule brush: add granulation, add a thinner "whisker" liner, soften the wash. Brushes-as-code never got a full LLM run before this rewrite. The one database with code-based brushes holds only the seed, from a run whose sidecar died after seven calls.
 
-board = Board()   # evaluators read partner champions from here: board.elites("agent", k=2)
+The rewrite answers each cause:
 
-nodes = [
-    Node("toolkit", initial_organism=..., evaluator=ToolkitEvaluator(board), mutators=[...],
-         partners=["agent"], partner_k=2, verify_mutations=True),
-    Node("agent", initial_organism=..., evaluator=AgentEvaluator(board), mutators=[...],
-         partners=["toolkit"], partner_k=1),
-    Node("critic", fixed=True, version="v1", mirror="agent", thumbnail_artifact="heat"),
-]
-edges = [Edge("toolkit", "agent", "artifact", "brush functions"), Edge("critic", "toolkit", "feedback", "failures")]
+- **The instrument declares its own tools and parameters, and `pen` persists across calls.** Start/move/stop is now one mutation away.
+- **The oracle and its gate are gone.** The painter's closing note replaces them as the signal for what the tools lack.
+- **A niche archive keeps different interfaces alive.** The workbench measures three things about each instrument: does any tool keep state, does any tool take a list, and how far one call reaches. That gives 12 niches. The instrument node keeps the best instrument in each and draws parents across niches rather than by score, so a new interface that paints worse than the champion still gets children.
+- **Three mutation operators with different jobs.** `refine` improves an instrument and keeps its interface. `invent` designs a different way of calling it, aimed at a named empty niche, and it prefers niches that change state or argument structure over ones that only change reach. `recombine` merges two instruments from different niches.
+- **The designer works in a workbench.** It can compile a draft, run its examples, and see the demo sheet and the niche before it submits. A broken draft costs a try, not a whole painting, so a bold design is cheap to attempt.
 
-sink = EventSink("runs/conveyor.db", run_name="my run")
-Conductor(nodes, edges, sink, board, schedule=[("agent", 2), ("toolkit", 1)]).run(cycles=40)
-sink.close()
-```
+The first `invent` from the round brush produced "shape stamps". `block` presses a rotated rectangle, ellipse, triangle or soft blob, `ramp` presses a two-colour gradient tile, and `blend` smears wet paint. Its docstring tells the painter to lay a mosaic of 24 px tiles, then smaller shapes, then detail. Nothing in the old setup could have made that. It also spent several tries chasing a one-pixel seam between tiles, so designer sessions now carry an 80k-token task budget through Claude Code's hidden `--task-budget` flag, and the prompt says pixel polish doesn't matter at this size.
 
-Your organisms, evaluators, and mutators stay plain darwinian_evolver classes. For the dashboard to show more, they can add the following. All of it is optional.
+With the budget in place I ran `conveyor mutate round --operator invent -n 3`, which asks for a different interface kind each time. Every invention started from the same round brush:
 
-| Hook | Where it shows up |
-|---|---|
-| `Organism.render_text()` | The diff against the parent. Without it the diff uses the problem fields as JSON. |
-| `EvaluationResult.visualizer_props` | Sub-scores in the organism panel. Keys starting with `blame_` feed the blame chart. A `holdout` key turns on the overfitting alarm. |
-| An `artifacts: dict[str, str]` field on your result | Images. `thumb` goes on the graph card. Keys named `canvas_*`, `oracle_*`, and `heat_*` show up in the organism panel. |
-| `artifact(png_bytes)` inside `evaluate()` | Stores the image and returns the name to put in `artifacts`. |
-| `current_trace().span(name, args, result, image=...)` inside `evaluate()` | One tool call in the replay. |
-| `change_summary` starting with `[tag]` | The learning log. The painting mutators use tags to avoid repeating a change that made an ancestor worse. |
+| Asked for | Landed in | What it is | Tries | Time | List price |
+|---|---|---|---|---|---|
+| stateless/scalar/short | same | `block`, `ramp`, `blend`: shape stamps, gradient tiles, a smear | 5 | 11 min | $0.86 |
+| stateful/scalar/short | same | `load` with palette mixing, `lift_to`, `draw(dx, dy)`, `smear`: a loaded pen that remembers where it is | 2 | 87 s | $0.35 |
+| stateful/list/short | same | `load`, then `touch(x, y, offsets, connect)`: press clusters of marks or drag a short polyline with the loaded brush | 2 | 95 s | $0.37 |
+| stateless/list/short | same | `patch`, `line`, `dots`, each taking a list of offsets: polygons, polylines, stipple | 2 | 115 s | $0.44 |
+
+The first row ran before the task budget. All four hit the niche they were asked for.
+
+A one-cycle co-evolution run then put an invention in front of the painter. The designer built a loaded-brush instrument with `load` plus three list tools, `stroke` through points, `patch` for a filled polygon, and `blend` along a path. Its first painting scored 0.645 against 0.652 for the round brush with the same strategy. The painter had never seen it before. That painting also found a bug in my sandbox: numpy 2 imports a module lazily on the first `ndarray.max()` in a process, through the calling frame's builtins, and the sandbox had no `__import__`. Every `patch` call failed. The probe missed it because its own `.max()` calls ran first and warmed numpy's cache. The sandbox now lets numpy import its own modules and nothing else, and a test covers the first-call case in a fresh process. The loaded pen is the start/move/stop idea almost exactly, with a palette `mix` the designer added on its own so the painter can shade without guessing hex values.
+
+All four also landed at short reach. The per-call area limit is in the designer's prompt, and small local marks are the natural answer to it, so the long-reach niches may stay empty unless an invention is aimed there. Whether any of these interfaces paints better than the round brush is a separate question, one only co-evolution runs answer.
+
+## The first real run
+
+Three cycles at 120 actions per painting, two instrument mutations per cycle, stopped by `--budget 10` partway through the third cycle. It took 15 sessions, $10.27 at list price, and about 70 minutes, and moved the five-hour usage window from 12% to about 80%.
+
+![Paintings from the run](docs/first-run.png)
+
+Scores went from 0.657 to 0.757:
+
+- **Cycle 1.** A new strategy took the round brush from 0.657 to 0.666. Both instrument mutations drew `refine`. The painter's note had asked for curves, tapered lines and swirl texture, and both refinements added them: the winner kept `stroke` and added `path`, a curve through points, and `flicks`, up to 64 short curved dashes in one call. It scored **0.716** with the same strategy, the biggest single step of the run. The two refinements converged on nearly the same design, which is what `refine` does when two copies read the same note.
+- **Cycle 2.** The strategist saw that the last painter had left 28 of its 120 actions unused and told it to spend every one and to pack texture along the flow of the target. Same instrument, **0.757**. Both instrument mutations drew `invent`: a stateful loaded brush with list tools at 0.695 and a stateful brush with an accent colour and hue jitter at 0.703. Neither beat the champion, and both stay in the archive as parents.
+- **Cycle 3.** The strategy child scored 0.715 from a weaker parent. The budget stopped the run before the instrument step.
+
+The archive ended with 4 of 12 niches filled by 5 instruments. The run found two problems I then fixed:
+
+1. **The painter steered by a different number than the one that judged it.** Each call reported only pixel RMSE, but the critic weighs texture and palette at 40%. The cycle-1 painter watched its swirl texture push pixel error up, concluded it was hurting, and stopped early, on the painting that scored best of the run. Every call now reports the critic's score first and pixel error second, and `look` breaks the score into its parts.
+2. **Strategy prompts were cut off mid-section.** A plain slice at 2,500 characters truncated one; the strategist noticed it in the next generation. The limit is now 3,000 characters asked for and 4,500 enforced, cutting at a paragraph break with a note in the summary.
+
+## Judging
+
+The deterministic critic, `painting/critic.py`, scores 60% pixel RMSE at three scales and 40% texture statistics: edge density, stroke direction, fine detail, palette. After the first run I rated its 8 paintings and 6 control images by hand and compared four judges against those ratings, by rank correlation:
+
+| Judge | Copies the target | Looks like van Gogh |
+|---|---|---|
+| Critic total | +0.89 | +0.34 |
+| Critic, texture part | +0.73 | +0.65 |
+| Laya Vision, a 256M decision model | +0.46 | +0.32 |
+| CLIP ViT-B/32, zero-shot and untrained | +0.61 | +0.75 |
+
+Laya ranked five of the run's paintings above *The Starry Night* on "looks like van Gogh", and its two-image "is this a copy" answer carried no signal. Its training covers everyday questions and photo quality, not painting, so fine-tuning it on a dozen ratings wouldn't fix that. CLIP's base model did better with no training. The larger CLIP rated nearly every copy of this portrait as van Gogh, probably because it recognises the famous subject rather than the brushwork.
+
+So each finished painting now also goes to a Claude judge (`painting/judge.py`). The judge sees only the target and the painting. It scores likeness, colour, brushwork and overall from 1 to 10 against anchors written into its prompt, and writes a critique that goes to both mutators. A painting's score is `(1 - w) * critic + w * judge`, with `w` from `--judge-weight` (default 0.5). The painter still gets the instant critic score after each call, so it can't probe the judge one stroke at a time. `--judge-model` and `--judge-effort` pick the judge's model and effort, and `--no-judge` turns it off. A judge call costs a few cents against a painting's dollar.
+
+Validating the Claude judge against the same hand ratings hasn't run yet: the usage window ran out first. Until it has, treat the judge's weight as a guess. Logit-based scoring, reading a model's probabilities over "1" to "9" and taking the expected value, would give smoother verdicts, but Claude doesn't expose logits. It would need a local open-weights vision model.
+
+## The evolution loop
+
+`evolve.py` is a small loop written for this problem, replacing the darwinian_evolver library the old version wrapped. The variance work needed parent selection across niches and a mutation context that carries the archive, the empty niches and the lineage. Bending the library to that would have taken more code than the loop.
+
+Each cycle the painter node runs one mutation and the instrument node runs `--parents` mutations, each followed by a painting. A painting pairs one instrument with one prompt, and that one painting scores both organisms. Paintings are cached by the pair and numbered, so both nodes read the same ones.
+
+**Scores are means, and a champion has to hold up.** One painting is a noisy measure. Repainting one pair six times with gpt-6-luna gave a spread of 0.459 to 0.553, about as wide as a whole run's population. Picking the best of forty single paintings mostly picks a lucky one, and then no child can beat it. So an organism's score is the mean of its paintings against the current partner, and when a child tops the ranking, it and the champion it would replace are painted again until each stands on `--confirm` paintings (3 by default). The means decide. A child that loses on its first painting costs nothing extra. When a new champion is crowned, the partner node's champion is re-scored against it using the same three paintings, so the cascade is free.
+
+**The strategist edits; it doesn't rewrite.** It returns edits, each quoting the passage it replaces, and they're applied to the parent prompt. A child that keeps less than half the parent's words is refused. Before this, a strategy child kept 13 to 24% of its parent's words, so every generation was a new prompt and nothing it learned carried over.
+
+The mutators see the parent's source or prompt, the target beside the painting, the score breakdown, how the painter spent its actions, how many calls were refused or ran out of area, the painter's note, and a learning log of the lineage's earlier changes and what each did to the score.
+
+## The dashboard
+
+`conveyor run` serves it while the run goes. `conveyor serve` serves any database afterwards.
+
+- Node cards with each champion: the instrument's demo sheet and painting, and the strategy's painting.
+- The instrument archive as a grid, stateless and stateful rows by scalar and list columns at three reaches, with empty cells shown. Variance, or its absence, shows here at a glance.
+- Claude sessions running now, with their latest thinking and tool calls.
+- Scores over time with champion steps, a mutator table, and every organism. The mutator table counts tries, errors, viable children, children that beat their parent, children in a new niche, hits on the asked niche, and cost.
+- A drawer for any organism: source with a diff against its parent, demo sheet, every painting with the painter's note, and the session that wrote it.
+- A drawer for any Claude session: system prompt, first message with its images, the full transcript with thinking summaries, each tool call with its result, its error change and the pen's state after it, and a replay slider over the canvas snapshots.
 
 ## Layout
 
 ```
 src/conveyor/
-  events.py       event log, spans, content-addressed images, all in one SQLite file per database
-  observe.py      ObservedMutator / ObservedEvaluator wrappers around your classes
-  population.py   RescorablePopulation: WeightedSamplingPopulation whose stored scores can be replaced
-  graph.py        Node, Edge, Board, Conductor (scheduling, champion tracking, rescoring)
-  server.py       read-only HTTP API + alarms, standard library only
-  dashboard/      the single-page dashboard
-  painting/       the example problem: canvas physics, critic, toolkit node, agent node
-    brushcode.py  the brush sandbox: what a brush program may do, and the templates the scripted mutators fill
+  harness.py       jobs, outcomes, the spend and rate-limit meter, and the process runner both harnesses share
+  claude.py        the Claude Code harness: `claude -p` and its flags
+  pi.py            the Pi harness: providers, keys, model definitions from the catalog
+  catalog.py       model facts from models.dev: prices, modalities, reasoning efforts
+  mcp.py           a minimal stdio MCP server: initialize, tools/list, tools/call
+  evolve.py        organisms, populations, the niche archive, the conductor
+  store.py         the SQLite run log, written by one thread
+  server.py        the dashboard's read-only HTTP API, standard library only
+  dashboard.html   the dashboard, no build step
+  painting/
+    canvas.py      physics (dab, stamp, smudge, pick, the per-call area limit), targets, images
+    instrument.py  the instrument contract, sandbox, runtime, niche traits, the probe
+    seeds.py       the round brush and the pen plotter
+    paintserver.py one painting as an MCP server, plus the offline greedy painter
+    workbench.py   the designer's MCP server: try_instrument, submit_instrument
+    critic.py      pixel RMSE at three scales and a texture proxy
+    prompts.py     every piece of text a model reads
+    judge.py       the model judge: a blind rubric verdict and a critique for each finished painting
+    problem.py     the painter, the painting cache, evaluators, mutators, the graph, the roles
+pi-agent/
+  agent.mjs        the Pi sidecar: an MCP client, Pi's agent loop, and Claude Code's stream-json on stdout
+tests/
+  fake_claude.py   a stand-in `claude` that speaks stream-json and drives the MCP servers
 ```
 
-## The painting example, and where it cuts corners
+## Archive viewer
 
-- **The agent isn't an LLM.** `painting/agent.py:paint` is a scripted greedy painter, and `Strategy` plays the part of its prompt. To use a real agent, replace `paint()` with a tool-use loop that calls the toolkit's brushes and records a span per call. The graph, the blame split, and the dashboard stay the same.
-- **The mutators aren't LLMs either.** They apply rules: they read the failure type and try the change a person would try first, then write it as brush code from a template. Swap in LLM calls that get the failing patches and the learning log.
-- **The critic is a deterministic proxy.** The pixel score compares RMSE at three scales. The style score compares texture statistics. For real use, replace the style half with pairwise VLM judgments.
-- **Blame uses an oracle fitter.** A greedy search finds the best each patch can look with the current brushes. If even that is far from the target, the toolkit is at fault. If the oracle gets close and the painting doesn't, the agent is at fault. The thresholds sit at the top of `painting/problem.py`.
-- **The oracle tries every brush, the same number of times each** (`TRIES_PER_BRUSH`). It used to draw one brush at random and try a fixed six placements however many brushes the toolkit held, so each extra brush got fewer tries and a larger toolkit fit worse. Blame then ran backwards: adding a rake, dots and a taper to the four seed brushes moved the toolkit's blamed patches from 19 up to 21, so improving the toolkit raised its own blame and the blame chart sat flat all run. It now costs more to fit a big toolkit, which is the price of the number meaning something.
+`viewer.html` is a single-file static site (only dependency: sql.js from a CDN) that reads a run database entirely in the browser. Drop in a `.db` file or point it at a CORS-friendly URL (`viewer.html?db=./demo.db`), and it shows the instrument archive grid plus a replay player that animates each painting stroke by stroke from the logged calls and canvas snapshots — the *how*, not just the result. `demo.db` is the first real run, trimmed to everything the viewer needs. To share a full run, checkpoint it first (`sqlite3 run.db 'PRAGMA wal_checkpoint(TRUNCATE);'`) and host the `.db` next to the page.
 
 ## Known limits
 
-- A rescore covers the top `rescore_top_k` organisms, then anything with a stale score that climbs to the top. Everything else keeps its stale score until it gets resampled.
-- When a node is evaluated against several partner elites, blame comes from the first pairing only, which is the champion pairing.
-- The dashboard's "beat parent" counts only children whose parent was last scored against the same partner versions. The rest show as "not comparable". darwinian_evolver's own learning log has no such check. It compares a child with the parent's stored result, and that result can be stale for parents outside the rescored top-k. A mutator reading the log can therefore see "better than the parent" when the partner did the improving.
-- **The blame split reads as fault, but the agent's share is inflated.** The oracle fits each patch on its own, samples the ideal colour from the target for every stroke, and gets `OracleFitter.STROKES` (18) per patch where the scripted agent spends about 2. It outspends the agent roughly 9 to 1 on the very patches it then rules the tools can handle. `GAP_THRESHOLD` is an absolute gap against that, so a good share of "the agent's fault" is really the funding gap. Fixing it means either a threshold that accounts for the gap, or comparing the agent against a second fit given the agent's own per-patch spend, which cannot share the per-toolkit cache.
-- **Toolkit blame still moves with `OracleFitter.STROKES`.** At 2 strokes per patch the toolkit is blamed for every patch, at 96 for almost none, with nothing about the brushes or the painting changing. The constant is a real assumption about how many strokes a patch deserves, not a neutral default.
-- One process, one SQLite writer per run. The dashboard opens the database read-only, so it can run from another process.
+- **Scores are still noisy.** Three paintings cut the noise to a bit more than half, not to nothing, and only champions and challengers get three. A child that is truly better by less than about 0.02 will often lose its first painting and never be re-tested.
+- **The instrument is scored with the current strategy champion.** A new interface meets a strategy tuned for the old one. The strategy prompt is told the instrument changes and never names tools, and Opus reads tool docs well, but a novel instrument is still judged a little early.
+- **Niche traits are coarse.** "Stateful" means some call writes the pen and it changed during the examples. An instrument that keeps a call counter in the pen counts as stateful.
+- **Judging rests on one person's ratings of 14 pictures.** The comparison that picked the judges is small, and the Claude judge hasn't been checked against it yet. Pixel RMSE still rewards blur, which is why it carries only part of the score.
+- **No held-out target yet.** The old version painted *The Starry Night* for champions to catch overfitting. With each painting costing minutes of Opus, that check is off for now, and an instrument evolved on one portrait may not transfer.
+- **Rate limits are the real budget.** On a subscription, a few cycles use most of a five-hour window. The dashboard shows the windows, and `--max-usage` stops the run before a window fills, or pauses it until the reset with `--wait`. Without `--wait`, a rejected rate limit stops the run outright.
+- **Offline mode is for tests.** The greedy painter drives any instrument blindly from its examples, and the jitter mutator can only retune numbers. It never leaves its parent's niche, which is the old problem in miniature.

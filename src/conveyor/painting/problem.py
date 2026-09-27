@@ -1,378 +1,679 @@
-"""Evaluators for the toolkit and agent nodes, and the graph that wires them to the critic."""
+"""
+The painting problem as two co-evolving nodes.
+
+  instrument  the toolkit: an instrument module (see instrument.py). Archive node: parents are drawn across
+              niches, and the Claude mutator has three operators, refine, invent (aimed at an empty niche) and
+              recombine (across niches).
+  painter     the painter's strategy prompt. Plain node: parents by rank, one Claude mutator.
+
+A painting pairs one instrument with one prompt, and that one painting is both organisms' evaluation. Paintings
+are cached by the pair, so the rescore that follows a new champion is usually a painting that already exists.
+"""
 
 from __future__ import annotations
 
-import zlib
-from collections import defaultdict
-from functools import partial
-from typing import TYPE_CHECKING
-from typing import Callable
-from typing import Literal
+import ast
+import difflib
+import json
+import random
+import re
+import subprocess
+import sys
+import threading
+import time
+from collections import Counter
+from dataclasses import dataclass
+from dataclasses import field
+from pathlib import Path
 
 import numpy as np
-from darwinian_evolver.problem import EvaluationFailureCase
-from darwinian_evolver.problem import EvaluationResult
-from darwinian_evolver.problem import Evaluator
-from pydantic import Field
-from pydantic import computed_field
 
-from conveyor.events import artifact
-from conveyor.graph import Board
-from conveyor.graph import Edge
-from conveyor.graph import Node
-from conveyor.painting.agent import RandomStrategyMutator
-from conveyor.painting.agent import Strategy
-from conveyor.painting.agent import TargetedStrategyMutator
-from conveyor.painting.agent import paint
-from conveyor.painting.canvas import Target
-from conveyor.painting.canvas import default_targets
-from conveyor.painting.canvas import heatmap
-from conveyor.painting.canvas import physics_violations
-from conveyor.painting.canvas import set_canvas_scale
-from conveyor.painting.canvas import swatch_sheet
+from conveyor.harness import Job
+from conveyor.harness import ProcessHarness
+from conveyor.evolve import Context
+from conveyor.evolve import Evaluation
+from conveyor.evolve import Mutator
+from conveyor.evolve import Node
+from conveyor.evolve import Organism
+from conveyor.painting import prompts
+from conveyor.painting.canvas import CALL_AREA_SHARE
+from conveyor.painting.canvas import Canvas
+from conveyor.painting.canvas import gridded_png
+from conveyor.painting.canvas import heatmap_png
+from conveyor.painting.canvas import load_target
+from conveyor.painting.canvas import side_by_side
 from conveyor.painting.canvas import to_png
-from conveyor.painting.canvas import triptych
+from conveyor.painting.canvas import worst_regions
 from conveyor.painting.critic import Critic
-from conveyor.painting.toolkit import CrossoverToolkitMutator
-from conveyor.painting.toolkit import OracleFitter
-from conveyor.painting.toolkit import RandomToolkitMutator
-from conveyor.painting.toolkit import TargetedToolkitMutator
-from conveyor.painting.toolkit import Toolkit
-from conveyor.painting.toolkit import initial_toolkit
+from conveyor.painting.instrument import CALL_TIMEOUT
+from conveyor.painting.instrument import Instrument
+from conveyor.painting.instrument import InstrumentError
+from conveyor.painting.instrument import all_niches
+from conveyor.painting.instrument import niche_distance
+from conveyor.painting.judge import ClaudeJudge
+from conveyor.painting.judge import JudgeError
+from conveyor.painting.seeds import SEEDS
+from conveyor.store import Store
+from conveyor.store import new_id
 
-if TYPE_CHECKING:
-    from conveyor.llm import LLMClient
-
-# Patch RMSE above this after the oracle's best effort: the tools cannot express the patch.
-TOOL_THRESHOLD = 0.08
-# Agent RMSE this far above the oracle's: the tools could do it and the agent did not.
-GAP_THRESHOLD = 0.02
-MAX_TRIPTYCHS = 8
-
-
-class PatchFailure(EvaluationFailureCase):
-    target: str
-    row: int
-    col: int
-    blame: Literal["toolkit", "agent"]
-    oracle_err: float
-    agent_err: float
-    triptych: str | None = None
+# The strategist is asked to stay under the soft limit. Past the hard one a prompt is cut, at a paragraph break,
+# and the cut is noted in the summary. A plain slice once cut a prompt off mid-section without anyone knowing.
+MAX_PROMPT_CHARS = 3000
+HARD_PROMPT_CHARS = 4500
+_SHEETS: dict[str, bytes] = {}  # demo sheet PNGs by artifact name, so a painting doesn't re-probe to show one
 
 
-class PaintResult(EvaluationResult):
-    pixel: float = 0.0
-    style: float = 0.0
-    expressivity: float = 0.0
-    blame_toolkit: int = 0
-    blame_agent: int = 0
-    artifacts: dict[str, str] = Field(default_factory=dict)
-    notes: list[str] = Field(default_factory=list)
-    # {"critic": [one Critic.report() per target]}: the score with its working shown, for the dashboard.
-    details: dict = Field(default_factory=dict)
+@dataclass
+class Setup:
+    target: str = "self_portrait"
+    width: int = 128
+    actions: int = 200
+    looks: int | None = None  # default: one per 25 actions, at least 4
+    mode: str = "model"  # "model" (a harness runs each role), or "offline" for the greedy painter and scripted mutators
+    seeds: list[str] = field(default_factory=lambda: ["round"])
+    work_dir: Path = Path("runs/sessions")
+    paint_budget_usd: float | None = 8.0  # per painting session
+    mutate_budget_usd: float | None = 4.0  # per mutation session
+    mutate_task_budget: int | None = 80_000  # tokens a designer may spend; it paces itself against the countdown
+    designer_tries: int = 5
+    paint_timeout: float = 40 * 60
+    judge: bool = True  # a model judges each finished painting; off in offline mode
+    judge_weight: float = 0.5  # share of the score the judge's verdict carries; the rest is the numeric critic
+    confirm: int = 3  # paintings a challenger and the champion each stand on before the champion changes
+    parents: int = 2
+    operator_weights: dict[str, float] = field(default_factory=lambda: {"refine": 0.4, "invent": 0.4, "recombine": 0.2})
 
-    @computed_field
     @property
-    def visualizer_props(self) -> dict[str, str | float]:
-        return {
-            "pixel": round(self.pixel, 4),
-            "style": round(self.style, 4),
-            "expressivity": round(self.expressivity, 4),
-            "blame_toolkit": self.blame_toolkit,
-            "blame_agent": self.blame_agent,
-        }
-
-    def format_observed_outcome(self, parent_result: EvaluationResult | None, ndigits: int = 3) -> str:
-        if not self.is_viable:
-            return "Not viable: " + "; ".join(self.notes)
-        text = f"Score {self.score:.3f} (pixel {self.pixel:.3f}, style {self.style:.3f})"
-        if parent_result is not None:
-            ps = round(parent_result.score, ndigits)
-            s = round(self.score, ndigits)
-            if s > ps:
-                text += f", better than the parent's {ps:.3f}."
-            elif s < ps:
-                text += f", worse than the parent's {ps:.3f}."
-            else:
-                text += f", same as the parent's {ps:.3f}."
-        return text
+    def n_looks(self) -> int:
+        return self.looks if self.looks is not None else max(4, self.actions // 25)
 
 
-def _seed(target: Target) -> int:
-    return zlib.crc32(target.name.encode())
+# ---- instruments ----------------------------------------------------------------------------------------------
 
 
-class PaintingEvaluator(Evaluator):
-    """
-    Paints the training targets with each (toolkit, strategy) combination and scores with the critic. The
-    held-out targets are painted by `evaluate_holdout`, which the graph runner calls for new champions only.
-
-    role="toolkit": the organism is a Toolkit, painted by the agent node's top `partner_k` strategies.
-    role="agent":   the organism is a Strategy, painting with the toolkit node's top `partner_k` toolkits.
-    Blame comes from the first combination, which is the champion pairing.
-    """
-
-    def __init__(
-        self,
-        role: Literal["toolkit", "agent"],
-        board: Board,
-        critic: Critic,
-        oracle: OracleFitter,
-        train: list[Target],
-        holdout: list[Target],
-        partner_k: int,
-        painter: Callable[..., np.ndarray] = paint,
-    ) -> None:
-        self.painter = painter
-        self.role = role
-        self.board = board
-        self.critic = critic
-        self.oracle = oracle
-        self.train = train
-        self.holdout = holdout
-        self.partner_k = partner_k
-
-    def _pairings(self, organism) -> tuple[list[Toolkit], list[Strategy]]:
-        if self.role == "toolkit":
-            return [organism], self.board.elites("agent", self.partner_k)
-        return self.board.elites("toolkit", self.partner_k), [organism]
-
-    def evaluate(self, organism) -> PaintResult:
-        toolkits, strategies = self._pairings(organism)
-
-        artifacts: dict[str, str | None] = {}
-        if self.role == "toolkit":
-            artifacts["thumb"] = artifact(swatch_sheet(organism.brushes))
-            violations = physics_violations(organism.brushes)
-            if violations:
-                return PaintResult(
-                    score=0.0,
-                    is_viable=False,
-                    trainable_failure_cases=[],
-                    notes=violations,
-                    artifacts={k: v for k, v in artifacts.items() if v},
-                )
-
-        train_totals, pixels, styles, oracle_means = [], [], [], []
-        train_failures: list[PatchFailure] = []
-        blame_counts = {"toolkit": 0, "agent": 0}
-        n_triptychs = 0
-        reports: list[dict] = []
-
-        for target in self.train:
-            primary = None
-            for tk in toolkits:
-                oracle_errs, oracle_canvas = self.oracle.fit(tk, target)
-                for st in strategies:
-                    canvas = self.painter(st, tk, target, seed=_seed(target), record=primary is None)
-                    scores = self.critic.score(canvas, target)
-                    train_totals.append(scores["total"])
-                    pixels.append(scores["pixel"])
-                    styles.append(scores["style"])
-                    if primary is None:
-                        primary = (canvas, oracle_errs, oracle_canvas)
-
-            canvas, oracle_errs, oracle_canvas = primary
-            agent_errs = self.critic.patch_errors(canvas, target)
-            oracle_means.append(float(oracle_errs.mean()))
-            artifacts[f"canvas_{target.name}"] = artifact(to_png(canvas))
-            artifacts[f"oracle_{target.name}"] = artifact(to_png(oracle_canvas))
-            artifacts[f"heat_{target.name}"] = artifact(heatmap(self.critic.pixel_error(canvas, target)))
-            reports.append({**self.critic.report(canvas, target, artifact), "train": True})
-
-            rows, cols = target.grid
-            for r in range(rows):
-                for c in range(cols):
-                    o, a = float(oracle_errs[r, c]), float(agent_errs[r, c])
-                    if o > TOOL_THRESHOLD:
-                        blame = "toolkit"
-                    elif a - o > GAP_THRESHOLD:
-                        blame = "agent"
-                    else:
-                        continue
-                    blame_counts[blame] += 1
-                    if blame != self.role:
-                        continue
-                    trip = None
-                    if n_triptychs < MAX_TRIPTYCHS:
-                        ys, xs = target.patch_slice(r, c)
-                        trip = artifact(triptych(target.image[ys, xs], oracle_canvas[ys, xs], canvas[ys, xs], scale=1))
-                        n_triptychs += 1
-                    failure = PatchFailure(
-                        data_point_id=f"{target.name}/r{r}c{c}",
-                        failure_type=target.classes[(r, c)],
-                        target=target.name,
-                        row=r,
-                        col=c,
-                        blame=blame,
-                        oracle_err=round(o, 4),
-                        agent_err=round(a, 4),
-                        triptych=trip,
-                    )
-                    train_failures.append(failure)
-
-        first = self.train[0].name
-        if self.role == "agent":
-            artifacts["thumb"] = artifacts.get(f"canvas_{first}")
-        artifacts["heat"] = artifacts.get(f"heat_{first}")
-
-        # Worst patches first, so the mutator sees the clearest examples.
-        train_failures.sort(key=lambda f: -(f.oracle_err if self.role == "toolkit" else f.agent_err - f.oracle_err))
-        return PaintResult(
-            score=float(np.mean(train_totals)),
-            trainable_failure_cases=train_failures,
-            pixel=float(np.mean(pixels)),
-            style=float(np.mean(styles)),
-            expressivity=max(0.0, 1.0 - float(np.mean(oracle_means)) / 0.25),
-            blame_toolkit=blame_counts["toolkit"],
-            blame_agent=blame_counts["agent"],
-            artifacts={k: v for k, v in artifacts.items() if v},
-            details={"critic": reports},
-        )
-
-    def evaluate_holdout(self, organism) -> dict:
-        """
-        Paint the held-out targets with the champion pairing and score them. The graph runner calls this once
-        per new champion: only champions feed the overfitting alarm, so painting the held-out targets on every
-        evaluation doubled the cost of evolution for a number nobody read.
-        """
-        toolkits, strategies = self._pairings(organism)
-        tk, st = toolkits[0], strategies[0]
-        reports, totals, artifacts = [], [], {}
-        for target in self.holdout:
-            canvas = self.painter(st, tk, target, seed=_seed(target), record=True)
-            report = self.critic.report(canvas, target, artifact)
-            reports.append({**report, "train": False})
-            totals.append(report["total"])
-            artifacts[f"canvas_{target.name}"] = artifact(to_png(canvas))
-        return dict(
-            score=float(np.mean(totals)) if totals else None,
-            details={"critic": reports},
-            artifacts={k: v for k, v in artifacts.items() if v},
-        )
-
-    def verify_mutation(self, organism) -> bool:
-        """Toolkit only: did the change lower the oracle's error on the patches it was meant to fix?"""
-        if self.role != "toolkit":
-            raise NotImplementedError("Only the toolkit node verifies mutations")
-        parent = organism.parent
-        if parent is None or physics_violations(organism.brushes):
-            return True  # let evaluation record it as non-viable, so it shows up in the lineage
-        cells = defaultdict(list)
-        for f in organism.from_failure_cases or []:
-            cells[f.target].append((f.row, f.col))
-        targets = {t.name: t for t in self.train + self.holdout}
-        new_err = old_err = 0.0
-        for name, rc in cells.items():
-            new, _ = self.oracle.fit(organism, targets[name])
-            old, _ = self.oracle.fit(parent, targets[name])
-            new_err += sum(float(new[r, c]) for r, c in rc)
-            old_err += sum(float(old[r, c]) for r, c in rc)
-        return new_err < old_err - 1e-4
+def probe_source(source: str, width: int, height: int, work_dir: Path) -> tuple[dict, bytes | None]:
+    """Probe an instrument in a subprocess, where its code can't touch this process and the time limit works."""
+    d = work_dir / "probes" / new_id()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "instrument.py").write_text(source)
+    try:
+        r = subprocess.run([sys.executable, "-m", "conveyor.painting.instrument", str(d / "instrument.py"), str(d),
+                            str(width), str(height)], capture_output=True, text=True, timeout=120)
+        crash = r.stderr[-800:] if r.returncode else ""
+    except subprocess.TimeoutExpired:
+        crash = "the probe took longer than 120 s"
+    if (d / "probe.json").exists():
+        report = json.loads((d / "probe.json").read_text())
+    else:
+        report = {"ok": False, "errors": [f"the probe crashed: {crash.strip() or 'no output'}"], "warnings": [],
+                  "traits": {}, "niche": None}
+    sheet = (d / "sheet.png").read_bytes() if (d / "sheet.png").exists() else None
+    return report, sheet
 
 
-def build_painting_graph(
-    width: int = 80, llm: LLMClient | None = None, harness: str = "pi", strokes: int = 500,
-    parents: int | None = None, concurrency: int | None = None, paint_model: str | None = None
-) -> tuple[Board, list[Node], list[Edge], list[tuple[str, int]]]:
-    """
-    The painting graph. With `llm`, the painter and some mutators run on that model; otherwise all scripted.
-    `harness` picks how the painter talks to the model: "pi" (one Pi conversation with look/finish tools) or
-    "stateless" (a fresh request every turn).
-    """
-    train, holdout = default_targets(width=width)
-    # Brush sizes and their limits are in canvas pixels, so they scale with the canvas before anything is built.
-    scale = set_canvas_scale(width)
-    board = Board()
-    critic = Critic()
-    # `strokes` is the LLM painter's cap; the scripted painter evolves its own count and the oracle's floor covers it.
-    oracle = OracleFitter(stroke_budget=strokes if llm is not None else None)
-    edges = [
-        Edge("toolkit", "agent", "artifact", "brush functions"),
-        Edge("agent", "critic", "artifact", "painting"),
-        Edge("critic", "toolkit", "feedback", "toolkit failures"),
-        Edge("critic", "agent", "feedback", "agent failures"),
-    ]
-    critic_node = Node(
-        name="critic",
-        description="Pixel match at three scales plus a style proxy. Splits blame using the oracle fitter.",
-        fixed=True,
-        version=critic.version,
-        mirror="agent",
-        thumbnail_artifact="heat",
-    )
+def make_instrument(source: str, summary: str, setup: Setup, store: Store | None, height: int, **fields) -> Organism:
+    """An instrument organism, probed: niche, traits and demo sheet filled in, or marked not viable with why."""
+    report, sheet = probe_source(source, setup.width, height, setup.work_dir)
+    org = Organism(node="instrument", genome={"source": source}, summary=summary, niche=report.get("niche"),
+                   traits=report.get("traits") or {}, viable=bool(report["ok"]),
+                   note="; ".join(report["errors"])[:1000], **fields)
+    if sheet is not None and store is not None:
+        org.sheet = store.artifact(sheet)
+        _SHEETS[org.sheet] = sheet
+    return org
 
-    if llm is not None:
-        from conveyor.painting.llm_agent import INITIAL_PROMPT
-        from conveyor.painting.llm_agent import PromptStrategy
-        from conveyor.painting.llm_agent import llm_paint
-        from conveyor.painting.llm_mutators import LLMPromptMutator
-        from conveyor.painting.llm_mutators import LLMToolkitMutator
 
-        if harness == "pi":
-            from conveyor.painting.pi_harness import PiHarness
+def _judge_png(img: np.ndarray) -> bytes:
+    """An image as the judge sees it: 3x, nearest-neighbour, no grid. The same for the target and every painting."""
+    return to_png(img, scale=3)
 
-            painter = PiHarness(llm, model=paint_model)
+
+def instrument_doc(source: str) -> str:
+    try:
+        return (ast.get_docstring(ast.parse(source)) or "").strip().split("\n\n")[0].replace("\n", " ")[:240]
+    except SyntaxError:
+        return ""
+
+
+# ---- painting -------------------------------------------------------------------------------------------------
+
+
+@dataclass
+class Painting:
+    instrument_id: str
+    prompt_id: str
+    score: float
+    viable: bool
+    critic: dict
+    artifacts: dict
+    feedback: dict
+    session_id: str | None
+    error: str | None
+    details: dict
+
+
+@dataclass
+class Roles:
+    """Which harness runs each kind of model work. Any role may be None in offline mode."""
+
+    paint: ProcessHarness | None = None
+    mutate: ProcessHarness | None = None
+    judge: ProcessHarness | None = None
+
+    @classmethod
+    def of(cls, harness: "Roles | ProcessHarness | None") -> "Roles":
+        if isinstance(harness, Roles):
+            return harness
+        return cls(paint=harness, mutate=harness, judge=harness)
+
+    def all(self) -> list[ProcessHarness]:
+        seen: list[ProcessHarness] = []
+        for h in (self.paint, self.mutate, self.judge):
+            if h is not None and h not in seen:
+                seen.append(h)
+        return seen
+
+
+class Painter:
+    """Paints (instrument, prompt) pairs. A pair's paintings are numbered and kept, so both nodes read the same
+    ones: confirming a new instrument champion paints the strategy champion's next standing too."""
+
+    def __init__(self, setup: Setup, store: Store, harness: Roles | ProcessHarness | None) -> None:
+        self.setup = setup
+        self.store = store
+        roles = Roles.of(harness)
+        self.claude = roles.paint  # the painting harness (the name predates Pi)
+        self.critic = Critic()
+        self.target = load_target(setup.target, width=setup.width)
+        self._cache: dict[tuple[str, str, int], Painting] = {}
+        self._locks: dict[tuple[str, str, int], threading.Lock] = {}
+        self._lock = threading.Lock()
+        self.target_png = gridded_png(self.target.image)
+        self.sheets: dict[str, bytes] = {}  # instrument id -> demo sheet png, for the painter's first message
+        self.judge: ClaudeJudge | None = None
+        if setup.judge and setup.mode != "offline" and roles.judge is not None:
+            self.judge = ClaudeJudge(roles.judge, setup.work_dir / store.run_id)
+        self.judge_target_png = _judge_png(self.target.image)
+
+    def paint(self, instrument: Organism, prompt: Organism, sample: int = 0) -> Painting:
+        """The pair's painting number `sample`, made now if there isn't one yet."""
+        key = (instrument.id, prompt.id, sample)
+        with self._lock:
+            lock = self._locks.setdefault(key, threading.Lock())
+        with lock:
+            hit = self._cache.get(key)
+            if hit is not None:
+                return hit
+            result = self._paint(instrument, prompt)
+            result.details["sample"] = sample
+            if result.viable:  # a crashed or cut-off painting can be tried again later
+                self._cache[key] = result
+            return result
+
+    def _session_dir(self, kind: str) -> Path:
+        d = self.setup.work_dir / self.store.run_id / f"{kind}-{new_id()}"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _paint(self, instrument: Organism, prompt: Organism) -> Painting:
+        s = self.setup
+        d = self._session_dir("paint")
+        job = {"source": instrument.genome["source"], "target": s.target, "width": s.width, "actions": s.actions,
+               "looks": s.n_looks, "seed": random.randrange(1 << 30), "snapshot_every": 5}
+        (d / "job.json").write_text(json.dumps(job))
+        started = time.time()
+        ingest = _Ingest(self.store, d)
+        if s.mode == "offline" or self.claude is None:
+            sid = new_id()
+            ingest.session_id = sid
+            self.store.start_session(sid, node=None, organism_id=instrument.id, purpose="paint (greedy)",
+                                     model="greedy", effort=None, request={"job": {**job, "source": "(instrument)"}},
+                                     dir=str(d))
+            r = subprocess.run([sys.executable, "-m", "conveyor.painting.paintserver", str(d), "--greedy"],
+                               capture_output=True, text=True, timeout=s.paint_timeout)
+            ingest.pull()
+            error = r.stderr[-800:] if r.returncode else None
+            self.store.update_session(sid, status="error" if error else "ok", ended=time.time(), cost=0.0, error=error)
+            session_error = error
         else:
-            painter = partial(llm_paint, client=llm)
-        # Every evaluation is several model calls per painting, so one partner and small rescores. Parents and
-        # lanes decide how many paintings overlap: a live run spent 93 minutes painting in 74 minutes of wall
-        # clock, which is barely parallel at all.
-        # Each painting runs its own node sidecar, so lanes cost memory as well as rate limit. Eight let five
-        # paintings run at once and the machine ran out of memory; four is the safer default.
-        lanes = concurrency or 4
-        small = dict(num_parents=parents or 4, rescore_top_k=2, mutator_concurrency=lanes,
-                     evaluator_concurrency=lanes, holdout_every=3)
-        nodes = [
-            Node(
-                name="toolkit",
-                description=f"Component A. Brush functions. LLM ({llm.model}) and rule-based mutators compete.",
-                initial_organism=initial_toolkit(fine=True, scale=scale),
-                evaluator=PaintingEvaluator("toolkit", board, critic, oracle, train, holdout, 1, painter),
-                mutators=[LLMToolkitMutator(llm), TargetedToolkitMutator(), CrossoverToolkitMutator()],
-                partners=["agent"],
-                partner_k=1,
-                verify_mutations=True,
-                **small,
-            ),
-            Node(
-                name="agent",
-                description=f"Component B. An LLM painter ({paint_model or llm.model}, {harness} harness) "
-                            "whose prompt evolves.",
-                initial_organism=PromptStrategy(prompt=INITIAL_PROMPT, n_strokes=strokes),
-                evaluator=PaintingEvaluator("agent", board, critic, oracle, train, holdout, 1, painter),
-                mutators=[LLMPromptMutator(llm)],
-                partners=["toolkit"],
-                partner_k=1,
-                **small,
-            ),
-            critic_node,
-        ]
-        # The agent node is the cheaper one (one mutator, no verification), so it gets two iterations per cycle.
-        return board, nodes, edges, [("agent", 2), ("toolkit", 1)]
+            inst = Instrument(instrument.genome["source"])
+            h, w = self.target.height, self.target.width
+            system = (prompt.genome["prompt"].strip() + "\n\n" + prompts.PAINTER_RULES.format(
+                w=w, h=h, actions=s.actions, looks=s.n_looks, reference=inst.reference(w, h),
+                area_cap=Canvas(h, w).area_cap, share=CALL_AREA_SHARE))
+            if self.judge is not None:
+                system += "\n\n" + prompts.JUDGE_RULE
+            sheet = self._sheet(instrument)
+            first, second, third = prompts.PAINTER_FIRST_MESSAGE
+            content = [{"type": "text", "text": first + ":"}, {"type": "png", "data": self.target_png}]
+            if sheet:
+                content += [{"type": "text", "text": second + ":"}, {"type": "png", "data": sheet}]
+            content.append({"type": "text", "text": third})
+            tools = [t.name for t in inst.spec.tools] + ["look", "finish"]
+            outcome = self.claude.run(Job(
+                purpose="paint", system_prompt=system, content=content, cwd=d,
+                mcp={"name": "canvas", "command": sys.executable, "args": ["-m", "conveyor.painting.paintserver", str(d)]},
+                tools=tools, stop_tools=["finish"], max_budget_usd=s.paint_budget_usd, timeout=s.paint_timeout,
+                node="painting",
+                organism_id=instrument.id, on_start=ingest.start,
+                on_event=lambda msg: ingest.pull() if msg.get("type") == "user" else None))
+            ingest.pull()
+            session_error = outcome.error
+        canvas = np.load(d / "canvas.npy") if (d / "canvas.npy").exists() else Canvas(self.target.height, self.target.width).img
+        finish = json.loads((d / "finish.json").read_text()) if (d / "finish.json").exists() else {}
+        calls = ingest.calls
+        applied = [c for c in calls if c.get("status") == "applied" and c.get("tool") not in ("look", "finish")]
+        # A painting that never got going (the session crashed before a single mark) says nothing about either
+        # organism, so it doesn't count as an evaluation of them.
+        viable = bool(applied)
+        critic = self.critic.score(canvas, self.target)
+        usage = Counter(c.get("tool") for c in applied)
+        rejected = [c for c in calls if c.get("status") == "rejected"]
+        stats = {
+            "actions_used": len(applied), "actions_budget": s.actions, "looks_used": sum(1 for c in calls if c.get("tool") == "look"),
+            "tool_use": dict(usage.most_common()), "refused": len(rejected),
+            "refusals": [c.get("error", "")[:160] for c in rejected[:5]],
+            "ran_dry": sum(1 for c in applied if c.get("dry")), "finished": bool(finish),
+        }
+        painting_png = to_png(canvas)
+        artifacts = {"painting": self.store.artifact(painting_png),
+                     "heat": self.store.artifact(heatmap_png(self.critic.pixel_error(canvas, self.target))),
+                     "pair": self.store.artifact(side_by_side(self.target.image, canvas, scale=2))}
+        feedback = {"pair_png": side_by_side(self.target.image, canvas, scale=2), "note": finish.get("note", ""),
+                    "stats": stats, "worst": worst_regions(canvas, self.target), "critic": critic}
+        details = {"critic": critic, "note": finish.get("note", ""), "stats": stats, "instrument_id": instrument.id,
+                   "prompt_id": prompt.id, "seconds": round(time.time() - started, 1), "session_error": session_error}
+        score = critic["total"]
+        if viable and self.judge is not None:
+            verdict = self._verdict(canvas, instrument.id)
+            if verdict is not None:
+                w = s.judge_weight
+                score = (1 - w) * critic["total"] + w * verdict.score
+                judged = {"scores": verdict.scores, "score": round(verdict.score, 4), "critique": verdict.critique,
+                          "session_id": verdict.session_id, "weight": w}
+                details["judge"] = judged
+                feedback["judge"] = judged
+            else:
+                details["judge"] = {"error": "the judge gave no usable verdict twice; scored by the critic alone"}
+        details["score"] = round(score, 5)
+        return Painting(instrument_id=instrument.id, prompt_id=prompt.id, score=score if viable else 0.0,
+                        viable=viable, critic=critic, artifacts=artifacts, feedback=feedback,
+                        session_id=ingest.session_id, error=None if viable else (session_error or "no marks were made"),
+                        details=details)
 
-    nodes = [
-        Node(
-            name="toolkit",
-            description="Component A. Brush functions and canvas physics.",
-            initial_organism=initial_toolkit(scale=scale),
-            evaluator=PaintingEvaluator("toolkit", board, critic, oracle, train, holdout, partner_k=2),
-            mutators=[TargetedToolkitMutator(), RandomToolkitMutator(), CrossoverToolkitMutator()],
-            partners=["agent"],
-            partner_k=2,
-            verify_mutations=True,
-            num_parents=3,
-        ),
-        Node(
-            name="agent",
-            description="Component B. The painter's strategy, standing in for the LLM agent's prompt.",
-            initial_organism=Strategy(),
-            evaluator=PaintingEvaluator("agent", board, critic, oracle, train, holdout, partner_k=1),
-            mutators=[TargetedStrategyMutator(), RandomStrategyMutator()],
-            partners=["toolkit"],
-            partner_k=1,
-            num_parents=3,
-        ),
-        critic_node,
+    def _verdict(self, canvas: np.ndarray, organism_id: str):
+        """The judge's verdict on a finished painting, retried once. Rate limits and budget stops propagate."""
+        for _ in range(2):
+            try:
+                return self.judge.judge(self.judge_target_png, _judge_png(canvas), organism_id=organism_id)
+            except JudgeError:
+                continue
+        return None
+
+    def _sheet(self, instrument: Organism) -> bytes | None:
+        if instrument.sheet and instrument.sheet in _SHEETS:
+            return _SHEETS[instrument.sheet]
+        if instrument.id not in self.sheets:
+            _, sheet = probe_source(instrument.genome["source"], self.setup.width, self.target.height, self.setup.work_dir)
+            if sheet:
+                self.sheets[instrument.id] = sheet
+        return self.sheets.get(instrument.id)
+
+    def evaluation(self, painting: Painting, organism: Organism, partner: Organism | None, reason: str) -> Evaluation:
+        return Evaluation(organism_id=organism.id, score=painting.score, viable=painting.viable,
+                          partner_id=partner.id if partner else None, reason=reason, details=painting.details,
+                          artifacts=painting.artifacts, session_id=painting.session_id, error=painting.error,
+                          feedback=painting.feedback)
+
+
+class _Ingest:
+    """Copies a painting's calls.jsonl into the store as strokes, snapshots as artifacts, as the painting runs."""
+
+    def __init__(self, store: Store, session_dir: Path) -> None:
+        self.store = store
+        self.dir = session_dir
+        self.session_id: str | None = None
+        self.calls: list[dict] = []
+        self._offset = 0
+        self._lock = threading.Lock()
+
+    def start(self, session_id: str) -> None:
+        self.session_id = session_id
+
+    def pull(self) -> None:
+        path = self.dir / "calls.jsonl"
+        if not path.exists():
+            return
+        with self._lock, open(path) as f:
+            f.seek(self._offset)
+            while True:
+                line = f.readline()
+                if not line or not line.endswith("\n"):
+                    break
+                self._offset = f.tell()
+                entry = json.loads(line)
+                self.calls.append(entry)
+                snap = None
+                if entry.get("snapshot") and (self.dir / entry["snapshot"]).exists():
+                    snap = self.store.artifact((self.dir / entry["snapshot"]).read_bytes())
+                if self.session_id:
+                    self.store.stroke(self.session_id, entry["i"], entry, snap)
+
+
+# ---- evaluators -------------------------------------------------------------------------------------------------
+
+
+def instrument_evaluator(painter: Painter):
+    def evaluate(org: Organism, partner: Organism | None, reason: str, sample: int = 0) -> Evaluation:
+        painting = painter.paint(org, partner, sample)
+        return painter.evaluation(painting, org, partner, reason)
+    return evaluate
+
+
+def prompt_evaluator(painter: Painter):
+    def evaluate(org: Organism, partner: Organism | None, reason: str, sample: int = 0) -> Evaluation:
+        painting = painter.paint(partner, org, sample)
+        return painter.evaluation(painting, org, partner, reason)
+    return evaluate
+
+
+# ---- mutators -------------------------------------------------------------------------------------------------
+
+
+def _learning_log(lineage: list[dict]) -> str:
+    if not lineage:
+        return "None yet: this is a seed."
+    lines = []
+    for e in lineage:
+        if not e["viable"]:
+            result = f"not viable ({e['note'][:160]})" if e["note"] else "not viable"
+        elif e["parent_score"] is not None and e["score"] is not None:
+            better = "better" if e["score"] > e["parent_score"] else "worse" if e["score"] < e["parent_score"] else "same"
+            result = f"scored {e['score']:.3f} against its parent's {e['parent_score']:.3f} ({better})"
+        else:
+            result = f"scored {e['score']:.3f}" if e["score"] is not None else "not scored"
+        moved = f", moving from {e['parent_niche']} to {e['niche']}" if e.get("niche") and e.get("parent_niche") and e["niche"] != e["parent_niche"] else ""
+        lines.append(f"- {e['mutator'] or 'seed'}: {e['summary'][:300]} -> {result}{moved}")
+    return "\n".join(lines)
+
+
+def _evidence(ev: Evaluation | None) -> tuple[str, list[dict]]:
+    """What the last painting with this organism showed, as text plus the target/painting image."""
+    if ev is None or not ev.feedback:
+        return "No painting with it yet.", []
+    fb = ev.feedback
+    c, st = fb["critic"], fb["stats"]
+    worst = "; ".join(f"x {w['x'][0]}-{w['x'][1]}, y {w['y'][0]}-{w['y'][1]}: {w['error']:.2f}" for w in fb["worst"])
+    uses = ", ".join(f"{k} x{v}" for k, v in st["tool_use"].items()) or "none"
+    single = ev.details.get("score", ev.score)
+    lines = [
+        (f"Score {ev.score:.3f}, the mean of {ev.samples} paintings; the one described here scored {single:.3f}. "
+         if ev.samples > 1 else f"Score {ev.score:.3f}. ") +
+        "One painting's score moves by a few hundredths on its own, so read small differences as noise. "
+        f"The numeric critic gave {c['total']:.3f} (pixel {c['pixel']:.3f}, style {c['style']:.3f}; "
+        "style distances " + ", ".join(f"{k} {v:.2f}" for k, v in c["style_distance"].items()) + ").",
+        f"The painter used {st['actions_used']} of {st['actions_budget']} actions ({uses}) and {st['looks_used']} looks. "
+        f"{st['refused']} calls were refused" + (f", for example: {st['refusals'][0]}" if st["refusals"] else "") +
+        f". {st['ran_dry']} calls ran out of area.",
+        f"Worst regions (RMSE): {worst}.",
+        "The painter's note at the end: " + (fb["note"].strip() or "(it didn't write one)"),
     ]
-    return board, nodes, edges, [("agent", 2), ("toolkit", 1)]
+    judged = fb.get("judge")
+    if judged:
+        sc = judged["scores"]
+        lines.append(f"An expert judge scored it likeness {sc['likeness']}, colour {sc['colour']}, brushwork "
+                     f"{sc['brushwork']}, overall {sc['overall']} (out of 10). The judge's critique: {judged['critique']}")
+    return "\n".join(lines), [{"type": "text", "text": "Target (left) and the painting (right):"},
+                              {"type": "png", "data": fb["pair_png"]}]
+
+
+class ClaudeInstrumentMutator(Mutator):
+    """Claude Code redesigns the instrument in a workbench where it can run its drafts before submitting."""
+
+    def __init__(self, operator: str, claude: ProcessHarness, setup: Setup, store: Store, height: int, weight: float) -> None:
+        self.operator = operator
+        self.name = f"{claude.name}:{operator}"
+        self.weight = weight
+        self.needs_other = operator == "recombine"
+        self.claude, self.setup, self.store, self.height = claude, setup, store, height
+
+    def _system(self) -> str:
+        canvas = Canvas(self.height, self.setup.width)
+        return prompts.DESIGNER_SYSTEM.format(
+            w=self.setup.width, h=self.height, contract=prompts.CONTRACT, area_cap=canvas.area_cap,
+            share=CALL_AREA_SHARE, max_radius=canvas.max_radius, side=int(2 * canvas.max_radius + 1),
+            timeout=CALL_TIMEOUT)
+
+    def propose(self, ctx: Context) -> list[Organism]:
+        s = self.setup
+        d = s.work_dir / self.store.run_id / f"mutate-{self.operator}-{new_id()}"
+        d.mkdir(parents=True, exist_ok=True)
+        wanted = ctx.wanted_niche if self.operator == "invent" else None
+        (d / "job.json").write_text(json.dumps({"width": s.width, "height": self.height, "max_tries": s.designer_tries,
+                                                "wanted_niche": wanted}))
+        evidence, images = _evidence(ctx.parent_eval)
+        content: list[dict] = []
+        if self.operator == "recombine" and ctx.other is not None:
+            other_evidence, other_images = _evidence(ctx.other_eval)
+            content += [{"type": "text", "text": f"Instrument A ({ctx.parent.niche}):\n\n```python\n"
+                         f"{ctx.parent.genome['source']}\n```\n\n{evidence}"}, *images,
+                        {"type": "text", "text": f"Instrument B ({ctx.other.niche}):\n\n```python\n"
+                         f"{ctx.other.genome['source']}\n```\n\n{other_evidence}"}, *other_images,
+                        {"type": "text", "text": prompts.RECOMBINE_TASK}]
+        else:
+            content += [{"type": "text", "text": f"The current instrument ({ctx.parent.niche}):\n\n```python\n"
+                         f"{ctx.parent.genome['source']}\n```"},
+                        {"type": "text", "text": "What happened when the painter used it:\n" + evidence}, *images]
+            if self.operator == "invent":
+                filled = "\n".join(f"- {n}: score {e.score:.3f}. {instrument_doc(o.genome['source'])}"
+                                   for n, (o, e) in sorted(ctx.niches.items())) or "- none yet"
+                empty = ", ".join(ctx.empty_niches) or "none"
+                content.append({"type": "text", "text": f"{prompts.NICHE_AXES}\n\nFilled niches:\n{filled}\n\n"
+                                f"Empty niches: {empty}.\n\n" + prompts.INVENT_TASK.format(wanted=wanted)})
+            else:
+                content.append({"type": "text", "text": prompts.REFINE_TASK})
+        content.append({"type": "text", "text": "Earlier changes in this instrument's line and what they did:\n"
+                        + _learning_log(ctx.lineage)})
+        outcome = self.claude.run(Job(
+            purpose=f"mutate instrument ({self.operator})", system_prompt=self._system(), content=content, cwd=d,
+            mcp={"name": "bench", "command": sys.executable, "args": ["-m", "conveyor.painting.workbench", str(d)]},
+            tools=["try_instrument", "submit_instrument"], stop_tools=["submit_instrument"],
+            max_budget_usd=s.mutate_budget_usd, node="instrument",
+            organism_id=ctx.parent.id, task_budget=s.mutate_task_budget))
+        sub = d / "submitted.json"
+        if not sub.exists():
+            raise RuntimeError(f"no instrument was submitted ({outcome.error or 'the session ended without submitting'})")
+        record = json.loads(sub.read_text())
+        child = make_instrument(record["source"], record.get("summary", ""), s, self.store, self.height,
+                                parent_id=ctx.parent.id, parent2_id=ctx.other.id if ctx.other else None,
+                                mutator=self.name, session_id=outcome.session_id)
+        if wanted:
+            child.traits = {**child.traits, "wanted_niche": wanted}
+        return [child]
+
+
+class ClaudePromptMutator(Mutator):
+    """The strategist edits the prompt rather than rewriting it. It returns edits, each quoting the passage it
+    replaces, and they're applied to the parent. The wording carries what earlier generations learned, and with
+    scores this noisy only a change or two at a time can be credited or blamed. A child that keeps less than
+    `MIN_WORDS_KEPT` of its parent's words is refused."""
+
+    name = "claude:strategy"
+    SCHEMA = {"type": "object", "properties": {
+        "edits": {"type": "array", "description": "One or two edits, applied in order.", "items": {
+            "type": "object", "properties": {
+                "old": {"type": "string", "description": "A passage copied exactly from the current prompt. "
+                        "Empty to add `new` at the end."},
+                "new": {"type": "string", "description": "What replaces it. Empty to cut the passage."}},
+            "required": ["old", "new"], "additionalProperties": False}},
+        "summary": {"type": "string", "description": "One sentence: what you changed and which failure it addresses."}},
+        "required": ["edits", "summary"], "additionalProperties": False}
+
+    def __init__(self, claude: ProcessHarness, setup: Setup, store: Store) -> None:
+        self.claude, self.setup, self.store = claude, setup, store
+        self.name = f"{claude.name}:strategy"
+
+    def propose(self, ctx: Context) -> list[Organism]:
+        d = self.setup.work_dir / self.store.run_id / f"mutate-strategy-{new_id()}"
+        parent = ctx.parent.genome["prompt"].strip()
+        evidence, images = _evidence(ctx.parent_eval)
+        instrument = ""
+        if ctx.partner is not None:
+            instrument = "\n\nThe instrument it painted with, as the painter saw it:\n" + _reference(ctx.partner, self.setup)
+        content = [
+            {"type": "text", "text": f"The current strategy prompt ({len(parent)} characters):\n<<<\n{parent}\n>>>"},
+            {"type": "text", "text": "What happened in the last painting with it:\n" + evidence + instrument}, *images,
+            {"type": "text", "text": "Earlier changes to this prompt and what they did:\n" + _learning_log(ctx.lineage)},
+            {"type": "text", "text": "Make one or two edits aimed at the most important failure. Don't repeat a "
+                                     "change that made things worse."},
+        ]
+        outcome = self.claude.run(Job(
+            purpose="mutate strategy", system_prompt=prompts.STRATEGIST_SYSTEM.format(max_chars=MAX_PROMPT_CHARS),
+            content=content, cwd=d, json_schema=self.SCHEMA, max_budget_usd=self.setup.mutate_budget_usd,
+            node="painter", organism_id=ctx.parent.id, task_budget=self.setup.mutate_task_budget))
+        out = outcome.structured if isinstance(outcome.structured, dict) else _json_in(outcome.result)
+        if not out or not isinstance(out.get("edits"), list) or not out["edits"]:
+            raise RuntimeError(f"no edits came back ({outcome.error or 'unparseable reply'})")
+        text, missed = apply_edits(parent, out["edits"])
+        if missed == len(out["edits"]):
+            raise RuntimeError(f"none of the {missed} edits matched the prompt")
+        text, trimmed = trim_prompt(text)
+        if text == parent:
+            return []
+        kept = words_kept(parent, text)
+        if kept < MIN_WORDS_KEPT:
+            raise RuntimeError(f"the edits kept {kept:.0%} of the prompt's words; a child has to keep at least "
+                               f"{MIN_WORDS_KEPT:.0%}")
+        notes = [f"{missed} of {len(out['edits'])} edits didn't match and were skipped" if missed else "",
+                 f"trimmed from {trimmed} to {len(text)} characters at a paragraph break" if trimmed else ""]
+        summary = str(out.get("summary", ""))[:600] + "".join(f" ({n})" for n in notes if n)
+        return [Organism(node="painter", genome={"prompt": text}, summary=summary, session_id=outcome.session_id,
+                         traits={"words_kept": round(kept, 3), "edits": len(out["edits"]) - missed})]
+
+
+MIN_WORDS_KEPT = 0.5
+
+
+def apply_edits(text: str, edits: list[dict]) -> tuple[str, int]:
+    """Apply find-and-replace edits in order. A passage matches exactly, or else with any run of whitespace
+    standing for any other; one that matches nowhere or more than once is skipped. Returns the text and the
+    number skipped."""
+    missed = 0
+    for e in edits:
+        old, new = str(e.get("old", "")), str(e.get("new", ""))
+        if not old.strip():
+            text = text.rstrip() + "\n\n" + new.strip() if new.strip() else text
+            continue
+        if text.count(old) == 1:
+            text = text.replace(old, new)
+            continue
+        hits = list(re.finditer(r"\s+".join(map(re.escape, old.split())), text))
+        if len(hits) != 1:
+            missed += 1
+            continue
+        text = text[: hits[0].start()] + new + text[hits[0].end():]
+    return re.sub(r"\n{3,}", "\n\n", text).strip(), missed
+
+
+def words_kept(parent: str, child: str) -> float:
+    """The share of the parent's words that survive into the child, in order."""
+    a, b = parent.split(), child.split()
+    if not a:
+        return 1.0
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    return sum(block.size for block in matcher.get_matching_blocks()) / len(a)
+
+
+def trim_prompt(text: str, limit: int = HARD_PROMPT_CHARS) -> tuple[str, int | None]:
+    """The prompt, cut at the last paragraph (or sentence) break under `limit` if it's longer. Returns the
+    original length when it was cut, else None."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text, None
+    head = text[:limit]
+    cut = head.rfind("\n\n")
+    if cut < limit // 2:
+        cut = head.rfind(". ") + 1
+    if cut < limit // 2:
+        cut = limit
+    return head[:cut].rstrip(), len(text)
+
+
+def _reference(instrument: Organism, setup: Setup) -> str:
+    try:
+        inst = Instrument(instrument.genome["source"])
+    except InstrumentError:
+        return "(the instrument doesn't compile)"
+    return inst.reference(setup.width, load_target(setup.target, width=setup.width).height)
+
+
+def _json_in(text: str) -> dict | None:
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        return json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+class JitterInstrumentMutator(Mutator):
+    """Offline stand-in: scale one number inside a tool function. It can only ever retune, never invent."""
+
+    name = "jitter"
+
+    def __init__(self, setup: Setup, store: Store, height: int) -> None:
+        self.setup, self.store, self.height = setup, store, height
+
+    def propose(self, ctx: Context) -> list[Organism]:
+        rng = random.Random()
+        source = ctx.parent.genome["source"]
+        tree = ast.parse(source)
+        spots = [n for fn in tree.body if isinstance(fn, ast.FunctionDef) for n in ast.walk(fn)
+                 if isinstance(n, ast.Constant) and isinstance(n.value, int | float) and not isinstance(n.value, bool)
+                 and abs(n.value) > 1e-9 and n.lineno == n.end_lineno]
+        if not spots:
+            return []
+        pick = rng.choice(spots)
+        new = round(float(pick.value) * rng.uniform(0.6, 1.5), 3)
+        lines = source.splitlines()
+        line = lines[pick.lineno - 1]
+        lines[pick.lineno - 1] = line[: pick.col_offset] + f"{new:g}" + line[pick.end_col_offset :]
+        summary = f"line {pick.lineno}: {pick.value:g} to {new:g}"
+        return [make_instrument("\n".join(lines) + "\n", summary, self.setup, self.store, self.height,
+                                parent_id=ctx.parent.id)]
+
+
+# ---- the graph --------------------------------------------------------------------------------------------------
+
+
+def build(setup: Setup, store: Store, harness: Roles | ProcessHarness | None) -> tuple[list[Node], Painter]:
+    roles = Roles.of(harness)
+    painter = Painter(setup, store, roles)
+    height = painter.target.height
+    seeds = [make_instrument(SEEDS[name], f"seed: {name}", setup, store, height) for name in setup.seeds]
+    for seed in seeds:
+        if not seed.viable:
+            raise RuntimeError(f"seed instrument doesn't probe cleanly: {seed.note}")
+    strategy = Organism(node="painter", genome={"prompt": prompts.INITIAL_STRATEGY}, summary="")
+    offline = setup.mode == "offline" or roles.paint is None or roles.mutate is None
+    if offline:
+        instrument_mutators: list[Mutator] = [JitterInstrumentMutator(setup, store, height)]
+        painter_mutators: list[Mutator] = []
+    else:
+        w = setup.operator_weights
+        instrument_mutators = [ClaudeInstrumentMutator(op, roles.mutate, setup, store, height, w.get(op, 0.0))
+                               for op in ("refine", "invent", "recombine") if w.get(op, 0.0) > 0]
+        painter_mutators = [ClaudePromptMutator(roles.mutate, setup, store)]
+    nodes = [
+        Node(name="instrument", seeds=seeds, evaluate=instrument_evaluator(painter), mutators=instrument_mutators,
+             partner="painter", archive=True, all_niches=all_niches(), niche_distance=niche_distance,
+             parents=setup.parents, confirm=setup.confirm,
+             description="The toolkit: a program that defines the painter's tools, their parameters, and any state "
+                         "they share. Parents are drawn across niches."),
+        Node(name="painter", seeds=[strategy], evaluate=prompt_evaluator(painter), mutators=painter_mutators,
+             partner="instrument", fixed=offline, parents=1, confirm=setup.confirm,
+             description="The painter's strategy prompt, run by Claude Code with the instrument's tools."
+                         if not offline else "Fixed in offline mode: the greedy painter ignores prompts."),
+    ]
+    return nodes, painter

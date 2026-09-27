@@ -1,208 +1,136 @@
-"""The real Pi sidecar, driven by Pi's fake provider: the agent loop, the protocol, and what gets recorded."""
+"""The Pi harness, run on Pi's scripted faux provider: the real agent loop, MCP plumbing and recording, no network."""
 
+import argparse
 import json
-import shutil
-from unittest import mock
+import sqlite3
 
-import numpy as np
 import pytest
 
-from conveyor.events import EventSink
-from conveyor.events import connect
-from conveyor.events import observing
-from conveyor.llm import LLMClient
-from conveyor.painting.canvas import TARGETS_DIR
-from conveyor.painting.canvas import blank
-from conveyor.painting.canvas import load_target
-from conveyor.painting.llm_agent import INITIAL_PROMPT
-from conveyor.painting.llm_agent import PromptStrategy
-from conveyor.painting.pi_harness import PI_DIR
-from conveyor.painting.pi_harness import PiHarness
-from conveyor.painting.toolkit import initial_toolkit
+from conveyor.evolve import Context
+from conveyor.evolve import Organism
+from conveyor.harness import Meter
+from conveyor.harness import RateLimited
+from conveyor.painting import prompts
+from conveyor.painting.judge import ClaudeJudge
+from conveyor.painting.problem import ClaudeInstrumentMutator
+from conveyor.painting.problem import ClaudePromptMutator
+from conveyor.painting.problem import Painter
+from conveyor.painting.problem import Setup
+from conveyor.painting.problem import make_instrument
+from conveyor.painting.seeds import PEN
+from conveyor.painting.seeds import ROUND
+from conveyor.pi import PiAgent
+from conveyor.pi import available
+from conveyor.pi import thinking_level
+from conveyor.store import Store
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("node") is None or not (PI_DIR / "node_modules" / "@earendil-works" / "pi-agent-core").is_dir(),
-    reason="needs node and `npm install` in pi-painter/",
-)
-
-STROKE = {"x": 20, "y": 30, "angle": 0, "color": "#806040"}
-SCRIPT = [
-    {"blocks": [{"thinking": "Block in the body first."},
-                {"tool": "flat_wash", "args": STROKE},
-                {"tool": "round_mid", "args": {**STROKE, "x": 30}},
-                {"tool": "look", "args": {}}]},
-    {"blocks": [{"thinking": "The body is in. Fix the ear, then stop."},
-                {"tool": "round_mid", "args": {**STROKE, "y": 10}},
-                {"tool": "no_such_brush", "args": STROKE},
-                {"tool": "finish", "args": {"note": "done"}}]},
-    {"blocks": [{"text": "This turn should never be requested."}]},
-]
+needs_pi = pytest.mark.skipif(available() is not None, reason=f"Pi sidecar not installed: {available()}")
 
 
-def _paint(tmp_path, script=SCRIPT, n_strokes=10, record=True, min_stroke_fraction=0.0):
-    sink = EventSink(tmp_path / "pi.db")
-    client = LLMClient(transport=lambda payload: {}, sink=sink)
-    harness = PiHarness(client, faux=script, max_looks=2, min_stroke_fraction=min_stroke_fraction)
-    target = load_target(TARGETS_DIR / "self_portrait.jpg", width=48)
-    with sink.trace() as trace, observing(node="agent", organism_id="org1"):
-        canvas = harness(PromptStrategy(prompt=INITIAL_PROMPT, n_strokes=n_strokes), initial_toolkit(), target,
-                         seed=1, record=record)
-    sink.close()
-    return canvas, target, client, trace, connect(tmp_path / "pi.db", readonly=True)
+def stroke(x, y):
+    return {"tool": "stroke", "args": {"x": x, "y": y, "angle": 0, "length": 30, "size": 6, "color": "#6f8fb5"}}
 
 
-def test_one_conversation_with_strokes_look_and_finish(tmp_path):
-    canvas, target, client, trace, conn = _paint(tmp_path)
-    assert not np.allclose(canvas, blank(target))
-
-    calls = conn.execute("SELECT * FROM llm_calls ORDER BY started").fetchall()
-    assert len(calls) == 2  # finish stopped the loop before the third scripted reply
-    first, second = (json.loads(c["request"]) for c in calls)
-    assert first["conversation"] == second["conversation"]
-    assert (first["turn"], second["turn"]) == (1, 2)
-    assert all(c["node"] == "agent" and c["organism_id"] == "org1" and c["trace_id"] == trace.id for c in calls)
-
-    # Turn 1 sends the system prompt and the opening message with the target and the blank canvas.
-    assert first["messages"][0]["role"] == "system" and "look" in first["messages"][0]["content"]
-    images = [p for p in first["messages"][1]["content"] if p["type"] == "image"]
-    assert len(images) == 2
-    assert {t["function"]["name"] for t in first["tools"]} == {"flat_wash", "round_mid", "look", "finish"}
-    # Turn 2 sends only what's new: the three tool results, the look result carrying the canvas image.
-    assert [m["role"] for m in second["messages"]] == ["tool", "tool", "tool"]
-    look = second["messages"][2]
-    assert look["name"] == "look" and any(p["type"] == "image" for p in look["content"])
-    stored = conn.execute("SELECT count(*) FROM artifacts WHERE name=?",
-                          (next(p["artifact"] for p in look["content"] if p["type"] == "image"),)).fetchone()[0]
-    assert stored == 1
-
-    assert calls[0]["reasoning"] == "Block in the body first."
-    outcomes = [[r["status"] for r in json.loads(c["tool_results"])] for c in calls]
-    assert outcomes == [["applied", "applied", "applied"], ["applied", "rejected", "applied"]]
-    assert json.loads(calls[1]["tool_results"])[1]["error"]  # Pi's own error for the unknown tool
+@pytest.fixture
+def env(tmp_path):
+    store = Store(tmp_path / "pi.db")
+    yield store, Meter(), Setup(width=64, actions=10, work_dir=tmp_path / "sessions", judge=False)
+    store.close()
 
 
-def test_cache_reads_are_recorded_and_counted(tmp_path):
-    _, _, client, _, conn = _paint(tmp_path)
-    second = json.loads(conn.execute("SELECT usage FROM llm_calls ORDER BY started LIMIT 1 OFFSET 1").fetchone()[0])
-    assert second["prompt_tokens_details"]["cached_tokens"] > 0  # the fake provider simulates prefix caching
-    assert client.usage.cached_tokens > 0 and client.usage.calls == 2
-    events = [json.loads(r[0]) for r in conn.execute("SELECT data FROM events WHERE kind='llm_call'")]
-    assert sum(e["cached_tokens"] for e in events) == client.usage.cached_tokens
+def rows(store, sql, *args):
+    store.flush()
+    conn = sqlite3.connect(store.path)
+    return conn.execute(sql, args).fetchall()
 
 
-def test_replay_interleaves_model_calls_strokes_and_looks(tmp_path):
-    _, _, _, trace, conn = _paint(tmp_path)
-    names = [r[0] for r in conn.execute("SELECT name FROM spans WHERE trace_id=? ORDER BY idx", (trace.id,))]
-    # Each model call's span lands when its reply ends, right before the tool calls it made.
-    assert names == ["model call (paint)", "flat_wash", "round_mid", "look",
-                     "model call (paint)", "round_mid", "finish"]
+@needs_pi
+def test_a_painting_on_pi(env):
+    store, meter, setup = env
+    faux = [
+        {"blocks": [{"thinking": "Sky first."}, stroke(10, 10), stroke(10, 30), {"tool": "look", "args": {}}]},
+        {"blocks": [{"tool": "finish", "args": {"note": "Needed curves."}}]},
+        {"blocks": [{"text": "Done."}]},
+        {"blocks": [{"text": "This reply should never be asked for."}]},
+    ]
+    painter = Painter(setup, store, PiAgent("faux-model", store=store, meter=meter, faux=faux))
+    inst = make_instrument(ROUND, "round", setup, store, painter.target.height)
+    p = painter.paint(inst, Organism(node="painter", genome={"prompt": prompts.INITIAL_STRATEGY}))
+    assert p.viable and p.details["stats"]["tool_use"] == {"stroke": 2} and p.details["note"] == "Needed curves."
+    [(status, model, turns)] = rows(store, "SELECT status, model, num_turns FROM sessions")
+    assert status == "ok" and model == "faux-model" and turns == 2  # it stops after the turn that called finish
+    kinds = [k for (k,) in rows(store, "SELECT kind FROM session_events ORDER BY idx")]
+    assert kinds[0] == "init" and "thinking" in kinds and kinds.count("tool_use") == 4 and kinds[-1] == "result"
+    joined = rows(store, "SELECT count(*) FROM strokes WHERE json_extract(data, '$.tool_use_id') IS NOT NULL")[0][0]
+    assert joined == 4  # every paint-server log line carries the tool call id from the transcript
+    images = rows(store, "SELECT data FROM session_events WHERE kind='tool_result'")
+    assert any(json.loads(d)["images"] for (d,) in images)  # the look came back as an image
 
 
-def test_finish_is_refused_until_most_strokes_are_used(tmp_path):
-    early = {"blocks": [{"tool": "flat_wash", "args": STROKE}, {"tool": "flat_wash", "args": {**STROKE, "x": 5}},
-                        {"tool": "finish", "args": {"note": "done already"}}]}
-    rest = {"blocks": [{"tool": "round_mid", "args": {**STROKE, "y": y}} for y in (5, 15)]}
-    _, _, client, trace, conn = _paint(tmp_path, script=[early, rest], n_strokes=4, min_stroke_fraction=0.9)
-    turns = conn.execute("SELECT tool_results FROM llm_calls ORDER BY started").fetchall()
-    first, second = (json.loads(t[0]) for t in turns)
-    assert [r["status"] for r in first] == ["applied", "applied", "rejected"]
-    assert first[2]["error"].startswith("refused, 2 of the 4")
-    assert [r["status"] for r in second] == ["applied", "applied"]  # the fourth stroke ends the painting
-    spans = [r[0] for r in conn.execute("SELECT name FROM spans WHERE trace_id=? ORDER BY idx", (trace.id,))]
-    assert "finish refused" in spans and "finish" not in spans
+@needs_pi
+def test_structured_output_through_respond(env):
+    store, meter, setup = env
+    answer = {"edits": [{"old": "Block in the large areas of colour first", "new": "Paint the darks first"}],
+              "summary": "darks first"}
+    pi = PiAgent("faux-model", store=store, meter=meter, faux=[{"blocks": [{"tool": "respond", "args": answer}]},
+                                                                {"blocks": [{"text": "ok"}]}])
+    parent = Organism(node="painter", genome={"prompt": prompts.INITIAL_STRATEGY})
+    ctx = Context(node="painter", parent=parent, parent_eval=None, partner=None, lineage=[], niches={}, empty_niches=[])
+    mutator = ClaudePromptMutator(pi, setup, store)
+    [child] = mutator.propose(ctx)
+    assert mutator.name == "pi:strategy" and "Paint the darks first, then work" in child.genome["prompt"]
+
+    verdict = {"likeness": 6, "colour": 5, "brushwork": 4, "overall": 5, "critique": "Too blue."}
+    judge = ClaudeJudge(PiAgent("faux-model", store=store, meter=meter,
+                                faux=[{"blocks": [{"tool": "respond", "args": verdict}]}, {"blocks": [{"text": "ok"}]}]),
+                        setup.work_dir)
+    v = judge.judge(b"\x89PNG\r\n\x1a\n", b"\x89PNG\r\n\x1a\n")
+    assert v.scores["likeness"] == 6 and v.critique == "Too blue."
 
 
-def test_finish_is_accepted_after_repeated_refusals(tmp_path):
-    stubborn = {"blocks": [{"tool": "finish", "args": {}}]}
-    _, _, _, _, conn = _paint(tmp_path, script=[stubborn] * 5, n_strokes=10, min_stroke_fraction=0.9)
-    statuses = [json.loads(t[0])[0]["status"] for t in conn.execute("SELECT tool_results FROM llm_calls ORDER BY started")]
-    assert statuses == ["rejected", "rejected", "rejected", "applied"]
+@needs_pi
+def test_an_instrument_mutation_on_pi(env):
+    store, meter, setup = env
+    faux = [{"blocks": [{"tool": "try_instrument", "args": {"source": PEN}}]},
+            {"blocks": [{"tool": "submit_instrument", "args": {"source": PEN, "summary": "a pen"}}]},
+            {"blocks": [{"text": "Submitted."}]}]
+    parent = make_instrument(ROUND, "seed", setup, store, 80)
+    mutator = ClaudeInstrumentMutator("invent", PiAgent("faux-model", store=store, meter=meter, faux=faux),
+                                      setup, store, 80, 1.0)
+    ctx = Context(node="instrument", parent=parent, parent_eval=None, partner=None, lineage=[], niches={},
+                  empty_niches=[], wanted_niche="stateful/scalar/medium")
+    [child] = mutator.propose(ctx)
+    assert mutator.name == "pi:invent" and child.viable and child.traits["stateful"] and child.summary == "a pen"
 
 
-def test_the_painter_can_run_a_different_model_from_the_mutators(tmp_path):
-    """
-    Pi dispatches on the model's own API, so a responses-API model (muse-spark) can paint while `LLMClient`,
-    which only speaks chat completions, keeps running the mutators on its own model.
-    """
-    client = LLMClient(transport=lambda payload: {}, provider="opencode-go", api_key="test",
-                       model="glm-5.3-flash")
-    assert PiHarness(client, faux=[], model="muse-spark-1.3-contributor").model == "muse-spark-1.3-contributor"
-    assert PiHarness(client, faux=[]).model == "glm-5.3-flash"  # no override, no change
-    assert client.model == "glm-5.3-flash"  # the mutators are untouched either way
-
-    # A real harness (no faux script) looks the paint model up in the local catalog for the sidecar.
-    real = PiHarness(client, model="muse-spark-1.3-contributor")
-    assert real.model_def["id"] == "muse-spark-1.3-contributor"
-    assert "image" in real.model_def["input"]
+def test_rate_limits_are_per_harness():
+    meter = Meter(max_usage=0.85)
+    meter.note_rate_limit({"status": "rejected", "resetsAt": 4102444800}, "claude")  # year 2100
+    meter.check("pi")  # Pi keeps running while Claude's window is spent
+    with pytest.raises(RateLimited, match="claude hit its usage limit"):
+        meter.check("claude")
 
 
-def test_each_sidecar_gets_a_bounded_heap(tmp_path):
-    """Node defaults to a 2 GB heap per process, and paintings run several sidecars at once."""
-    client = LLMClient(transport=lambda payload: {}, provider="opencode-go", api_key="test")
-    assert PiHarness(client, faux=[]).heap_mb == 256
-    seen = {}
-
-    def fake_popen(argv, **kwargs):
-        seen["argv"] = argv
-        raise RuntimeError("stop here: the spawn is all this test needs")
-
-    target = load_target(TARGETS_DIR / "self_portrait.jpg", width=48)
-    harness = PiHarness(client, faux=[{"blocks": []}], heap_mb=128)
-    with mock.patch("conveyor.painting.pi_harness.subprocess.Popen", fake_popen), pytest.raises(RuntimeError):
-        harness(PromptStrategy(prompt=INITIAL_PROMPT, n_strokes=2), initial_toolkit(), target, seed=1)
-    assert "--max-old-space-size=128" in seen["argv"]
-    assert seen["argv"][-1].endswith("painter.mjs")
+def test_thinking_levels_move_to_what_the_model_publishes():
+    assert thinking_level("medium", ["low", "high", "max"]) == "high"  # ties go to the higher level
+    assert thinking_level("xhigh", ["low", "high", "max"]) == "max"
+    assert thinking_level("high", None) == "high"
+    assert thinking_level("none", ["low"]) == "off"
 
 
-def test_an_in_flight_call_names_the_painting_model(tmp_path):
-    """The live view reads rows while they run, so a row must name the model being called from the start."""
-    sink = EventSink(tmp_path / "m.db")
-    client = LLMClient(transport=lambda payload: {}, provider="opencode-go", api_key="test",
-                       model="glm-5.3-flash", sink=sink)
-    client.external_start("call1", purpose="paint", request={"turn": 1}, model="muse-spark-1.3-contributor")
-    client.external_start("call2", purpose="mutate", request={})  # no override: the client's own model
-    sink.close()
-    rows = dict(connect(tmp_path / "m.db", readonly=True).execute("SELECT id, model FROM llm_calls").fetchall())
-    assert rows["call1"] == "muse-spark-1.3-contributor"
-    assert rows["call2"] == "glm-5.3-flash"
+@needs_pi
+def test_roles_mix_harnesses(env, fake_claude, monkeypatch, capsys):
+    from conveyor.__main__ import _roles
 
-
-def test_the_image_limit_trims_what_is_sent_rather_than_cutting_looks(tmp_path):
-    """
-    A provider's image limit belongs to the sidecar's trim, not to the look budget. Cutting looks cost half the
-    painter's checking and didn't even avoid the fault: in one run 15 of 21 paintings sent 10 to 15 images
-    fine, while 7 were rejected at the 9th.
-    """
-    from conveyor.llm import PROVIDERS
-    from conveyor.painting.pi_harness import _PaintSession
-
-    target = load_target(TARGETS_DIR / "self_portrait.jpg", width=48)
-    strategy = PromptStrategy(prompt=INITIAL_PROMPT, n_strokes=500)  # one look per 40 strokes
-
-    def session(provider: str) -> _PaintSession:
-        client = LLMClient(transport=lambda payload: {}, provider=provider, api_key="test")
-        return _PaintSession(PiHarness(client, faux=[]), strategy, initial_toolkit(), target, seed=1, record=False)
-
-    assert session("opencode-go").max_looks == 13  # the stroke budget decides, not the image limit
-    assert session("openrouter").max_looks == 13
-    assert PROVIDERS["opencode-go"].max_images == 8  # the sidecar trims to this, keeping target plus newest
-    assert PROVIDERS["openrouter"].max_images is None
-
-
-def test_pressure_is_recorded_and_bad_pressure_rejected(tmp_path):
-    script = [{"blocks": [{"tool": "flat_wash", "args": {**STROKE, "pressure": 0.3}},
-                          {"tool": "flat_wash", "args": {**STROKE, "pressure": "hard"}},
-                          {"tool": "finish", "args": {}}]}]
-    _, _, _, trace, conn = _paint(tmp_path, script=script)
-    results = json.loads(conn.execute("SELECT tool_results FROM llm_calls").fetchone()[0])
-    assert [r["status"] for r in results] == ["applied", "rejected", "applied"]
-    args = json.loads(conn.execute("SELECT args FROM spans WHERE trace_id=? AND name='flat_wash'", (trace.id,)).fetchone()[0])
-    assert args["pressure"] == 0.3
-
-
-def test_running_out_of_strokes_ends_the_painting(tmp_path):
-    many = {"blocks": [{"tool": "flat_wash", "args": {**STROKE, "x": i}} for i in range(5)]}
-    _, _, client, _, conn = _paint(tmp_path, script=[many, many], n_strokes=3)
-    results = json.loads(conn.execute("SELECT tool_results FROM llm_calls").fetchone()[0])
-    assert [r["status"] for r in results] == ["applied"] * 3 + ["ignored"] * 2
-    assert client.usage.calls == 1
+    store, meter, _ = env
+    monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
+    args = argparse.Namespace(harness="claude", model="claude-opus-5-5", effort="high", provider="opencode-go",
+                              claude=str(fake_claude), lanes=1, judge=True,
+                              paint_harness="pi", paint_model=None, paint_effort=None,
+                              mutate_harness=None, mutate_model=None, mutate_effort="low",
+                              judge_harness=None, judge_model=None, judge_effort=None)
+    roles = _roles(args, store, meter)
+    assert roles.paint.name == "pi" and roles.paint.model == "glm-5.3-flash"  # a Claude model id isn't inherited
+    assert roles.mutate.name == "claude" and roles.mutate.effort == "low"
+    assert roles.judge.name == "claude" and roles.judge.effort == "high" and roles.judge is not roles.mutate
+    assert "paint   pi: glm-5.3-flash on OpenCode Go" in capsys.readouterr().out

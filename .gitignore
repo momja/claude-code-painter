@@ -6,3 +6,4 @@ runs/
 .env
 pi-painter/node_modules/
 .ruff_cache/
+pi-agent/node_modules/

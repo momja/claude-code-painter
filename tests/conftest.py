@@ -1,29 +1,16 @@
-"""Stub the models.dev catalog so tests never reach the network and prices stay fixed."""
+import stat
+import sys
+from pathlib import Path
 
 import pytest
 
-from conveyor import catalog
-
-CATALOG = {
-    "opencode-go": {"models": {"glm-5.3-flash": {
-        "name": "GLM-5.3-Flash", "reasoning": True,
-        "cost": {"input": 0.15, "output": 0.5, "cache_read": 0.03},
-        "modalities": {"input": ["text", "image"]},
-        "reasoning_options": [{"type": "effort", "values": ["low", "high", "max"]}],
-        "limit": {"context": 1_000_000, "output": 131_072},
-    }}},
-    "openrouter": {"models": {"z-ai/glm-5.3-flash": {
-        "name": "GLM-5.3-Flash", "reasoning": True,
-        "cost": {"input": 0.15, "output": 0.5, "cache_read": 0.03},
-        "modalities": {"input": ["text", "image"]},
-        "limit": {"context": 1_310_720, "output": 131_072},
-    }}},
-}
+HERE = Path(__file__).parent
 
 
-@pytest.fixture(autouse=True)
-def _stub_catalog(monkeypatch):
-    monkeypatch.setattr(catalog, "_catalog", lambda: CATALOG)
-    catalog.model_info.cache_clear()
-    yield
-    catalog.model_info.cache_clear()
+@pytest.fixture
+def fake_claude(tmp_path: Path) -> Path:
+    """An executable `claude` that runs tests/fake_claude.py with this interpreter."""
+    exe = tmp_path / "claude"
+    exe.write_text(f"#!/bin/sh\nexec {sys.executable} {HERE / 'fake_claude.py'} \"$@\"\n")
+    exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+    return exe

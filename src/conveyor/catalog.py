@@ -1,8 +1,8 @@
 """
 Model facts (prices, modalities, reasoning efforts, limits) from the models.dev catalog.
 
-Both providers conveyor talks to are listed there under one schema, so the Pi sidecar's model definition and
-the Python client's cost arithmetic read the same numbers. Prices are dollars per million tokens. The catalog
+Both providers the Pi harness talks to are listed there under one schema, so the sidecar gets a model
+definition, prices included, even for a model the installed pi-ai predates. Prices are dollars per million tokens. The catalog
 is fetched once per process; if it can't be reached, `model_info` returns a conservative guess rather than
 failing a run, and says so through `known`.
 """
@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from dataclasses import field
 from functools import lru_cache
 
-import httpx
+import json
+import urllib.request
 
 CATALOG_URL = "https://models.dev/api.json"
 TIMEOUT = 20.0
@@ -61,7 +62,10 @@ UNKNOWN = ModelInfo(id="", name="", cost=Cost(), inputs=("text", "image"), known
 @lru_cache(maxsize=1)
 def _catalog() -> dict:
     try:
-        return httpx.get(CATALOG_URL, timeout=TIMEOUT).json()
+        # models.dev answers 403 to urllib's default User-Agent.
+        request = urllib.request.Request(CATALOG_URL, headers={"User-Agent": "conveyor/0.2"})
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as r:
+            return json.loads(r.read())
     except Exception:  # noqa: BLE001 - an unreachable catalog must not take a run down
         return {}
 

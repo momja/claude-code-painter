@@ -1,149 +1,229 @@
-"""Canvas physics, target loading, and image helpers."""
+"""
+Canvas physics, targets, and image helpers.
+
+Instruments draw only through `Canvas`: `dab` (a soft round mark), `stamp` (an arbitrary small mask), `smudge`
+(drag paint already on the canvas), and `pick` (read a colour off the canvas). Paint is translucent and layers;
+nothing is erased except by painting over it.
+
+The one physical limit that matters is per call: a single tool call may touch at most `area_cap` pixels. That
+is what keeps a tool a brush. Without it an evolved tool could flood the canvas in one call, and the instrument
+would be a printer. The limit says nothing about the call's parameters, whether the tool keeps state, or what
+shape the mark takes, so it leaves the interface free to evolve. Instruments never see the target.
+"""
 
 from __future__ import annotations
 
 import io
 import math
 from dataclasses import dataclass
-from dataclasses import field
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
-from pydantic import BaseModel
-from pydantic import Field
+from PIL import ImageDraw
+from PIL import ImageFont
 
-from conveyor.painting.brushcode import BrushCodeError
-from conveyor.painting.brushcode import compile_brush
-
-PAPER = np.array([0.94, 0.91, 0.84], dtype=np.float32)
+PAPER = (0.94, 0.91, 0.84)
 TARGETS_DIR = Path(__file__).parent / "targets"
+BASE_WIDTH = 64  # the canvas width the size limits below were written for
 
-# Physical limits. A toolkit that breaks these is not viable. Without them a code-writing mutator will
-# eventually invent a "brush" that covers the whole canvas at full opacity, which is a stamp, not a brush.
-# The rest of what used to be limited here (softness, opacity, bleed, granulation) now lives inside each
-# brush's own program, so it is checked by rendering the brush instead of by reading its fields.
-LIMITS = {
-    "radius": (0.5, 12.0),
-    "length": (0.0, 24.0),
-}
-MAX_BRUSHES = 8
-BASE_WIDTH = 64  # the canvas width these limits were written for
+# Per call, as a share of the canvas: at 128 x 128 (the self-portrait) this is 1310 px, about a 50 x 26 px
+# stroke, roughly what the old toolkit's widest wash could cover in one call.
+CALL_AREA_SHARE = 0.08
+MAX_DABS_PER_CALL = 3000
+# A footprint pixel counts as touched from this alpha up, so a faint halo doesn't eat the area budget.
+TOUCH_ALPHA = 0.02
 
 
-def set_canvas_scale(width: int) -> float:
-    """
-    Scale the size limits to the canvas and return the factor. Brush sizes are in canvas pixels, so the same
-    radius covers a quarter of the area at 128 px that it does at 64. Mutates LIMITS in place, because the
-    mutators and the physics check read it by reference.
-    """
-    factor = max(1.0, width / BASE_WIDTH)
-    LIMITS["radius"] = (0.5, round(12.0 * factor, 1))
-    LIMITS["length"] = (0.0, round(24.0 * factor, 1))
-    return factor
+class CanvasError(ValueError):
+    """An instrument asked the canvas for something it can't do (bad colour, bad mask)."""
 
 
-class Brush(BaseModel):
-    """
-    A brush is a name, a reach, and a program. `source` draws the mark (see `brushcode`), which is what lets
-    a mutator invent a dotted line or a rake instead of turning the same six knobs.
-
-    `radius` and `length` stay out of the program because the caller needs them before it runs: they set the
-    bounding box the mark is drawn into, they are what the size limits bite on, and they are what the
-    painter sorts by when it picks a brush for a patch.
-
-    `template` and `params` are provenance, not truth. `source` is always what renders. When a scripted
-    mutator wrote the brush from a template it records which one and with what numbers, so a later targeted
-    edit can change "softness" by name. Brushes an LLM wrote have neither, and get edited as code.
-    """
-
-    name: str
-    radius: float
-    source: str
-    length: float = 0.0
-    doc: str = ""
-    template: str | None = None
-    params: dict[str, float] = Field(default_factory=dict)
-
-
-def physics_violations(brushes: list[Brush]) -> list[str]:
-    """
-    Everything that makes a toolkit unusable: too many brushes, a brush that reaches too far, or a brush
-    whose program will not compile or does not draw a mark. The code check runs the program once on a small
-    grid, so a brush that would have crashed mid-painting is caught here and the toolkit is marked
-    non-viable, which is the answer the dashboard can explain.
-    """
-    problems = []
-    if not brushes:
-        problems.append("toolkit has no brushes")
-    if len(brushes) > MAX_BRUSHES:
-        problems.append(f"{len(brushes)} brushes, limit is {MAX_BRUSHES}")
-    for b in brushes:
-        for attr, (lo, hi) in LIMITS.items():
-            v = getattr(b, attr)
-            if not lo <= v <= hi:
-                problems.append(f"{b.name}.{attr} = {v:.2f}, allowed {lo} to {hi}")
-        try:
-            compile_brush(b.source)
-        except BrushCodeError as e:
-            problems.append(f"{b.name}: {e}")
-    return problems
-
-
-def stroke_alpha(
-    brush: Brush, x: float, y: float, angle: float, height: int, width: int, rng: np.random.Generator
-) -> tuple[slice, slice, np.ndarray] | None:
-    """
-    Alpha mask of one stroke, cropped to its bounding box.
-
-    The caller places the stroke; the brush's own program decides what the mark looks like. The program sees
-    the box in stroke-local pixels: `u` runs along the path from the start point, `v` runs across it. That
-    is the whole reason a brush can be a dotted line (modulate on u) or a rake (modulate on v).
-
-    Returns None when the stroke misses the canvas, and also when the program misbehaves on a box shape the
-    probe in `physics_violations` did not hit. A dead brush laying nothing scores badly and gets selected
-    out, which beats taking a whole run down with it.
-    """
-    r = brush.radius
-    x2 = x + math.cos(angle) * brush.length
-    y2 = y + math.sin(angle) * brush.length
-    pad = r + 1.5
-    x0 = max(0, int(math.floor(min(x, x2) - pad)))
-    x1 = min(width, int(math.ceil(max(x, x2) + pad)))
-    y0 = max(0, int(math.floor(min(y, y2) - pad)))
-    y1 = min(height, int(math.ceil(max(y, y2) + pad)))
-    if x1 <= x0 or y1 <= y0:
-        return None
-
-    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32) + 0.5
-    dx, dy = xx - x, yy - y
-    cos_a, sin_a = math.cos(angle), math.sin(angle)
-    u = dx * cos_a + dy * sin_a   # along the path, 0 at the start point
-    v = -dx * sin_a + dy * cos_a  # across it, signed
-
-    fn = compile_brush(brush.source)
+def parse_color(value) -> tuple[float, float, float]:
+    """Hex string, or three numbers in 0..1 (or 0..255). Raises CanvasError otherwise."""
+    if isinstance(value, str):
+        s = value.strip().lstrip("#")
+        if len(s) == 3:
+            s = "".join(c * 2 for c in s)
+        if len(s) == 6:
+            try:
+                return tuple(int(s[i : i + 2], 16) / 255.0 for i in (0, 2, 4))  # type: ignore[return-value]
+            except ValueError:
+                pass
+        raise CanvasError(f"bad colour {value!r}: use hex like #8a6d4f")
     try:
-        with np.errstate(all="ignore"):
-            alpha = np.asarray(fn(u, v, rng, float(r), float(brush.length)), dtype=np.float32)
-    except Exception:  # noqa: BLE001 - the program is the mutator's, and a bad one must not end the run
-        return None
-    if alpha.shape != u.shape:
-        return None
-    np.clip(alpha, 0.0, 1.0, out=alpha)
-    return slice(y0, y1), slice(x0, x1), alpha[..., None]
+        arr = np.asarray(value, dtype=np.float64).reshape(-1)
+    except (TypeError, ValueError) as e:
+        raise CanvasError(f"bad colour {value!r}") from e
+    if arr.size != 3 or not np.isfinite(arr).all():
+        raise CanvasError(f"bad colour {value!r}: need three numbers")
+    if arr.max() > 1.0:
+        arr = arr / 255.0
+    arr = np.clip(arr, 0.0, 1.0)
+    return float(arr[0]), float(arr[1]), float(arr[2])
 
 
-def composite(region: np.ndarray, alpha: np.ndarray, color: np.ndarray) -> np.ndarray:
-    return region * (1.0 - alpha) + color * alpha
+def to_hex(color) -> str:
+    r, g, b = (int(round(float(c) * 255)) for c in np.clip(np.asarray(color, dtype=np.float64), 0, 1))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+class Canvas:
+    """
+    What an instrument's tools draw on. Coordinates are canvas pixels, x right and y down, origin top left.
+    `begin_call()` resets the per-call area budget; the paint server calls it before every tool call.
+    """
+
+    def __init__(self, height: int, width: int, image: np.ndarray | None = None) -> None:
+        self.height = int(height)
+        self.width = int(width)
+        self.img = (np.broadcast_to(np.asarray(PAPER, dtype=np.float32), (height, width, 3)).copy()
+                    if image is None else image.astype(np.float32).copy())
+        self.scale = max(1.0, self.width / BASE_WIDTH)
+        self.max_radius = 12.0 * self.scale
+        self.area_cap = int(CALL_AREA_SHARE * self.height * self.width)
+        self._touched = np.zeros((height, width), dtype=bool)
+        self.area_used = 0
+        self.dabs_used = 0
+        self.dry = False  # set when the call hit its area or dab limit and further marks were dropped
+
+    # ---- per-call accounting --------------------------------------------------------------------------
+
+    def begin_call(self) -> None:
+        self._touched[:] = False
+        self.area_used = 0
+        self.dabs_used = 0
+        self.dry = False
+
+    @property
+    def area_left(self) -> int:
+        return max(0, self.area_cap - self.area_used)
+
+    def _admit(self, ys: slice, xs: slice, alpha: np.ndarray) -> bool:
+        """Charge a mark's footprint against the call's area budget. False (and dry) when it doesn't fit."""
+        if self.dry:
+            return False
+        self.dabs_used += 1
+        if self.dabs_used > MAX_DABS_PER_CALL:
+            self.dry = True
+            return False
+        new = (alpha > TOUCH_ALPHA) & ~self._touched[ys, xs]
+        n = int(new.sum())
+        if self.area_used + n > self.area_cap:
+            self.dry = True
+            return False
+        self._touched[ys, xs] |= new
+        self.area_used += n
+        return True
+
+    # ---- the instrument API -----------------------------------------------------------------------------
+
+    def dab(self, x, y, radius, color, opacity=1.0, hardness=0.5) -> bool:
+        """
+        A soft round mark centred on (x, y). `hardness` 0 is a feathered edge, 1 a crisp one. Radius is clamped
+        to the canvas's brush limit. Returns False when the call is out of area and the dab was dropped.
+        """
+        r = float(np.clip(float(radius), 0.35, self.max_radius))
+        x, y = float(x), float(y)
+        opacity = float(np.clip(float(opacity), 0.0, 1.0))
+        hardness = float(np.clip(float(hardness), 0.0, 1.0))
+        rgb = np.asarray(parse_color(color), dtype=np.float32)
+        pad = r + 1.5
+        x0, x1 = max(0, int(math.floor(x - pad))), min(self.width, int(math.ceil(x + pad)))
+        y0, y1 = max(0, int(math.floor(y - pad))), min(self.height, int(math.ceil(y + pad)))
+        if x1 <= x0 or y1 <= y0 or opacity <= 0.0:
+            return True
+        yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32) + 0.5
+        d = np.hypot(xx - x, yy - y)
+        ramp = max(r * (1.0 - hardness), 0.5)
+        alpha = np.clip((r - d) / ramp + 0.5, 0.0, 1.0) * opacity
+        return self._composite(slice(y0, y1), slice(x0, x1), alpha, rgb)
+
+    def stamp(self, x, y, mask, color, opacity=1.0) -> bool:
+        """
+        Press an arbitrary mask (a 2-D array of 0..1, at most 2 * max_radius + 1 on a side) centred on (x, y).
+        This is how an instrument gets a flat tip, a rake, or any shape a round dab can't make.
+        """
+        m = np.asarray(mask, dtype=np.float32)
+        side = int(2 * self.max_radius + 1)
+        if m.ndim != 2 or m.shape[0] < 1 or m.shape[1] < 1:
+            raise CanvasError("stamp mask must be a 2-D array")
+        if m.shape[0] > side or m.shape[1] > side:
+            raise CanvasError(f"stamp mask is {m.shape[1]}x{m.shape[0]}, the limit is {side}x{side}")
+        m = np.nan_to_num(np.clip(m, 0.0, 1.0)) * float(np.clip(float(opacity), 0.0, 1.0))
+        rgb = np.asarray(parse_color(color), dtype=np.float32)
+        h, w = m.shape
+        top, left = int(round(float(y) - h / 2)), int(round(float(x) - w / 2))
+        y0, y1 = max(0, top), min(self.height, top + h)
+        x0, x1 = max(0, left), min(self.width, left + w)
+        if x1 <= x0 or y1 <= y0:
+            return True
+        alpha = m[y0 - top : y1 - top, x0 - left : x1 - left]
+        return self._composite(slice(y0, y1), slice(x0, x1), alpha, rgb)
+
+    def smudge(self, x, y, radius, dx, dy, strength=0.5) -> bool:
+        """
+        Drag the paint under a round footprint at (x, y) toward (x + dx, y + dy), blending it in with `strength`.
+        The drag is at most 2 * radius in each direction. Moves paint that's already there; adds none.
+        """
+        r = float(np.clip(float(radius), 0.5, self.max_radius))
+        dx = int(round(float(np.clip(float(dx), -2 * r, 2 * r))))
+        dy = int(round(float(np.clip(float(dy), -2 * r, 2 * r))))
+        strength = float(np.clip(float(strength), 0.0, 1.0))
+        cx, cy = float(x), float(y)
+        pad = int(math.ceil(r + 1))
+        sx0, sy0 = int(math.floor(cx)) - pad, int(math.floor(cy)) - pad
+        size = 2 * pad + 1
+        # Source and destination boxes, both clipped to the canvas, then to each other's valid part.
+        ox0 = max(0, -sx0, -(sx0 + dx))
+        oy0 = max(0, -sy0, -(sy0 + dy))
+        ox1 = min(size, self.width - sx0, self.width - (sx0 + dx))
+        oy1 = min(size, self.height - sy0, self.height - (sy0 + dy))
+        if ox1 <= ox0 or oy1 <= oy0 or strength <= 0.0:
+            return True
+        yy, xx = np.mgrid[oy0:oy1, ox0:ox1].astype(np.float32)
+        d = np.hypot(xx + sx0 + 0.5 - cx, yy + sy0 + 0.5 - cy)
+        alpha = np.clip((r - d) / max(r * 0.5, 0.5) + 0.5, 0.0, 1.0) * strength
+        src = self.img[sy0 + oy0 : sy0 + oy1, sx0 + ox0 : sx0 + ox1].copy()
+        ys = slice(sy0 + dy + oy0, sy0 + dy + oy1)
+        xs = slice(sx0 + dx + ox0, sx0 + dx + ox1)
+        if not self._admit(ys, xs, alpha):
+            return False
+        a = alpha[..., None]
+        self.img[ys, xs] = self.img[ys, xs] * (1.0 - a) + src * a
+        return True
+
+    def pick(self, x, y) -> tuple[float, float, float]:
+        """The colour on the canvas at (x, y), as three floats in 0..1."""
+        xi = int(np.clip(int(math.floor(float(x))), 0, self.width - 1))
+        yi = int(np.clip(int(math.floor(float(y))), 0, self.height - 1))
+        r, g, b = self.img[yi, xi]
+        return float(r), float(g), float(b)
+
+    def _composite(self, ys: slice, xs: slice, alpha: np.ndarray, rgb: np.ndarray) -> bool:
+        if not self._admit(ys, xs, alpha):
+            return False
+        a = alpha[..., None]
+        self.img[ys, xs] = self.img[ys, xs] * (1.0 - a) + rgb * a
+        return True
+
+    # ---- state for undo (the greedy painter tries a move and takes it back) -------------------------------
+
+    def snapshot(self) -> np.ndarray:
+        return self.img.copy()
+
+    def restore(self, img: np.ndarray) -> None:
+        self.img[:] = img
+
+
+# ---- targets ------------------------------------------------------------------------------------------------
 
 
 @dataclass
 class Target:
     name: str
-    image: np.ndarray  # H x W x 3 float32 in [0, 1]
+    image: np.ndarray  # H x W x 3 float32 in 0..1
     patch: int
-    classes: dict[tuple[int, int], str] = field(default_factory=dict)
-    edge_angle: np.ndarray | None = None  # angle along edges, per pixel
 
     @property
     def height(self) -> int:
@@ -162,71 +242,61 @@ class Target:
         return slice(row * p, (row + 1) * p), slice(col * p, (col + 1) * p)
 
 
-def _gray(img: np.ndarray) -> np.ndarray:
-    return img @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
-
-
-def gradients(img: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    g = _gray(img)
-    gx = np.zeros_like(g)
-    gy = np.zeros_like(g)
-    gx[:, 1:-1] = (g[:, 2:] - g[:, :-2]) * 0.5
-    gy[1:-1, :] = (g[2:, :] - g[:-2, :]) * 0.5
-    return gx, gy
-
-
-def load_target(path: str | Path, width: int = 80, patch: int = 16) -> Target:
-    path = Path(path)
+def load_target(name_or_path: str | Path, width: int = 128, patch: int = 16) -> Target:
+    """A target resized to `width`, cropped to a whole number of patches. Bare names look in `targets/`."""
+    path = Path(name_or_path)
+    if not path.suffix:
+        path = TARGETS_DIR / f"{path.name}.jpg"
     im = Image.open(path).convert("RGB")
     full_height = round(im.height * width / im.width)
     height = full_height - full_height % patch
     im = im.resize((width, full_height), Image.LANCZOS)
     top = (full_height - height) // 2
     img = np.asarray(im, dtype=np.float32)[top : top + height] / 255.0
-    target = Target(name=path.stem, image=img, patch=patch)
+    return Target(name=path.stem, image=img, patch=patch)
 
-    gx, gy = gradients(img)
-    target.edge_angle = np.arctan2(gy, gx) + math.pi / 2
-    mag = np.hypot(gx, gy)
-    g = _gray(img)
-    lap = np.zeros_like(g)
-    lap[1:-1, 1:-1] = g[:-2, 1:-1] + g[2:, 1:-1] + g[1:-1, :-2] + g[1:-1, 2:] - 4 * g[1:-1, 1:-1]
 
+def region_errors(img: np.ndarray, target: Target) -> np.ndarray:
+    """RMSE per patch, rows x cols."""
     rows, cols = target.grid
-    hf = np.zeros((rows, cols))
-    edge = np.zeros((rows, cols))
+    out = np.zeros((rows, cols), dtype=np.float32)
     for r in range(rows):
         for c in range(cols):
             ys, xs = target.patch_slice(r, c)
-            hf[r, c] = lap[ys, xs].var()
-            edge[r, c] = mag[ys, xs].mean()
-    hf_cut = np.percentile(hf, 66)
-    edge_cut = np.percentile(edge, 50)
-    for r in range(rows):
-        for c in range(cols):
-            if hf[r, c] >= hf_cut:
-                target.classes[(r, c)] = "fine_detail"
-            elif edge[r, c] >= edge_cut:
-                target.classes[(r, c)] = "hard_edge"
-            else:
-                target.classes[(r, c)] = "soft_wash"
-    return target
+            out[r, c] = np.sqrt(((img[ys, xs] - target.image[ys, xs]) ** 2).mean())
+    return out
 
 
-def default_targets(width: int = 80, patch: int = 16) -> tuple[list[Target], list[Target]]:
-    """Self-Portrait (1889) to train on, The Starry Night (1889) held out."""
-    return (
-        [load_target(TARGETS_DIR / "self_portrait.jpg", width, patch)],
-        [load_target(TARGETS_DIR / "starry_night.jpg", width, patch)],
-    )
+def error_table(img: np.ndarray, target: Target) -> str:
+    """Per-region error as a table labelled with pixel ranges, so nobody has to count rows."""
+    errs = region_errors(img, target)
+    rows, cols = errs.shape
+    p = target.patch
+    row_labels = [f"y {r * p}-{(r + 1) * p}" for r in range(rows)]
+    col_labels = [f"x {c * p}-{(c + 1) * p}" for c in range(cols)]
+    label_w = max(len(s) for s in row_labels) + 1
+    cell_w = max(6, max(len(s) for s in col_labels) + 1)
+    head = " " * label_w + "".join(s.ljust(cell_w) for s in col_labels)
+    lines = [(row_labels[r].ljust(label_w) + "".join(f"{errs[r, c]:.2f}".ljust(cell_w) for c in range(cols))).rstrip()
+             for r in range(rows)]
+    return f"Error per {p} x {p} px region (0 is a perfect match):\n" + "\n".join([head.rstrip(), *lines])
 
 
-def blank(target: Target) -> np.ndarray:
-    return np.broadcast_to(PAPER, target.image.shape).copy()
+def worst_regions(img: np.ndarray, target: Target, k: int = 4) -> list[dict]:
+    errs = region_errors(img, target)
+    out = []
+    for i in np.argsort(errs, axis=None)[::-1][:k]:
+        r, c = np.unravel_index(i, errs.shape)
+        ys, xs = target.patch_slice(int(r), int(c))
+        out.append({"x": [xs.start, xs.stop], "y": [ys.start, ys.stop], "error": round(float(errs[r, c]), 3)})
+    return out
+
+
+# ---- image helpers ------------------------------------------------------------------------------------------
 
 
 def to_png(img: np.ndarray, scale: int = 1) -> bytes:
-    arr = (np.clip(img, 0, 1) * 255).astype(np.uint8)
+    arr = (np.clip(img, 0, 1) * 255).round().astype(np.uint8)
     if scale > 1:
         arr = arr.repeat(scale, axis=0).repeat(scale, axis=1)
     buf = io.BytesIO()
@@ -234,46 +304,93 @@ def to_png(img: np.ndarray, scale: int = 1) -> bytes:
     return buf.getvalue()
 
 
-def heatmap(err: np.ndarray, scale: int = 1, vmax: float = 0.35) -> bytes:
-    """Per-pixel error on paper, with vermilion for high error."""
+def heatmap_png(err: np.ndarray, scale: int = 1, vmax: float = 0.35) -> bytes:
+    """Per-pixel error on paper, vermilion where it's high."""
     t = np.clip(err / vmax, 0, 1)[..., None]
     hot = np.array([0.76, 0.23, 0.13], dtype=np.float32)
-    img = PAPER * (1 - t) + hot * t
-    return to_png(img, scale)
+    return to_png(np.asarray(PAPER, dtype=np.float32) * (1 - t) + hot * t, scale)
 
 
-def triptych(*panels: np.ndarray, scale: int = 4, gap: int = 1) -> bytes:
-    h = panels[0].shape[0]
-    spacer = np.broadcast_to(PAPER, (h, gap, 3))
-    parts = []
-    for i, p in enumerate(panels):
+def _font(size: int):
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:  # Pillow without FreeType
+        return ImageFont.load_default()
+
+
+def grid_step(width: int) -> int:
+    """Canvas pixels between grid lines: about eight divisions across."""
+    return max(8, 8 * round(width / 64))
+
+
+def gridded_png(img: np.ndarray, scale: int = 4) -> bytes:
+    """
+    An image as the model sees it: upscaled, a faint line every `grid_step` canvas pixels, and the lines
+    labelled in canvas pixels in a white margin, so labels never cover the picture.
+    """
+    h, w = img.shape[:2]
+    step = grid_step(w)
+    arr = (np.clip(img, 0, 1) * 255).round().astype(np.uint8).repeat(scale, axis=0).repeat(scale, axis=1)
+    pic = Image.fromarray(arr).convert("RGBA")
+    lines = Image.new("RGBA", pic.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(lines)
+    for v in range(step, w, step):
+        d.line([(v * scale, 0), (v * scale, h * scale - 1)], fill=(30, 70, 170, 110), width=1)
+    for v in range(step, h, step):
+        d.line([(0, v * scale), (w * scale - 1, v * scale)], fill=(30, 70, 170, 110), width=1)
+    pic = Image.alpha_composite(pic, lines).convert("RGB")
+    m = max(22, round(0.055 * pic.width))
+    out = Image.new("RGB", (pic.width + 2 * m, pic.height + 2 * m), (255, 255, 255))
+    out.paste(pic, (m, m))
+    d = ImageDraw.Draw(out)
+    font = _font(max(12, round(m * 0.6)))
+
+    def label(text: str, cx: float, cy: float) -> None:
+        left, top, right, bottom = d.textbbox((0, 0), text, font=font)
+        d.text((cx - (right - left) / 2 - left, cy - (bottom - top) / 2 - top), text, font=font, fill=(30, 40, 60))
+
+    for v in range(0, w + 1, step):
+        label(str(v), m + v * scale, m / 2)
+        label(str(v), m + v * scale, out.height - m / 2)
+    for v in range(0, h + 1, step):
+        label(str(v), m / 2, m + v * scale)
+        label(str(v), out.width - m / 2, m + v * scale)
+    buf = io.BytesIO()
+    out.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def labelled_sheet(cells: list[tuple[str, np.ndarray]], scale: int = 2, cols: int = 3) -> bytes:
+    """Images side by side, each with a caption above it. Used for an instrument's demo sheet."""
+    if not cells:
+        cells = [("(nothing to show)", np.broadcast_to(np.asarray(PAPER, dtype=np.float32), (32, 32, 3)))]
+    h = max(c[1].shape[0] for c in cells) * scale
+    w = max(c[1].shape[1] for c in cells) * scale
+    cap, gap = 22, 8
+    cols = max(1, min(cols, len(cells)))
+    rows = math.ceil(len(cells) / cols)
+    sheet = Image.new("RGB", (cols * (w + gap) + gap, rows * (h + cap + gap) + gap), (255, 255, 255))
+    d = ImageDraw.Draw(sheet)
+    font = _font(13)
+    for i, (caption, img) in enumerate(cells):
+        r, c = divmod(i, cols)
+        x0, y0 = gap + c * (w + gap), gap + r * (h + cap + gap)
+        while caption and d.textlength(caption, font=font) > w:  # long call sequences ran into the next cell
+            caption = caption[:-2].rstrip() + "…"
+        d.text((x0, y0 + 3), caption, font=font, fill=(30, 40, 60))
+        arr = (np.clip(img, 0, 1) * 255).round().astype(np.uint8).repeat(scale, axis=0).repeat(scale, axis=1)
+        sheet.paste(Image.fromarray(arr), (x0, y0 + cap))
+    buf = io.BytesIO()
+    sheet.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def side_by_side(*imgs: np.ndarray, scale: int = 2, gap: int = 2) -> bytes:
+    h = imgs[0].shape[0]
+    spacer = np.ones((h, gap, 3), dtype=np.float32)
+    parts: list[np.ndarray] = []
+    for i, im in enumerate(imgs):
         if i:
             parts.append(spacer)
-        parts.append(p)
+        parts.append(im)
     return to_png(np.concatenate(parts, axis=1), scale)
-
-
-def swatch_sheet(brushes: list[Brush], cell: int = 28) -> bytes:
-    """One sample stroke per brush, side by side, in Prussian blue on paper."""
-    n = max(1, len(brushes))
-    cols = min(n, 4)
-    rows = math.ceil(n / cols)
-    img = np.broadcast_to(PAPER, (rows * cell, cols * cell, 3)).copy()
-    ink = np.array([0.15, 0.29, 0.48], dtype=np.float32)
-    rng = np.random.default_rng(7)
-    for i, b in enumerate(brushes):
-        r, c = divmod(i, cols)
-        cy, cx = r * cell + cell / 2, c * cell + cell / 2
-        length = min(b.length, cell - 2 * b.radius - 2) if b.length else 0
-        probe = b.model_copy(update={"length": max(0.0, length)})
-        x = cx - math.cos(-0.5) * probe.length / 2
-        y = cy - math.sin(-0.5) * probe.length / 2
-        hit = stroke_alpha(probe, x, y, -0.5, img.shape[0], img.shape[1], rng)
-        if hit:
-            ys, xs, a = hit
-            # keep each sample inside its own cell
-            cell_ys = slice(max(ys.start, r * cell), min(ys.stop, (r + 1) * cell))
-            cell_xs = slice(max(xs.start, c * cell), min(xs.stop, (c + 1) * cell))
-            a = a[cell_ys.start - ys.start : cell_ys.stop - ys.start, cell_xs.start - xs.start : cell_xs.stop - xs.start]
-            img[cell_ys, cell_xs] = composite(img[cell_ys, cell_xs], a, ink)
-    return to_png(img, 2)
