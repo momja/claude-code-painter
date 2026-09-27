@@ -215,10 +215,28 @@ async function openBuffer(buf,name){
   selectRun(state.run);
 }
 async function loadFile(f){if(!f)return;setStatus(`reading ${f.name} (${(f.size/1048576).toFixed(1)} MB)…`);const buf=await f.arrayBuffer();await openBuffer(buf,f.name);}
+function canonDbUrl(u){
+  // github.com/…/raw/… and …/blob/… URLs 302-redirect without CORS headers, so a
+  // sandboxed page (origin null) can't fetch them. Rewrite to raw.githubusercontent.com,
+  // which serves Access-Control-Allow-Origin: *.
+  let m=u.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:raw|blob)\/(.+)$/);
+  if(m)return `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3]}`;
+  return u;
+}
+const LS_DB_URL="conveyor-viewer-db-url";
+function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}
+function lsSet(k,v){try{localStorage.setItem(k,v);}catch(e){}}
 async function loadURL(u){
-  if(!u)return;setStatus(`fetching ${u}…`);
-  const r=await fetch(u);if(!r.ok)throw new Error(`HTTP ${r.status} — the host must send Access-Control-Allow-Origin`);
+  if(!u)return;
+  u=canonDbUrl(u);
+  if($("#url").value.trim()!==u)$("#url").value=u;
+  setStatus(`fetching ${u}…`);
+  let r;
+  try{r=await fetch(u);}
+  catch(e){throw new Error(`fetch blocked — the host must allow cross-origin reads (Access-Control-Allow-Origin). For a GitHub file use its raw.githubusercontent.com URL.`);}
+  if(!r.ok)throw new Error(`HTTP ${r.status} — the host must send Access-Control-Allow-Origin`);
   const buf=await r.arrayBuffer();await openBuffer(buf,u.split("/").pop()||"remote.db");
+  lsSet(LS_DB_URL,u); // remember for repeat visits (?db= overrides this)
 }
 
 /* ---------- run / archive ---------- */
@@ -468,7 +486,7 @@ document.addEventListener("keydown",e=>{
   if(e.key==="ArrowRight"){stop();seek(state.pos+1);}
 });
 ensureSQL().then(()=>{
-  const u=new URLSearchParams(location.search).get("db");
+  const u=new URLSearchParams(location.search).get("db")||lsGet(LS_DB_URL);
   if(u){$("#url").value=u;loadURL(u).catch(err=>setStatus(String(err.message||err),"err"));}
 }).catch(err=>setStatus("could not load sql.js: "+err.message,"err"));
 </script>
