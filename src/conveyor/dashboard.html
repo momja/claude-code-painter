@@ -88,6 +88,11 @@ button.on { border-color: var(--accent); color: var(--accent); }
 .diff .ctx { display: block; }
 details > summary { cursor: pointer; color: var(--muted); }
 .replay { display: grid; gap: 6px; max-width: 400px; }
+.canvas-now { position: sticky; top: 0; z-index: 2; display: flex; gap: 12px; align-items: flex-start; background: var(--bg); padding: 6px 0; border-bottom: 1px solid var(--line); }
+.canvas-now img, .event .snap { border-radius: 6px; border: 1px solid var(--line); image-rendering: pixelated; background: #fff; display: block; }
+.canvas-now img { width: 120px; max-width: 30%; }
+.event .snap { width: 160px; margin-top: 6px; }
+.live-card .live-canvas { float: right; width: 96px; margin: 0 0 6px 10px; border-radius: 4px; border: 1px solid var(--line); image-rendering: pixelated; background: #fff; }
 .replay input { width: 100%; }
 .eval { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); }
 .note { white-space: pre-wrap; background: var(--code); border-radius: 6px; padding: 8px 10px; font-size: 13px; }
@@ -410,7 +415,7 @@ function liveView(live) {
       if (e.kind === "tool_result") return `<div class="ev ${d.is_error ? "bad" : "muted"}">→ ${esc((d.text || "").slice(0, 160))}${d.images?.length ? " [image]" : ""}</div>`;
       return "";
     }).join("");
-    return `<div class="live-card"><div class="call-head"><a data-session="${esc(s.id)}"><b>${esc(s.purpose)}</b></a>
+    return `<div class="live-card">${s.canvas ? `<img class="live-canvas" src="/artifacts/${esc(s.canvas)}" alt="canvas so far">` : ""}<div class="call-head"><a data-session="${esc(s.id)}"><b>${esc(s.purpose)}</b></a>
       <span class="tag">${esc(s.harness || "claude")}</span><span class="muted">${esc(s.model)}</span>
       <span class="muted">${dur(s.started)} · ${s.tool_calls} tool calls · last event ${ago(s.last_ts)} ago</span></div>${evs || `<div class="ev faint">starting…</div>`}</div>`;
   }).join("")}</div></section>`;
@@ -845,8 +850,8 @@ function bindDiff(o) {
 function sessionDetail(s) {
   const req = s.request || {};
   const usage = s.usage || {};
-  const strokesById = {};
-  for (const st of s.strokes) if (st.data.tool_use_id) strokesById[st.data.tool_use_id] = st;
+  const strokesById = {}, snapOf = {};
+  for (const st of s.strokes) if (st.data.tool_use_id) { strokesById[st.data.tool_use_id] = st; if (st.snapshot) snapOf[st.data.tool_use_id] = st.snapshot; }
   const results = {};
   for (const e of s.events) if (e.kind === "tool_result") results[e.data.tool_use_id] = e.data;
   const head = `<div class="call-head"><span class="tag">${esc(s.status)}</span><span class="tag">${esc(req.harness || "claude")}</span><span>${esc(s.model)} · effort ${esc(s.effort || "–")}</span>
@@ -878,7 +883,8 @@ function sessionDetail(s) {
         <span class="call-args mono">${esc(compactArgs(d.input))}</span> ${effect}</div>
         ${long ? `<details><summary>source (${d.input.source.length} chars)</summary><pre>${esc(d.input.source)}</pre></details>` : ""}
         ${r ? `<div class="${r.is_error ? "bad" : "muted"} mono" style="white-space:pre-wrap;font-size:12px">${esc(r.text)}</div>${r.images?.length ? `<div class="imgs">${r.images.map((n) => img(n)).join("")}</div>` : ""}` : `<div class="faint">waiting for the result…</div>`}
-        ${st?.pen ? `<div class="faint mono" style="font-size:11.5px">pen ${esc(st.pen)}</div>` : ""}</div>`;
+        ${st?.pen ? `<div class="faint mono" style="font-size:11.5px">pen ${esc(st.pen)}</div>` : ""}
+        ${snapOf[d.id] ? `<img class="snap" src="/artifacts/${esc(snapOf[d.id])}" loading="lazy" alt="canvas after call ${esc(st?.i)}">` : ""}</div>`;
     }
     if (e.kind === "result") return `<div class="event meta">result: ${esc(d.subtype)} · ${d.num_turns} turns · ${money(d.total_cost_usd)} · ${esc(d.terminal_reason || "")}${d.errors?.length ? " · " + esc(d.errors.join("; ")) : ""}</div>`;
     if (e.kind === "rate_limit") return `<div class="event meta">rate limit: ${esc(d.status)} ${Object.entries(d.unifiedWindows || {}).map(([k, w]) => `${k} ${Math.round((w.utilization || 0) * 100)}%`).join(", ")}</div>`;
@@ -887,7 +893,9 @@ function sessionDetail(s) {
     return `<div class="event meta">${esc(e.kind)} ${esc(JSON.stringify(d).slice(0, 300))}</div>`;
   }).join("");
   const offline = !s.events.length && s.strokes.length ? `<div class="muted">An offline painting: no model, so no transcript. ${s.strokes.length} calls.</div>` : "";
-  return `${head}${request}${replay}${offline}<div><b>Transcript</b>${timeline || `<div class="muted">No events yet.</div>`}</div>`;
+  const latest = [...s.strokes].reverse().find((st) => st.snapshot);
+  const now = latest && s.status === "running" ? `<div class="canvas-now"><img src="/artifacts/${esc(latest.snapshot)}" alt="canvas now"><div><b>Painting, live</b><div class="muted mono" style="font-size:12px">after call ${latest.data.i}: ${esc(latest.data.tool)} · ${s.strokes.length} calls so far${latest.data.score_after != null ? ` · score ${fmt(latest.data.score_after, 4)}` : ""}</div></div></div>` : "";
+  return `${head}${request}${replay}${offline}<div><b>Transcript</b>${now}${timeline || `<div class="muted">No events yet.</div>`}</div>`;
 }
 
 function bindReplay(s) {
@@ -895,7 +903,9 @@ function bindReplay(s) {
   const snaps = s.strokes.filter((st) => st.snapshot);
   range.max = snaps.length - 1;
   const prev = state.replayIndex?.[s.id];
-  range.value = prev != null && prev < snaps.length ? prev : snaps.length - 1;
+  const follow = prev == null || prev >= (state.replayLen?.[s.id] ?? snaps.length) - 1;  // sitting at the end: keep up with a running painting
+  state.replayLen = { ...(state.replayLen || {}), [s.id]: snaps.length };
+  range.value = !follow && prev < snaps.length ? prev : snaps.length - 1;
   const show = () => {
     const st = snaps[+range.value];
     $("#replay-img").src = `/artifacts/${st.snapshot}`;

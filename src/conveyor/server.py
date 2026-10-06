@@ -209,7 +209,9 @@ class Views:
             events = self.rows("SELECT idx, ts, kind, data FROM session_events WHERE session_id=? AND kind IN "
                                "('thinking','text','tool_use','tool_result') ORDER BY idx DESC LIMIT ?", s["id"], LIVE_EVENTS)
             n_tools = self.one("SELECT count(*) AS n FROM session_events WHERE session_id=? AND kind='tool_use'", s["id"])["n"]
-            out.append({**s, "events": list(reversed(events)), "tool_calls": n_tools, "now": time.time()})
+            canvas = self.one("SELECT snapshot FROM strokes WHERE session_id=? AND snapshot IS NOT NULL ORDER BY idx DESC LIMIT 1", s["id"])
+            out.append({**s, "events": list(reversed(events)), "tool_calls": n_tools, "now": time.time(),
+                        "canvas": canvas["snapshot"] if canvas else None})
         return out
 
     def alarms(self, run: str, nodes: list[dict], costs: dict, rate: dict | None) -> list[dict]:
