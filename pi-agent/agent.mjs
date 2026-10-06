@@ -30,6 +30,7 @@ import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { JsonCredentialStore } from "./credentials.mjs";
 import { boundedPainterContext, textChars } from "./painter-context.mjs";
+import { isTransientTransportError, MAX_TRANSPORT_RETRIES, retryDelayMs } from "./transient.mjs";
 
 const LENGTH_NUDGE =
 	"Your last reply ran out of room while thinking and made no tool calls. Don't analyze further. Reply now with tool calls.";
@@ -500,6 +501,20 @@ async function main() {
 	let fatal = null;
 	try {
 		await agent.prompt({ role: "user", content: cfg.content, timestamp: Date.now() });
+		// A dropped connection ends the run with an errored assistant message. Remove it and take the turn again
+		// from the last user or tool-result message; the work already done in the session stays.
+		for (let attempt = 1; attempt <= MAX_TRANSPORT_RETRIES; attempt += 1) {
+			const messages = agent.state.messages;
+			const last = messages[messages.length - 1];
+			if (stopRequested || overBudget || last?.role !== "assistant" || last.stopReason !== "error") break;
+			if (!isTransientTransportError(last.errorMessage)) break;
+			log(`transport error, retry ${attempt}/${MAX_TRANSPORT_RETRIES}: ${last.errorMessage}`);
+			emit({ type: "system", subtype: "transport_retry", attempt, error: last.errorMessage });
+			agent.state.messages = messages.slice(0, -1);
+			lastError = null;
+			await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+			await agent.continue();
+		}
 	} catch (error) {
 		fatal = String(error?.stack || error);
 		log(fatal);
