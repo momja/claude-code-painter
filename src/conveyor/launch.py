@@ -124,6 +124,7 @@ class Launcher:
         self._parser = build_parser(_Parser)
         self._targets = targets
         self._launches: dict[str, Launch] = {}
+        self._agents: dict[str, tuple[str, Launch]] = {}  # canvas agent id -> (its canvas, its process)
         self._lock = threading.Lock()
         self._probe: tuple[float, dict] | None = None
 
@@ -307,6 +308,68 @@ class Launcher:
             store.update_painting_request(request_id, status="stopped" if launch.stop_requested else "failed",
                                           ended=time.time(), error="Painting process ended before saving its result.")
             store.close()
+
+    # ---- the shared canvas --------------------------------------------------------------------------------
+
+    def create_canvas(self, body: dict) -> dict:
+        from conveyor.commons.tiles import DEFAULT_MAX_CALLS, DEFAULT_VIEWPORT, VIEWPORT_RANGE, create_canvas
+
+        if not isinstance(body, dict) or set(body) - {"name", "viewport", "max_calls"}:
+            raise LaunchError("Expected name, viewport and max_calls.")
+        name = body.get("name") or "Commons"
+        if not isinstance(name, str) or not name.strip() or len(name) > 60 or "\n" in name:
+            raise LaunchError("name must be a line of text, at most 60 characters.")
+        viewport = self._number("viewport", body.get("viewport", DEFAULT_VIEWPORT), int)
+        if not VIEWPORT_RANGE[0] <= viewport <= VIEWPORT_RANGE[1]:
+            raise LaunchError(f"viewport must be between {VIEWPORT_RANGE[0]} and {VIEWPORT_RANGE[1]} pixels.")
+        max_calls = self._number("max_calls", body.get("max_calls", DEFAULT_MAX_CALLS), int)
+        if not 1 <= max_calls <= 1000:
+            raise LaunchError("max_calls must be between 1 and 1000.")
+        return create_canvas(self.db, name.strip(), viewport, max_calls)
+
+    def start_agent(self, canvas_id: str, body: dict) -> dict:
+        from conveyor.commons.agent import create_agent
+
+        agent = create_agent(self.db, canvas_id, body)
+        argv = ["canvas agent", agent["id"]]
+        try:
+            proc = subprocess.Popen([self.python, "-m", "conveyor.commons.agent", str(self.db), agent["id"]],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1, env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                                    start_new_session=True)
+        except OSError as error:
+            self._close_agent(agent["id"], "failed", f"Could not start the agent: {error}")
+            raise LaunchError(f"Could not start the agent: {error}") from error
+        launch = Launch(argv, f"Canvas agent {agent['name'] or agent['id']}", proc)
+        with self._lock:
+            self._launches[launch.id] = launch
+            self._agents[agent["id"]] = (canvas_id, launch)
+        threading.Thread(target=self._read_agent, args=(launch, agent["id"]), name=f"agent-{agent['id']}",
+                         daemon=True).start()
+        return {**agent, "launch": launch.view(log=False)}
+
+    def _read_agent(self, launch: Launch, agent_id: str) -> None:
+        launch._read()
+        self._close_agent(agent_id, "stopped" if launch.stop_requested else "failed",
+                          "The agent's process ended before it saved its result.\n" + "\n".join(list(launch.log)[-5:]))
+
+    def _close_agent(self, agent_id: str, status: str, error: str) -> None:
+        """Mark an agent ended if its process died without saying so itself."""
+        from conveyor.store import connect
+
+        conn = connect(self.db)
+        try:
+            conn.execute("UPDATE canvas_agents SET status=?, ended=?, error=? WHERE id=? AND status IN ('queued', 'running')",
+                         (status, time.time(), error.strip()[:2000], agent_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def stop_agent(self, canvas_id: str, agent_id: str) -> dict | None:
+        canvas, launch = self._agents.get(agent_id, (None, None))
+        if launch is None or canvas != canvas_id:
+            return None
+        return self.stop(launch.id)
 
     def get(self, launch_id: str) -> dict | None:
         launch = self._launches.get(launch_id)

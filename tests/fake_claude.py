@@ -3,6 +3,7 @@ A stand-in for the `claude` CLI, speaking the same stream-json protocol, for tes
 
 It reads the first user message from stdin, launches the MCP server named in --mcp-config, and drives it:
   - the canvas server: calls each instrument tool once with arguments built from its schema, then look and finish
+  - the shared canvas: looks, paints, writes a message, moves, batches, then looks until its budget runs out
   - the workbench: submits the source in FAKE_CLAUDE_SUBMIT (or tries it, then submits)
   - no server and --json-schema: returns FAKE_CLAUDE_STRUCTURED as the structured output
   - FAKE_CLAUDE_CUT_OFF names a file: if it exists, the painter deletes it and hits the usage limit after its
@@ -146,6 +147,25 @@ if cfg:
         call(server, i, "look", {})
         i += 1
         call(server, i, "finish", {"note": "The fake painter wanted thinner lines."})
+    elif server_name == "commons":
+        # A shared-canvas agent: one of each kind of call, then looks until the budget refuses one.
+        names = {t["name"] for t in tools}
+        paint = next(t for t in tools if t["name"] not in ("look", "move_viewport", "write_message", "paint_batch")
+                     and "x" in t["inputSchema"].get("properties", {}))
+        props = paint["inputSchema"].get("properties", {})
+        arguments = {k: sample(v) for k, v in props.items() if k in paint["inputSchema"].get("required", [])}
+        script = [("look", {}), (paint["name"], arguments),
+                  ("write_message", {"text": os.environ.get("FAKE_CLAUDE_MESSAGE", "hello from a fake"), "x": 8, "y": 8}),
+                  ("move_viewport", {"angle": 0, "distance": 10_000})]
+        if "paint_batch" in names:
+            script.append(("paint_batch", {"tool": paint["name"], "calls": [arguments, arguments]}))
+        for name, arguments in script:
+            i += 1
+            call(server, i, name, arguments)
+        while i < 300:
+            i += 1
+            if call(server, i, "look", {}).get("isError"):
+                break
     elif server_name == "bench":
         source = os.environ.get("FAKE_CLAUDE_SUBMIT", "")
         i += 1

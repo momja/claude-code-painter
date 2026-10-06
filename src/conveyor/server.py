@@ -13,6 +13,13 @@ so it works the same during a run and after it, and from another process.
   GET /api/organisms/<id>            one organism: source, parent's source, evaluations, children, who wrote it
   GET /api/sessions/<id>             one model session: request, events, strokes, result
   GET /artifacts/<name>              images
+  GET /canvas                        the shared canvas: watch it live, replay it, spawn agents
+  GET /api/canvases                  shared canvases
+  GET /api/canvases/<id>             one canvas: agents, tile heads moved after ?since=<op seq>, recent messages
+  GET /api/canvases/<id>/history     every tile version and every op, for replay
+  GET /api/canvases/<id>/ops/<seq>   one op: the call's arguments and result note
+  GET /api/canvases/<id>/tiles/<tx>/<ty>/<seq>  one version of one tile (PNG)
+  GET /api/canvas-catalog            every instrument and painter prompt in any run, deduplicated, plus the seeds
 
 With a launcher (`conveyor serve` on a loopback address) it can also start runs:
 
@@ -22,6 +29,10 @@ With a launcher (`conveyor serve` on a loopback address) it can also start runs:
   POST /api/launches                 start a run from {option: value}; answers 201 with the launch
   POST /api/launches/<id>/stop       stop it, as Ctrl+C would
   POST /api/runs/<run>/paintings      paint with saved instrument_id/prompt_id, text and optional base64 image
+  POST /api/canvases                 create a shared canvas from {name, viewport, max_calls}
+  POST /api/canvases/<id>/agents     spawn an agent: catalog instrument_id and prompt_id, harness, model, effort,
+                                     provider, start x and y, name, cap
+  POST /api/canvases/<id>/agents/<agent>/stop   stop it, as Ctrl+C would
 
 On a loopback address launching needs nothing more. Served to a network, it needs a token: the launcher is given
 one, and then these endpoints answer only to a request carrying it in X-Conveyor-Token. The dashboard's reads stay
@@ -54,6 +65,7 @@ LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
 
 DASHBOARD = Path(__file__).parent / "dashboard.html"
 STUDIO = Path(__file__).parent / "studio.html"
+COMMONS = Path(__file__).parent / "commons.html"
 ARTIFACT_RE = re.compile(r"^[0-9a-f]{24}\.(png|jpg)$")
 JSON_COLS = {"data", "config", "genome", "traits", "details", "artifacts", "usage", "request"}
 STALL_ITERATIONS = 4
@@ -408,6 +420,31 @@ class Views:
         r = self.conn.execute("SELECT data FROM artifacts WHERE name=?", (name,)).fetchone()
         return r[0] if r else None
 
+    def canvas_get(self, parts: list[str], q: dict) -> tuple[Any, str] | None:
+        """The shared canvas's reads, under /api/canvases and /api/canvas-catalog. (body, content type), or None."""
+        from conveyor.commons import catalog
+        from conveyor.commons import views as canvas_views
+
+        if parts == ["api", "canvas-catalog"]:
+            return catalog.catalog(self.conn), "json"
+        if parts[:2] != ["api", "canvases"]:
+            return None
+        if len(parts) == 2:
+            return canvas_views.canvases(self.conn), "json"
+        cid = parts[2]
+        if len(parts) == 3:
+            return canvas_views.canvas(self.conn, cid, int(q.get("since") or 0)), "json"
+        if parts[3:] == ["history"]:
+            return canvas_views.history(self.conn, cid), "json"
+        if len(parts) == 5 and parts[3] == "ops" and parts[4].isdigit():
+            return canvas_views.op(self.conn, cid, int(parts[4])), "json"
+        if len(parts) == 7 and parts[3] == "tiles" and all(re.fullmatch(r"-?\d+", p) for p in parts[4:]):
+            data = canvas_views.tile(self.conn, cid, *map(int, parts[4:]))
+            if data is None:
+                raise KeyError("tile")
+            return data, "png"
+        return None
+
 
 def _hostname(netloc: str) -> str:
     return netloc.rsplit(":", 1)[0] if not netloc.endswith("]") else netloc
@@ -452,7 +489,8 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
             parts = [p for p in urlparse(self.path).path.split("/") if p]
             try:
                 painting_post = len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "paintings"
-                if launcher is None or (parts[:2] != ["api", "launches"] and not painting_post):
+                canvas_post = parts[:2] == ["api", "canvases"]
+                if launcher is None or (parts[:2] != ["api", "launches"] and not painting_post and not canvas_post):
                     return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 if (why := self._guard_post()) is not None:
                     return self._json({"error": why}, HTTPStatus.FORBIDDEN)
@@ -470,7 +508,20 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                     body = json.loads(self.rfile.read(length) or b"{}")
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     return self._json({"error": "body isn't JSON"}, HTTPStatus.BAD_REQUEST)
-                if painting_post or len(parts) == 2:
+                if canvas_post:
+                    try:
+                        if len(parts) == 2:
+                            self._json(launcher.create_canvas(body), HTTPStatus.CREATED)
+                        elif len(parts) == 4 and parts[3] == "agents":
+                            self._json(launcher.start_agent(parts[2], body), HTTPStatus.CREATED)
+                        elif len(parts) == 6 and parts[3] == "agents" and parts[5] == "stop":
+                            agent = launcher.stop_agent(parts[2], parts[4])
+                            self._json(agent or {"error": "not found"}, HTTPStatus.OK if agent else HTTPStatus.NOT_FOUND)
+                        else:
+                            self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+                    except LaunchError as e:
+                        self._json({"error": str(e)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                elif painting_post or len(parts) == 2:
                     try:
                         self._json(launcher.start_painting(parts[2], body) if painting_post else launcher.start(body),
                                    HTTPStatus.CREATED)
@@ -493,6 +544,14 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                     self._send(200, DASHBOARD.read_bytes(), "text/html; charset=utf-8")
                 elif parts == ["studio"]:
                     self._send(200, STUDIO.read_bytes(), "text/html; charset=utf-8")
+                elif parts == ["canvas"]:
+                    self._send(200, COMMONS.read_bytes(), "text/html; charset=utf-8")
+                elif (found := views.canvas_get(parts, q)) is not None:
+                    body, kind = found
+                    if kind == "png":
+                        self._send(200, body, "image/png", cache=True)
+                    else:
+                        self._json(body)
                 elif parts[0] == "artifacts" and len(parts) == 2 and ARTIFACT_RE.match(parts[1]):
                     data = views.artifact(parts[1])
                     if data is None:
@@ -531,6 +590,8 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                     self._send(404, b"not found", "text/plain")
             except KeyError as e:
                 self._json({"error": f"not found: {e}"}, HTTPStatus.NOT_FOUND)
+            except ValueError as e:
+                self._json({"error": f"bad request: {e}"}, HTTPStatus.BAD_REQUEST)
             except sqlite3.OperationalError as e:  # the run hasn't created the tables yet, or the file is busy
                 self._json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
             except BrokenPipeError:

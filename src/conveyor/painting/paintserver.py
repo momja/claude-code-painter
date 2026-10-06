@@ -48,6 +48,31 @@ def _rounded(value: float | None, digits: int) -> float | None:
     return round(value, digits) if value is not None else None
 
 
+def batch_calls(inst: Instrument, args: dict) -> list[tuple[str, dict]]:
+    """A paint_batch's calls as (tool, arguments), with shared defaults filled in. Raises ToolFailure."""
+    calls, defaults = args.get("calls"), args.get("defaults", {})
+    if not isinstance(calls, list) or not 1 <= len(calls) <= MAX_BATCH_CALLS:
+        raise ToolFailure(f"paint_batch needs 1 to {MAX_BATCH_CALLS} calls. Nothing was painted.")
+    if not isinstance(defaults, dict):
+        raise ToolFailure("defaults must be an object. Nothing was painted.")
+    specs = {t.name: {p.name for p in t.params} for t in inst.spec.tools}
+    prepared = []
+    for i, call in enumerate(calls, 1):
+        tool = args.get("tool")
+        if isinstance(call, list) and len(call) == 2:
+            tool, call = call
+        if not isinstance(tool, str) or tool not in specs or not isinstance(call, dict):
+            raise ToolFailure(f"Call {i}: use an argument object with tool set, or [paint_tool, arguments]. "
+                              "Only the instrument's paint tools can go in a batch: no views, scope, finish or "
+                              "nested batches. Nothing was painted.")
+        shared = {k: v for k, v in defaults.items() if k in specs[tool]}
+        prepared.append((tool, {**shared, **call}))
+    known = set().union(*(specs[tool] for tool, _ in prepared))
+    if set(defaults) - known:
+        raise ToolFailure("Unknown shared parameters: " + ", ".join(sorted(set(defaults) - known)) + ". Nothing was painted.")
+    return prepared
+
+
 class PaintSession:
     def __init__(self, session_dir: Path) -> None:
         self.dir = Path(session_dir)
@@ -127,26 +152,10 @@ class PaintSession:
                 "finished": self.finished}
 
     def _prepare_batch(self, args: dict) -> tuple[list[tuple[str, dict]], str]:
-        calls, defaults, plan = args.get("calls"), args.get("defaults", {}), args.get("plan", self.plan)
-        if not isinstance(calls, list) or not 1 <= len(calls) <= MAX_BATCH_CALLS:
-            raise ToolFailure(f"paint_batch needs 1 to {MAX_BATCH_CALLS} calls. Nothing was painted.")
-        if not isinstance(defaults, dict) or not isinstance(plan, str) or len(plan) > MAX_PLAN_CHARS:
-            raise ToolFailure(f"defaults must be an object and plan at most {MAX_PLAN_CHARS} characters. Nothing was painted.")
-        specs = {t.name: {p.name for p in t.params} for t in self.inst.spec.tools}
-        prepared = []
-        for i, call in enumerate(calls, 1):
-            tool = args.get("tool")
-            if isinstance(call, list) and len(call) == 2:
-                tool, call = call
-            if not isinstance(tool, str) or tool not in specs or not isinstance(call, dict):
-                raise ToolFailure(f"Call {i}: use an argument object with tool set, or [paint_tool, arguments]. "
-                                  "Views, scope, finish and nested batches are not allowed. Nothing was painted.")
-            shared = {k: v for k, v in defaults.items() if k in specs[tool]}
-            prepared.append((tool, {**shared, **call}))
-        known = set().union(*(specs[tool] for tool, _ in prepared))
-        if set(defaults) - known:
-            raise ToolFailure("Unknown shared parameters: " + ", ".join(sorted(set(defaults) - known)) + ". Nothing was painted.")
-        return prepared, plan
+        plan = args.get("plan", self.plan)
+        if not isinstance(plan, str) or len(plan) > MAX_PLAN_CHARS:
+            raise ToolFailure(f"plan must be at most {MAX_PLAN_CHARS} characters. Nothing was painted.")
+        return batch_calls(self.inst, args), plan
 
     def batch(self, args: dict, tool_use_id: str | None = None) -> str:
         """Ordered paint calls with shared arguments and one result. Stop on the first failed call."""

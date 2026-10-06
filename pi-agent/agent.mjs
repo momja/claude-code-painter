@@ -323,6 +323,8 @@ async function main() {
 				execute: async (toolCallId, args) => {
 					const result = await mcp.call(t.name, args, toolCallId);
 					if (result.structuredContent?.painting_state) paintingState = result.structuredContent.painting_state;
+					// A server can end the session itself: the shared canvas does once an agent's tool calls run out.
+					if (result.structuredContent?.stop) stopRequested = true;
 					const content = (result.content || []).map((block) =>
 						block.type === "image"
 							? { type: "image", data: block.data, mimeType: block.mimeType || "image/png" }

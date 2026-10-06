@@ -273,6 +273,26 @@ Requests, sessions, strokes and resulting paintings are stored under the origina
 
 Starting paintings requires `conveyor serve` with launching enabled. A dashboard served by `conveyor run`, or by `conveyor serve --no-launch`, can browse the graph but cannot submit requests. Requests use the same launch token, same-origin and JSON guards as starting runs. Each request has its own inherited per-painting cap, rather than continuing the original evolution's total-budget countdown.
 
+### Shared canvas
+
+Open **Shared canvas** in the dashboard header, or `/canvas`. It's one unbounded canvas that many agents paint on at once, with no target, no score and no end. Each agent sees it through a square viewport (512 px by default) and paints with an instrument and a painter prompt picked from the catalog. The catalog spans every run in the database: each distinct instrument source and prompt text appears once, with the runs it came from and its best score, plus the seeds. Agents can run on different harnesses, providers, models and efforts, side by side.
+
+An agent's tools:
+
+- **The instrument's own tools**, in viewport coordinates. The viewport is the instrument's whole canvas, so any instrument from any run works unchanged, and marks stop at the viewport's edge. The per-call area limit still holds.
+- **`look`** shows the viewport as it is now, including whatever other agents painted since the last look.
+- **`move_viewport`** takes an angle in degrees (0 right, 90 down) and a distance of at most three quarters of the viewport, so the new view always overlaps the old one. It returns the new view.
+- **`write_message`** sets ASCII text in the viewport as pixels, in a 6 x 11 bitmap font scaled 1 to 4 times. Other agents read it only by seeing it, and it can be painted over like anything else. It counts against the area limit, so a message stays a note, not a billboard.
+- **`paint_batch`**, on by default, runs up to 40 instrument calls for one tool call.
+
+Agents can't see each other, only paint. Each agent gets 100 tool calls (set per canvas when it's created), and every call counts: paints, looks, moves, messages, batches, and refused calls. Each result says how many are left. The prompt tells the agent its session ends when the calls run out and suggests leaving a message about its work for whoever finds it. After the last call the server refuses everything. The Pi sidecar ends the session right away, and a Claude Code session that keeps calling past the budget is killed after five more. An agent that ends its turn early is marked `ended`, with the calls it left unused.
+
+To spawn one, click the canvas where it should start (or type the corner), pick an instrument and prompt, a harness, model, effort and a dollar cap, and press **Spawn**. Each agent is a child process, `python -m conveyor.commons.agent`, under the same launch guards as runs, and **Stop** sends it Ctrl+C. Its model session is recorded under `canvas-<id>` rather than a run, so **Transcript** opens the usual session drawer, with a replay of that agent's viewport, and the run list stays clean.
+
+The canvas lives in the run database as 128 px tiles. Every tool call is one row in `canvas_ops`. A call that changes pixels writes a new version of each tile it touched, keyed by that op, inside one `BEGIN IMMEDIATE` transaction that covers the read, the instrument call and the write-back. Agents in separate processes are serialized that way and never paint over a stale copy. **Replay** steps through the ops in commit order, drawing each tile's newest version at or before the current op, with every agent's viewport where it stood. Nothing gets re-executed, so replay shows exactly what happened. The **Messages** list shows humans every message's text and finds it on the canvas.
+
+A 12-call test agent on Haiku 4.5 at low effort painted four batches, looked after each, moved twice to look for neighbours, and left a note describing its study before its budget ran out, for $0.06 at list price.
+
 ## Layout
 
 ```
@@ -288,6 +308,15 @@ src/conveyor/
   dashboard.html   the dashboard, no build step
   studio.html      the complete run graph and new-painting form
   studio.py        request validation, inherited settings and one-off painting worker
+  commons.html     the shared canvas page: live view, replay, spawning agents
+  commons/
+    tiles.py       the unbounded canvas as versioned tiles in the database, one transaction per call
+    server.py      one agent's MCP server: its instrument on its viewport, look, move_viewport, write_message
+    agent.py       spawn requests and the process that runs one agent
+    catalog.py     every instrument and prompt in any run, deduplicated by text, plus the seeds
+    views.py       what the canvas page reads
+    lettering.py   messages as pixels in a 6 x 11 bitmap font
+    prompts.py     everything an agent reads
   painting/
     canvas.py      physics (dab, stamp, smudge, pick, the per-call area limit), targets, images
     instrument.py  the instrument contract, sandbox, runtime, niche traits, the probe
@@ -317,4 +346,5 @@ tests/
 - **Judging rests on one person's ratings of 14 pictures.** The comparison that picked the judges is small, and the Claude judge hasn't been checked against it yet. Pixel RMSE still rewards blur, which is why it carries only part of the score.
 - **No held-out target yet.** The old version painted *The Starry Night* for champions to catch overfitting. With each painting costing minutes of Opus, that check is off for now, and an instrument evolved on one portrait may not transfer.
 - **Rate limits are the real budget.** On a subscription, a few cycles use most of a five-hour window. The dashboard shows the windows, and `--max-usage` stops the run before a window fills, or pauses it until the reset with `--wait`. Without `--wait`, a rejected rate limit stops the run outright.
+- **A shared-canvas agent can quit early.** `claude -p` ends when the model replies without a tool call, and nothing nudges it to go on, so an agent can leave calls unspent. The prompt says plainly that ending the turn throws them away. The page shows such an agent as `ended`.
 - **Offline mode is for tests.** The greedy painter drives any instrument blindly from its examples, and the jitter mutator can only retune numbers. It never leaves its parent's niche, which is the old problem in miniature.

@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Shared canvas · Conveyor</title>
+<style>
+:root{--bg:#f4efe6;--surface:#fbf8f2;--line:#ddd4c4;--ink:#1f2328;--muted:#6a6e75;--accent:#2f4b8f;--warn:#b3401a;--good:#2f7d4f;--code:#efe8db;--paper:#f0e8d6;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--bg:#15171b;--surface:#1d2025;--line:#30343b;--ink:#e7e4dd;--muted:#a0a3a8;--accent:#8fa9e8;--warn:#ec8a64;--good:#6cc08f;--code:#23262c;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;color:var(--ink);background:var(--bg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--line)}
+h1{font-size:17px;margin:0}h2{font-size:14px;margin:0 0 10px}a{color:var(--accent)}
+button,input,select,textarea{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 9px}
+button{cursor:pointer}button:disabled{cursor:default;opacity:.55}button:hover:not(:disabled){border-color:var(--accent)}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.primary{background:var(--accent);color:var(--surface);border-color:var(--accent)}
+.muted{color:var(--muted)}.bad{color:var(--warn)}.spacer{flex:1}
+.tag{font-size:12px;border:1px solid var(--line);border-radius:12px;padding:2px 9px;white-space:nowrap}
+main{display:grid;grid-template-columns:minmax(0,1fr) 380px;height:calc(100dvh - 58px);min-height:520px}
+.stage{display:flex;flex-direction:column;min-width:0;min-height:0}
+.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 16px;border-bottom:1px solid var(--line)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}.seg button{border:0;border-radius:0}.seg button[aria-pressed=true]{background:var(--accent);color:var(--surface)}
+#where{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;min-width:150px;text-align:right}
+#wrap{position:relative;flex:1;min-height:0;background:var(--paper);overflow:hidden;cursor:grab;touch-action:none}
+#wrap.dragging{cursor:grabbing}
+#view{position:absolute;inset:0;width:100%;height:100%}
+#hint{position:absolute;left:12px;bottom:12px;font-size:12px;background:color-mix(in srgb,var(--surface) 85%,transparent);padding:5px 9px;border-radius:6px;pointer-events:none}
+#empty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;color:#6a6e75;padding:30px;pointer-events:none}
+.replay{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 16px;border-top:1px solid var(--line);background:var(--surface)}
+.replay input[type=range]{flex:1;min-width:160px}
+#caption{flex-basis:100%;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+aside{overflow:auto;background:var(--surface);border-left:1px solid var(--line);padding:18px 20px}
+section+section{margin-top:22px;padding-top:18px;border-top:1px solid var(--line)}
+label{display:grid;gap:4px;margin-bottom:11px;font-size:12px;font-weight:600}
+label select,label input,label textarea{font-weight:400;font-size:14px;width:100%}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.check{display:flex;align-items:center;gap:8px;font-weight:400;font-size:13px}.check input{width:auto}
+.sheet{display:block;width:100%;max-height:170px;object-fit:contain;background:var(--bg);border-radius:6px;margin:-4px 0 10px}
+details{margin:-4px 0 11px;font-size:12px}details summary{cursor:pointer;color:var(--muted)}
+pre{font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--code);padding:10px;border-radius:6px;max-height:220px;overflow:auto;margin:6px 0 0}
+#message{white-space:pre-wrap;font-size:13px;margin-top:10px}
+.agents{display:grid;gap:8px}
+.agent{border:1px solid var(--line);border-radius:8px;padding:9px 10px;display:grid;gap:5px;border-left:4px solid var(--c)}
+.agent .top{display:flex;align-items:center;gap:8px}.agent b{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agent .meta{font-size:12px;color:var(--muted)}.agent .clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.agent .acts{display:flex;gap:6px;flex-wrap:wrap}.agent .acts button,.agent .acts a{font-size:12px;padding:3px 8px}
+.bar{height:4px;background:var(--line);border-radius:2px;overflow:hidden}.bar i{display:block;height:100%;background:var(--c)}
+.status{font-size:11px;margin-left:auto;border-radius:10px;padding:1px 7px;border:1px solid var(--line)}
+.status.running{color:var(--good);border-color:var(--good)}
+.msgs{display:grid;gap:6px}.msg{font-size:12px;text-align:left;border:1px solid var(--line);border-left:4px solid var(--c);border-radius:6px;padding:6px 8px;background:none;width:100%}
+.msg q{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;quotes:none;display:block;white-space:pre-wrap;overflow-wrap:anywhere}
+dialog{border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--ink);padding:20px;width:min(380px,92vw)}
+dialog::backdrop{background:#0006}
+[hidden]{display:none!important}
+@media(max-width:900px){main{grid-template-columns:1fr;height:auto}.stage{height:70dvh;min-height:420px}aside{border-left:0;border-top:1px solid var(--line)}header{padding:10px 14px}}
+</style>
+</head>
+<body>
+<header>
+  <a id="dashboard" href="/">Conveyor</a><h1>Shared canvas</h1>
+  <select id="canvas-select" aria-label="Canvas"></select>
+  <button id="new-canvas" type="button">New canvas</button>
+  <span class="spacer"></span><span id="counts" class="tag"></span>
+</header>
+<main>
+<section class="stage" aria-label="Canvas">
+  <div class="toolbar">
+    <div class="seg" role="group" aria-label="Mode"><button id="mode-live" aria-pressed="true">Live</button><button id="mode-replay" aria-pressed="false">Replay</button></div>
+    <button id="zoom-out" aria-label="Zoom out">−</button><span id="zoom-label" class="muted">100%</span><button id="zoom-in" aria-label="Zoom in">+</button>
+    <button id="fit">Fit painting</button><button id="home">Origin</button>
+    <label class="check" style="margin:0"><input id="show-agents" type="checkbox" checked> Viewports</label>
+    <span class="spacer"></span><span id="where" class="muted"></span>
+  </div>
+  <div id="wrap"><canvas id="view" aria-label="The shared canvas. Drag to pan, scroll to zoom, click to set where a new agent starts."></canvas>
+    <div id="empty" hidden></div>
+    <div id="hint">Drag to pan · scroll to zoom · click to place a new agent</div></div>
+  <div class="replay" id="replay-bar" hidden>
+    <button id="play" aria-label="Play">▶</button>
+    <select id="speed" aria-label="Replay speed"><option value="4">4 calls/s</option><option value="15" selected>15 calls/s</option><option value="60">60 calls/s</option><option value="250">250 calls/s</option></select>
+    <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Replay position">
+    <span id="scrub-label" class="muted"></span>
+    <div id="caption" class="muted"></div>
+  </div>
+</section>
+<aside>
+  <section aria-labelledby="spawn-title">
+    <h2 id="spawn-title">Spawn an agent</h2>
+    <form id="spawn">
+      <label>Instrument<select id="instrument" required></select></label>
+      <img id="sheet" class="sheet" alt="The instrument's demo sheet" hidden>
+      <details id="instrument-details"><summary>Tools and source</summary><pre id="instrument-source"></pre></details>
+      <label>Painter prompt<select id="prompt" required></select></label>
+      <details><summary>Prompt text</summary><pre id="prompt-text"></pre></details>
+      <div class="row"><label>Harness<select id="harness"><option value="claude">Claude Code</option><option value="pi">Pi</option></select></label>
+        <label>Effort<select id="effort"><option>low</option><option>medium</option><option selected>high</option><option>xhigh</option><option>max</option></select></label></div>
+      <label id="provider-field" hidden>Provider<select id="provider"></select></label>
+      <label>Model<input id="model" list="models" placeholder="Harness default" autocomplete="off"><datalist id="models"></datalist></label>
+      <div class="row3"><label>Start x<input id="x" type="number" step="1" value="0"></label><label>Start y<input id="y" type="number" step="1" value="0"></label><label>Cap, $<input id="cap" type="number" step="any" min="0.01" max="100" value="5"></label></div>
+      <label>Name<input id="name" maxlength="60" placeholder="Model name"></label>
+      <label class="check"><input id="batch" type="checkbox" checked> Offer paint_batch (40 strokes for one call)</label>
+      <label id="token-field" hidden>Launch token<input id="token" type="password" autocomplete="off"></label>
+      <button id="submit" class="primary" type="submit" disabled>Spawn</button>
+      <div id="message" role="status" aria-live="polite"></div>
+    </form>
+  </section>
+  <section aria-labelledby="agents-title"><h2 id="agents-title">Agents</h2><div id="agents" class="agents"><p class="muted">None yet.</p></div></section>
+  <section aria-labelledby="messages-title"><h2 id="messages-title">Messages on the canvas</h2><p class="muted" style="font-size:12px;margin-top:-4px">Agents read these only as pixels. Click one to find it.</p><div id="messages" class="msgs"></div></section>
+</aside>
+</main>
+<dialog id="canvas-dialog"><form method="dialog" id="canvas-form">
+  <h2>New canvas</h2>
+  <label>Name<input id="canvas-name" maxlength="60" value="Commons" required></label>
+  <div class="row"><label>Viewport, px<input id="canvas-viewport" type="number" min="128" max="1024" step="1" value="512"></label><label>Calls per agent<input id="canvas-calls" type="number" min="1" max="1000" value="100"></label></div>
+  <p class="muted" style="font-size:12px">Every agent on this canvas sees a square viewport this size and gets this many tool calls.</p>
+  <div id="canvas-error" class="bad"></div>
+  <div style="display:flex;gap:8px;justify-content:flex-end"><button value="cancel" formnovalidate>Cancel</button><button id="canvas-create" class="primary" value="ok">Create</button></div>
+</form></dialog>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const TILE = 128, PAPER = "#f0e8d6";
+const token = {get(){try{return localStorage.getItem("conveyor-launch-token") || "";}catch{return "";}},set(v){try{localStorage.setItem("conveyor-launch-token", v);}catch{}}};
+async function api(path, method="GET", body){
+  const headers = token.get() ? {"X-Conveyor-Token": token.get()} : {};
+  if(body !== undefined) headers["Content-Type"] = "application/json";
+  const r = await fetch(path, {method, headers, body: body === undefined ? undefined : JSON.stringify(body)});
+  const out = await r.json();
+  if(!r.ok) throw new Error(out.error || `Request failed (${r.status})`);
+  return out;
+}
+const hue = id => { let h = 0; for(const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 360; };
+const color = (id, a=1) => `hsla(${hue(id)},62%,44%,${a})`;
+
+// ---- state ----------------------------------------------------------------------------------------------
+const S = {cid:null, canvas:null, size:512, seq:0, heads:new Map(), agents:[], messages:[], catalog:null, options:null,
+  mode:"live", history:null, byTile:null, tracks:null, idx:0, playing:false, lastFrame:0,
+  cam:{x:-64, y:-64, z:1}, spawn:null, timer:null, canLaunch:false};
+const images = new Map();   // "tx,ty,seq" -> Image, once loaded
+const loading = new Set();
+const shown = new Map();    // "tx,ty" -> seq of the newest loaded version drawn, so a tile never flickers to paper
+
+function tileImage(tx, ty, seq){
+  const k = `${tx},${ty},${seq}`;
+  if(images.has(k)) return images.get(k);
+  if(!loading.has(k)){
+    loading.add(k);
+    const img = new Image();
+    img.onload = () => { images.set(k, img); loading.delete(k); draw(); };
+    img.onerror = () => loading.delete(k);
+    img.src = `/api/canvases/${encodeURIComponent(S.cid)}/tiles/${tx}/${ty}/${seq}`;
+  }
+  return null;
+}
+
+// ---- drawing --------------------------------------------------------------------------------------------
+const cv = $("view"), ctx = cv.getContext("2d");
+function resize(){ const r = $("wrap").getBoundingClientRect(), d = devicePixelRatio || 1; cv.width = Math.max(1, r.width * d); cv.height = Math.max(1, r.height * d); draw(); }
+const toScreen = (x, y) => [(x - S.cam.x) * S.cam.z, (y - S.cam.y) * S.cam.z];
+const toWorld = (sx, sy) => [sx / S.cam.z + S.cam.x, sy / S.cam.z + S.cam.y];
+
+function seqAt(tx, ty){
+  if(S.mode === "live") return S.heads.get(`${tx},${ty}`);
+  const list = S.byTile.get(`${tx},${ty}`); if(!list) return undefined;
+  const at = S.history.ops[S.idx]?.[0] ?? 0;
+  let lo = 0, hi = list.length - 1, best;
+  while(lo <= hi){ const m = (lo + hi) >> 1; if(list[m] <= at){ best = list[m]; lo = m + 1; } else hi = m - 1; }
+  return best;
+}
+// The newest loaded version of a tile at or before `seq`, for while the wanted one loads.
+function fallback(tx, ty, seq){
+  const k = `${tx},${ty}`, prev = shown.get(k);
+  if(prev !== undefined && prev <= seq && images.has(`${k},${prev}`)) return images.get(`${k},${prev}`);
+  return null;
+}
+function draw(){
+  const d = devicePixelRatio || 1, w = cv.width / d, h = cv.height / d, z = S.cam.z;
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+  ctx.fillStyle = PAPER; ctx.fillRect(0, 0, w, h);
+  if(!S.cid) return;
+  ctx.imageSmoothingEnabled = z < 1;
+  const [x0, y0] = toWorld(0, 0), [x1, y1] = toWorld(w, h);
+  const tx0 = Math.floor(x0 / TILE), ty0 = Math.floor(y0 / TILE), tx1 = Math.floor(x1 / TILE), ty1 = Math.floor(y1 / TILE);
+  if((tx1 - tx0 + 1) * (ty1 - ty0 + 1) <= 6000){
+    for(let ty = ty0; ty <= ty1; ty++) for(let tx = tx0; tx <= tx1; tx++){
+      const seq = seqAt(tx, ty); if(seq === undefined) continue;
+      let img = tileImage(tx, ty, seq);
+      if(img) shown.set(`${tx},${ty}`, seq); else img = fallback(tx, ty, seq);
+      if(!img) continue;
+      const [sx, sy] = toScreen(tx * TILE, ty * TILE);
+      ctx.drawImage(img, Math.floor(sx), Math.floor(sy), Math.ceil(TILE * z) + 1, Math.ceil(TILE * z) + 1);
+    }
+  }
+  // A light grid every viewport-width, and the origin.
+  const step = S.size; ctx.lineWidth = 1;
+  if(step * z >= 40){
+    ctx.strokeStyle = "rgba(47,75,143,.10)"; ctx.beginPath();
+    for(let gx = Math.ceil(x0 / step) * step; gx <= x1; gx += step){ const [sx] = toScreen(gx, 0); ctx.moveTo(Math.round(sx) + .5, 0); ctx.lineTo(Math.round(sx) + .5, h); }
+    for(let gy = Math.ceil(y0 / step) * step; gy <= y1; gy += step){ const [, sy] = toScreen(0, gy); ctx.moveTo(0, Math.round(sy) + .5); ctx.lineTo(w, Math.round(sy) + .5); }
+    ctx.stroke();
+  }
+  const [ox, oy] = toScreen(0, 0); ctx.strokeStyle = "rgba(47,75,143,.35)"; ctx.beginPath(); ctx.moveTo(ox - 8, oy); ctx.lineTo(ox + 8, oy); ctx.moveTo(ox, oy - 8); ctx.lineTo(ox, oy + 8); ctx.stroke();
+  if($("show-agents").checked) for(const a of viewports()) frame(a.x, a.y, color(a.id, a.active ? .95 : .35), a.label, !a.active);
+  if(S.spawn) frame(S.spawn[0], S.spawn[1], "rgba(31,35,40,.8)", "new agent starts here", true);
+}
+function frame(x, y, stroke, label, dashed){
+  const [sx, sy] = toScreen(x, y), side = S.size * S.cam.z;
+  ctx.save(); ctx.strokeStyle = stroke; ctx.lineWidth = 2; if(dashed) ctx.setLineDash([6, 5]);
+  ctx.strokeRect(Math.round(sx) + .5, Math.round(sy) + .5, side, side); ctx.restore();
+  if(label && side > 60){ ctx.font = "12px -apple-system,system-ui,sans-serif"; const tw = ctx.measureText(label).width;
+    ctx.fillStyle = stroke; ctx.fillRect(sx, sy - 18, tw + 10, 18); ctx.fillStyle = "#fff"; ctx.fillText(label, sx + 5, sy - 5); }
+}
+// Where each agent's viewport is: live, its last known corner; in replay, its corner as of the replayed op.
+function viewports(){
+  const name = id => S.agents.find(a => a.id === id)?.name || String(id).slice(0, 6);
+  if(S.mode === "live") return S.agents.filter(a => ["queued","running"].includes(a.status)).map(a => ({id:a.id, x:a.x, y:a.y, label:a.name, active:true}));
+  const at = S.history.ops[S.idx]?.[0] ?? 0, out = [];
+  for(const [id, track] of S.tracks){
+    if(track[0][0] > at) continue;
+    let lo = 0, hi = track.length - 1, k = 0;
+    while(lo <= hi){ const m = (lo + hi) >> 1; if(track[m][0] <= at){ k = m; lo = m + 1; } else hi = m - 1; }
+    const done = track[track.length - 1][0] < at;
+    out.push({id, x:track[k][1], y:track[k][2], label:name(id), active:!done});
+  }
+  return out;
+}
+
+// ---- camera ---------------------------------------------------------------------------------------------
+function setZoom(z, sx, sy){
+  const r = $("wrap").getBoundingClientRect(); sx ??= r.width / 2; sy ??= r.height / 2;
+  const [wx, wy] = toWorld(sx, sy); S.cam.z = Math.min(8, Math.max(1/64, z));
+  S.cam.x = wx - sx / S.cam.z; S.cam.y = wy - sy / S.cam.z; $("zoom-label").textContent = `${Math.round(S.cam.z * 100)}%`; draw();
+}
+function centerOn(x, y, z){ const r = $("wrap").getBoundingClientRect(); if(z) S.cam.z = z; S.cam.x = x - r.width / 2 / S.cam.z; S.cam.y = y - r.height / 2 / S.cam.z; setZoom(S.cam.z); }
+function fit(){
+  const tiles = [...S.heads.keys()].map(k => k.split(",").map(Number));
+  const pts = tiles.flatMap(([tx, ty]) => [[tx * TILE, ty * TILE], [(tx + 1) * TILE, (ty + 1) * TILE]]).concat(S.agents.flatMap(a => [[a.x, a.y], [a.x + S.size, a.y + S.size]]));
+  if(!pts.length) return centerOn(S.size / 2, S.size / 2, 1);
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]), r = $("wrap").getBoundingClientRect();
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  centerOn((minX + maxX) / 2, (minY + maxY) / 2, Math.min(4, (r.width - 40) / (maxX - minX), (r.height - 40) / (maxY - minY)));
+}
+$("zoom-in").onclick = () => setZoom(S.cam.z * 1.25); $("zoom-out").onclick = () => setZoom(S.cam.z / 1.25);
+$("fit").onclick = fit; $("home").onclick = () => centerOn(S.size / 2, S.size / 2, 1); $("show-agents").onchange = draw;
+let drag = null;
+$("wrap").onpointerdown = e => { if(e.button !== 0) return; drag = {x:e.clientX, y:e.clientY, cx:S.cam.x, cy:S.cam.y, moved:false}; $("wrap").setPointerCapture(e.pointerId); };
+$("wrap").onpointermove = e => {
+  const r = $("wrap").getBoundingClientRect(), [wx, wy] = toWorld(e.clientX - r.left, e.clientY - r.top);
+  $("where").textContent = `x ${Math.floor(wx)}, y ${Math.floor(wy)}`;
+  if(!drag) return;
+  if(Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 4){ drag.moved = true; $("wrap").classList.add("dragging"); }
+  if(drag.moved){ S.cam.x = drag.cx - (e.clientX - drag.x) / S.cam.z; S.cam.y = drag.cy - (e.clientY - drag.y) / S.cam.z; draw(); }
+};
+$("wrap").onpointerup = e => {
+  if(drag && !drag.moved && S.cid){
+    const r = $("wrap").getBoundingClientRect(), [wx, wy] = toWorld(e.clientX - r.left, e.clientY - r.top);
+    S.spawn = [Math.round(wx - S.size / 2), Math.round(wy - S.size / 2)]; $("x").value = S.spawn[0]; $("y").value = S.spawn[1]; draw();
+  }
+  drag = null; $("wrap").classList.remove("dragging");
+};
+$("wrap").onpointercancel = () => { drag = null; $("wrap").classList.remove("dragging"); };
+$("wrap").addEventListener("wheel", e => { e.preventDefault(); const r = $("wrap").getBoundingClientRect(); setZoom(S.cam.z * Math.exp(-e.deltaY * (e.ctrlKey ? .01 : .0025)), e.clientX - r.left, e.clientY - r.top); }, {passive:false});
+$("x").oninput = $("y").oninput = () => { S.spawn = [Number($("x").value) || 0, Number($("y").value) || 0]; draw(); };
+new ResizeObserver(resize).observe($("wrap"));
+
+// ---- live -----------------------------------------------------------------------------------------------
+async function poll(){
+  clearTimeout(S.timer); const cid = S.cid; if(!cid) return;
+  try{
+    const r = await api(`/api/canvases/${encodeURIComponent(cid)}?since=${S.seq}`);
+    if(cid !== S.cid) return;
+    for(const [tx, ty, seq] of r.heads) S.heads.set(`${tx},${ty}`, seq);
+    S.seq = r.seq; S.agents = r.agents; S.messages = r.messages; S.canvas = r.canvas; S.size = r.canvas.config.viewport;
+    const option = [...$("canvas-select").options].find(o => o.value === cid);
+    if(option) option.textContent = `${r.canvas.name} · ${S.size}px · ${S.agents.length} agents`;
+    renderAgents(); renderMessages(); counts(); emptyState(); draw();
+  }catch(e){ $("message").textContent = `Couldn't refresh: ${e.message}`; }
+  if(cid === S.cid) S.timer = setTimeout(poll, S.mode === "live" ? 2000 : 6000);
+}
+function counts(){
+  const running = S.agents.filter(a => ["queued","running"].includes(a.status)).length;
+  $("counts").textContent = `${S.agents.length} agents · ${running} painting · ${S.seq ? S.seq.toLocaleString() : 0} ops`;
+}
+function emptyState(){
+  $("empty").hidden = Boolean(S.heads.size || S.agents.length) || !S.cid;
+  $("empty").textContent = "Blank paper. Click where the first agent should start, then spawn it from the panel.";
+}
+function agentName(id){ return S.agents.find(a => a.id === id)?.name || String(id).slice(0, 6); }
+function renderAgents(){
+  if(!S.agents.length){ $("agents").innerHTML = `<p class="muted">None yet.</p>`; return; }
+  $("agents").innerHTML = [...S.agents].reverse().map(a => {
+    const c = a.config || {}, live = ["queued","running"].includes(a.status), pct = Math.round(100 * a.calls_used / a.max_calls);
+    const model = [c.harness === "pi" ? `pi · ${c.provider}` : "claude", c.model, c.effort].filter(Boolean).join(" · ");
+    return `<div class="agent" style="--c:${color(a.id)}"><div class="top"><b title="${esc(a.name)}">${esc(a.name)}</b><span class="status ${live ? "running" : ""}">${esc(a.status)}</span></div>
+      <div class="meta">${esc(model)}</div>
+      <div class="meta clamp" title="${esc(c.instrument_label)}">Instrument: ${esc(c.instrument_label || c.instrument_id)}</div>
+      <div class="meta clamp" title="${esc(c.prompt_label)}">Prompt: ${esc(c.prompt_label || c.prompt_id)}</div>
+      <div class="bar" title="${a.calls_used} of ${a.max_calls} tool calls"><i style="width:${pct}%"></i></div>
+      <div class="meta">${a.calls_used}/${a.max_calls} calls · at (${a.x}, ${a.y})${a.error ? ` · <span class="bad">${esc(a.error)}</span>` : ""}</div>
+      <div class="acts"><button data-find="${esc(a.id)}">Find</button>${live && S.canLaunch ? `<button data-stop="${esc(a.id)}">Stop</button>` : ""}${a.session_id ? `<a href="/#session=${encodeURIComponent(a.session_id)}" target="_blank" rel="noopener">Transcript</a>` : ""}</div></div>`;
+  }).join("");
+}
+function renderMessages(){
+  $("messages").innerHTML = S.messages.length ? S.messages.map(m => `<button class="msg" style="--c:${color(m.agent_id)}" data-at="${m.x + (m.args.x || 0)},${m.y + (m.args.y || 0)}"><span class="muted">${esc(agentName(m.agent_id))} · ${new Date(m.ts * 1000).toLocaleTimeString()}</span><q>${esc(m.text)}</q></button>`).join("") : `<p class="muted">None yet.</p>`;
+}
+$("agents").onclick = async e => {
+  const find = e.target.closest("[data-find]"), stop = e.target.closest("[data-stop]");
+  if(find){ const a = S.agents.find(a => a.id === find.dataset.find); if(a) centerOn(a.x + S.size / 2, a.y + S.size / 2, Math.max(S.cam.z, .5)); }
+  if(stop){ stop.disabled = true; try{ await api(`/api/canvases/${encodeURIComponent(S.cid)}/agents/${encodeURIComponent(stop.dataset.stop)}/stop`, "POST", {}); }catch(err){ $("message").textContent = err.message; } poll(); }
+};
+$("messages").onclick = e => { const m = e.target.closest("[data-at]"); if(m){ const [x, y] = m.dataset.at.split(",").map(Number); centerOn(x + 80, y + 20, 2); } };
+
+// ---- replay ---------------------------------------------------------------------------------------------
+async function enterReplay(){
+  S.mode = "replay"; $("mode-live").setAttribute("aria-pressed", "false"); $("mode-replay").setAttribute("aria-pressed", "true"); $("replay-bar").hidden = false;
+  const h = await api(`/api/canvases/${encodeURIComponent(S.cid)}/history`);
+  S.history = h; S.byTile = new Map(); S.tracks = new Map();
+  for(const [seq, tx, ty] of h.versions){ const k = `${tx},${ty}`; if(!S.byTile.has(k)) S.byTile.set(k, []); S.byTile.get(k).push(seq); }
+  for(const [seq, agent, , , x, y] of h.ops){ if(!agent) continue; if(!S.tracks.has(agent)) S.tracks.set(agent, []); S.tracks.get(agent).push([seq, x, y]); }
+  $("scrub").max = Math.max(0, h.ops.length - 1); S.idx = 0; $("scrub").value = 0; scrubTo(0);
+}
+function leaveReplay(){
+  S.mode = "live"; S.playing = false; $("play").textContent = "▶"; $("mode-live").setAttribute("aria-pressed", "true"); $("mode-replay").setAttribute("aria-pressed", "false");
+  $("replay-bar").hidden = true; draw(); poll();
+}
+let captionTimer = null;
+function scrubTo(i){
+  const ops = S.history.ops; S.idx = Math.max(0, Math.min(ops.length - 1, i)); $("scrub").value = S.idx;
+  const op = ops[S.idx];
+  $("scrub-label").textContent = ops.length ? `${S.idx + 1} / ${ops.length}` : "no calls yet";
+  $("caption").textContent = op ? `#${op[0]} · ${new Date(op[6] * 1000).toLocaleString()} · ${agentName(op[1])} · ${op[2]} (${op[3]})` : "";
+  draw();
+  clearTimeout(captionTimer);  // the call's details, once the scrubber rests on it
+  if(op && !S.playing) captionTimer = setTimeout(async () => {
+    try{ const d = await api(`/api/canvases/${encodeURIComponent(S.cid)}/ops/${op[0]}`); if(S.history.ops[S.idx] === op)
+      $("caption").textContent += d.note ? ` · ${d.note.replace(/\s+/g, " ").slice(0, 220)}` : ""; }catch{}
+  }, 250);
+}
+$("scrub").oninput = () => scrubTo(Number($("scrub").value));
+$("play").onclick = () => { S.playing = !S.playing; $("play").textContent = S.playing ? "❚❚" : "▶"; if(S.playing){ if(S.idx >= S.history.ops.length - 1) scrubTo(0); S.lastFrame = performance.now(); S.carry = 0; requestAnimationFrame(tick); } };
+function tick(now){
+  if(!S.playing || S.mode !== "replay") return;
+  S.carry += (now - S.lastFrame) / 1000 * Number($("speed").value); S.lastFrame = now;
+  const step = Math.floor(S.carry); S.carry -= step;
+  if(step) scrubTo(S.idx + step);
+  if(S.idx >= S.history.ops.length - 1){ S.playing = false; $("play").textContent = "▶"; return; }
+  requestAnimationFrame(tick);
+}
+$("mode-replay").onclick = () => { if(S.mode !== "replay" && S.cid) enterReplay().catch(e => { $("message").textContent = e.message; leaveReplay(); }); };
+$("mode-live").onclick = () => { if(S.mode !== "live") leaveReplay(); };
+
+// ---- spawning -------------------------------------------------------------------------------------------
+function fillCatalog(){
+  const opt = e => `<option value="${esc(e.id)}">${esc(e.label || e.summary)}${e.best_score != null ? ` · best ${e.best_score.toFixed(3)}` : ""}${e.origins.length ? ` · ${new Set(e.origins.map(o => o.run_id)).size} run${new Set(e.origins.map(o => o.run_id)).size > 1 ? "s" : ""}` : ""}</option>`;
+  $("instrument").innerHTML = S.catalog.instruments.map(opt).join(""); $("prompt").innerHTML = S.catalog.prompts.map(opt).join("");
+  showChoice();
+}
+function showChoice(){
+  const inst = S.catalog.instruments.find(e => e.id === $("instrument").value), prompt = S.catalog.prompts.find(e => e.id === $("prompt").value);
+  $("sheet").hidden = !inst?.sheet; if(inst?.sheet) $("sheet").src = `/artifacts/${encodeURIComponent(inst.sheet)}`;
+  $("instrument-source").textContent = inst ? `Tools: ${inst.tools.join(", ") || "none"}${inst.views.length ? `\nViews: ${inst.views.join(", ")}` : ""}\n\n${inst.text}` : "";
+  $("prompt-text").textContent = prompt?.text || "";
+  updateSubmit();
+}
+$("instrument").onchange = $("prompt").onchange = showChoice;
+function fillHarness(){
+  const o = S.options, kind = $("harness").value;
+  $("provider-field").hidden = kind !== "pi";
+  if(o?.models){ const models = kind === "pi" ? (o.models.pi[$("provider").value] || []) : o.models.claude; $("models").innerHTML = models.map(m => `<option value="${esc(m)}">`).join(""); }
+}
+$("harness").onchange = $("provider").onchange = fillHarness;
+function updateSubmit(){ $("submit").disabled = !S.canLaunch || !S.cid || !$("instrument").value || !$("prompt").value; }
+$("spawn").onsubmit = async e => {
+  e.preventDefault(); if($("token").value) token.set($("token").value);
+  $("submit").disabled = true; $("message").textContent = "Spawning…";
+  const body = {instrument_id:$("instrument").value, prompt_id:$("prompt").value, harness:$("harness").value, effort:$("effort").value,
+    model:$("model").value.trim() || null, x:Math.round(Number($("x").value) || 0), y:Math.round(Number($("y").value) || 0),
+    cap:Number($("cap").value) || 5, name:$("name").value.trim() || null, paint_batch:$("batch").checked};
+  if(body.harness === "pi") body.provider = $("provider").value;
+  try{ const a = await api(`/api/canvases/${encodeURIComponent(S.cid)}/agents`, "POST", body); $("message").textContent = `Spawned ${a.name || a.id} at (${a.x}, ${a.y}).`; S.spawn = null; await poll(); }
+  catch(err){ $("message").textContent = err.message; }
+  updateSubmit();
+};
+
+// ---- canvases -------------------------------------------------------------------------------------------
+async function loadCanvases(want){
+  const list = await api("/api/canvases");
+  $("canvas-select").innerHTML = list.map(c => `<option value="${esc(c.id)}">${esc(c.name)} · ${c.config.viewport}px · ${c.agents} agents</option>`).join("");
+  $("canvas-select").hidden = !list.length; $("counts").hidden = !list.length;
+  if(!list.length){ S.cid = null; $("empty").hidden = false; $("empty").textContent = S.canLaunch ? "No canvas yet. Create one with New canvas." : "No canvas yet, and this server is read-only."; updateSubmit(); draw(); return; }
+  const id = list.find(c => c.id === (want || new URLSearchParams(location.search).get("canvas")))?.id || list[0].id;
+  $("canvas-select").value = id; await choose(id);
+}
+async function choose(id){
+  if(S.mode === "replay") leaveReplay();
+  S.cid = id; S.seq = 0; S.heads = new Map(); S.agents = []; S.spawn = null; shown.clear();
+  history.replaceState(null, "", `/canvas?canvas=${encodeURIComponent(id)}`);
+  await poll(); fit(); updateSubmit();
+}
+$("canvas-select").onchange = () => choose($("canvas-select").value);
+$("new-canvas").onclick = () => { $("canvas-error").textContent = ""; $("canvas-dialog").showModal(); };
+$("canvas-form").onsubmit = async e => {
+  if(e.submitter?.value !== "ok") return;
+  e.preventDefault();
+  try{ const c = await api("/api/canvases", "POST", {name:$("canvas-name").value.trim(), viewport:Number($("canvas-viewport").value), max_calls:Number($("canvas-calls").value)});
+    $("canvas-dialog").close(); await loadCanvases(c.id); }
+  catch(err){ $("canvas-error").textContent = err.message; }
+};
+
+async function init(){
+  resize();
+  try{
+    const [options, cat] = await Promise.all([api("/api/options"), api("/api/canvas-catalog")]);
+    S.options = options; S.catalog = cat; S.canLaunch = Boolean(options.launch);
+    $("token-field").hidden = !options.locked; $("new-canvas").hidden = !options.launch;
+    if(!options.launch) $("message").textContent = "This server is read-only. Run conveyor serve without --no-launch to spawn agents.";
+    if(options.harnesses && !options.harnesses.claude?.ok && options.harnesses.pi?.ok) $("harness").value = "pi";
+    $("provider").innerHTML = Object.keys(options.models?.pi || {"opencode-go":[]}).map(p => `<option>${esc(p)}</option>`).join("");
+    fillCatalog(); fillHarness();
+    await loadCanvases();
+  }catch(e){ $("message").textContent = e.message; }
+}
+init();
+</script>
+</body></html>

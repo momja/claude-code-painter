@@ -10,6 +10,11 @@ The run log. Everything the dashboard shows is read from one SQLite file written
   strokes         the paint server's per-call log for each painting session (with canvas snapshots)
   artifacts       content-addressed images, referenced from the rows above by name
 
+The shared canvas (see commons/) adds its own tables: `canvases`, `canvas_agents`, `canvas_ops` (every tool call
+an agent made, in commit order), `canvas_tiles` (every version of every tile, keyed by the op that wrote it) and
+`canvas_heads` (each tile's latest version). Agents' MCP servers write those directly, in transactions, because
+several processes paint the same tiles; everything else goes through the queue below.
+
 Writes go through a queue drained by one writer thread, in the order they were queued, so a row that
 references an artifact is never committed before the artifact. The dashboard opens the file read-only, so it
 can serve a run in progress from another process.
@@ -71,6 +76,30 @@ CREATE TABLE IF NOT EXISTS painting_requests (
     config TEXT NOT NULL, session_id TEXT, artifacts TEXT, details TEXT, error TEXT
 );
 CREATE INDEX IF NOT EXISTS painting_requests_run ON painting_requests(run_id, created);
+CREATE TABLE IF NOT EXISTS canvases (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, created REAL NOT NULL, config TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS canvas_agents (
+    id TEXT PRIMARY KEY, canvas_id TEXT NOT NULL, name TEXT, created REAL NOT NULL, ended REAL, status TEXT NOT NULL,
+    config TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, calls_used INTEGER NOT NULL DEFAULT 0,
+    max_calls INTEGER NOT NULL, session_id TEXT, error TEXT, last_ts REAL
+);
+CREATE INDEX IF NOT EXISTS canvas_agents_canvas ON canvas_agents(canvas_id, created);
+CREATE TABLE IF NOT EXISTS canvas_ops (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT, canvas_id TEXT NOT NULL, agent_id TEXT, ts REAL NOT NULL,
+    tool TEXT NOT NULL, status TEXT NOT NULL, args TEXT, note TEXT, x INTEGER, y INTEGER, tiles INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS canvas_ops_canvas ON canvas_ops(canvas_id, seq);
+CREATE TABLE IF NOT EXISTS canvas_tiles (
+    canvas_id TEXT NOT NULL, tx INTEGER NOT NULL, ty INTEGER NOT NULL, seq INTEGER NOT NULL, data BLOB NOT NULL,
+    PRIMARY KEY (canvas_id, tx, ty, seq)
+);
+CREATE INDEX IF NOT EXISTS canvas_tiles_seq ON canvas_tiles(canvas_id, seq);
+CREATE TABLE IF NOT EXISTS canvas_heads (
+    canvas_id TEXT NOT NULL, tx INTEGER NOT NULL, ty INTEGER NOT NULL, seq INTEGER NOT NULL,
+    PRIMARY KEY (canvas_id, tx, ty)
+);
+CREATE INDEX IF NOT EXISTS canvas_heads_seq ON canvas_heads(canvas_id, seq);
 """
 
 SESSION_FIELDS = {"status", "ended", "cost", "usage", "num_turns", "result", "error", "request", "model", "last_ts"}
@@ -116,7 +145,9 @@ def new_id() -> str:
 
 class Store:
     def __init__(self, path: str | Path, run_name: str | None = None, config: dict | None = None,
-                 *, run_id: str | None = None) -> None:
+                 *, run_id: str | None = None, check_run: bool = True) -> None:
+        """`check_run=False` records under a `run_id` that has no row in `runs`: a shared canvas's agents keep
+        their sessions under the canvas, which is not a run and shouldn't be listed as one."""
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.run_id = run_id or new_id()
@@ -126,7 +157,7 @@ class Store:
         if run_id is None:
             conn.execute("INSERT INTO runs (id, name, started, config) VALUES (?, ?, ?, ?)",
                          (self.run_id, run_name or self.run_id, time.time(), dumps(config or {})))
-        elif conn.execute("SELECT id FROM runs WHERE id=?", (run_id,)).fetchone() is None:
+        elif check_run and conn.execute("SELECT id FROM runs WHERE id=?", (run_id,)).fetchone() is None:
             conn.close()
             raise ValueError(f"Unknown run: {run_id}")
         conn.commit()
