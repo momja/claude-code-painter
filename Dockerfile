@@ -2,7 +2,7 @@
 #
 # Conveyor runs the Python evolver and, per Pi session, a Node sidecar (pi-agent/agent.mjs). Aphrodite has
 # Python 3.10 and Node 16; conveyor needs Python >= 3.11 and Pi needs modern Node, so both come from the image.
-# Only the Pi harness runs here: the container has no `claude` CLI or login.
+# Claude Code is installed too, but not logged in: log in once inside the running container (see compose.yml).
 
 FROM node:20-bookworm-slim AS node
 
@@ -15,6 +15,9 @@ RUN apt-get update \
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+
+# The Claude Code CLI for the claude harness. The login is not baked in; it lives on the /data volume.
+RUN npm install -g @anthropic-ai/claude-code && claude --version
 
 WORKDIR /app
 
@@ -38,6 +41,8 @@ from conveyor.pi import PI_DIR, PI_SCRIPT, available; \
 from conveyor.painting.canvas import TARGETS_DIR; \
 assert PI_SCRIPT.is_file(), PI_SCRIPT; \
 assert available() is None, available(); \
+from conveyor.claude import available as claude_available; \
+assert claude_available(), 'claude is not on PATH'; \
 assert (TARGETS_DIR / 'self_portrait.jpg').is_file(); \
 print('layout ok:', PI_DIR)"
 

@@ -5,6 +5,9 @@
 # them, so a run in flight gets stop_grace_period to finish its sessions.
 #
 # The API key and the token come from .env, which the ansible playbook templates.
+#
+# Claude Code keeps its login in CLAUDE_CONFIG_DIR, on the volume, so it survives redeploys. Log in once:
+#   docker exec -it conveyor-conveyor-1 claude auth login
 
 services:
   conveyor:
@@ -14,6 +17,7 @@ services:
     command: ["conveyor", "serve", "--db", "/data/${DB_NAME:-conveyor.db}", "--host", "0.0.0.0", "--port", "8765"]
     environment:
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:?put it in .env}
+      CLAUDE_CONFIG_DIR: /data/claude
       CONVEYOR_LAUNCH_TOKEN: ${CONVEYOR_LAUNCH_TOKEN:?put it in .env}
     volumes:
       - conveyor-runs:/data

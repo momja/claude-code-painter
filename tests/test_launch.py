@@ -180,3 +180,20 @@ def test_the_form_defaults_to_pi_when_claude_is_missing(launcher, monkeypatch):
         "claude": {"ok": False, "detail": "missing"},
         "pi": {"ok": True, "detail": "ready", "keys": {}, "env_vars": {}}})
     assert launcher.options()["defaults"]["harness"] == "pi"
+
+
+def test_a_claude_that_is_not_logged_in_blocks_the_claude_harness(tmp_path, monkeypatch):
+    exe = tmp_path / "claude"
+    exe.write_text('''#!/bin/sh
+case "$1" in
+  --version) echo "9.9.9 (Claude Code)" ;;
+  auth) echo '{"loggedIn": false}'; exit 1 ;;
+esac
+''')
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    from conveyor.claude import logged_in
+    assert logged_in("claude") is False
+    claude = Launcher(tmp_path / "t.db", build_parser).harnesses()["claude"]
+    assert claude["ok"] is False and "not logged in" in claude["detail"] and "auth login" in claude["detail"]
+    assert logged_in("/nonexistent/claude") is None

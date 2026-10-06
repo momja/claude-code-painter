@@ -112,6 +112,15 @@ class ClaudeCode(ProcessHarness):
         return self.argv(job), (json.dumps(message) + "\n").encode(), child_env()
 
 
+def logged_in(binary: str = "claude") -> bool | None:
+    """Whether the CLI has a login, from `claude auth status`; None when it can't tell (an older CLI)."""
+    try:
+        r = subprocess.run([binary, "auth", "status", "--json"], capture_output=True, text=True, timeout=30)
+        return bool(json.loads(r.stdout)["loggedIn"])
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+        return None
+
+
 def available(binary: str = "claude") -> str | None:
     """The CLI's version string, or None if it isn't installed."""
     try:

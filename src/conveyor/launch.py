@@ -170,6 +170,7 @@ class Launcher:
         if self._probe and time.time() - self._probe[0] < 30:
             return self._probe[1]
         from conveyor.claude import available as claude_available
+        from conveyor.claude import logged_in
         from conveyor.pi import PROVIDERS
         from conveyor.pi import available as pi_available
         from conveyor.pi import load_api_key
@@ -177,7 +178,13 @@ class Launcher:
         version = claude_available("claude")
         problem = pi_available()
         keys = {k: bool(load_api_key(p)) for k, p in PROVIDERS.items()}
-        out = {"claude": {"ok": version is not None, "detail": version or "`claude --version` fails; install Claude Code"},
+        if version is None:
+            claude = {"ok": False, "detail": "`claude --version` fails; install Claude Code"}
+        elif logged_in("claude") is False:
+            claude = {"ok": False, "detail": f"{version}, but not logged in; run `claude auth login`"}
+        else:
+            claude = {"ok": True, "detail": version}
+        out = {"claude": claude,
                "pi": {"ok": problem is None, "detail": problem or "ready", "keys": keys,
                       "env_vars": {k: p.env_var for k, p in PROVIDERS.items()}}}
         self._probe = (time.time(), out)
