@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
 #
 # Conveyor runs the Python evolver and, per Pi session, a Node sidecar (pi-agent/agent.mjs). Aphrodite has
-# Python 3.10 and Node 16; conveyor needs Python >= 3.11 and Pi needs modern Node, so both come from the image.
+# Python 3.10 and Node 16; conveyor needs Python >= 3.11 and Pi needs Node 22.19+, so both come from the image.
 # Claude Code is installed too, but not logged in: log in once inside the running container (see compose.yml).
 
-FROM node:20-bookworm-slim AS node
+FROM node:22-bookworm-slim AS node
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
@@ -29,7 +29,7 @@ COPY pi-agent/package.json pi-agent/package-lock.json ./pi-agent/
 RUN cd pi-agent && npm ci
 
 COPY src ./src
-COPY pi-agent/agent.mjs ./pi-agent/
+COPY pi-agent/agent.mjs pi-agent/auth.mjs pi-agent/credentials.mjs ./pi-agent/
 RUN uv sync --frozen
 
 ENV PATH="/app/.venv/bin:$PATH"

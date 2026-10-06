@@ -19,13 +19,21 @@ uv run --group dev pytest                         # 70 tests, about 25 s, no mod
 
 `conveyor serve` opens the dashboard on `runs/conveyor.db` (`--db` picks another file, and it's created if it's missing). The **New run** button opens a form with every `conveyor run` option: models per role, the target and canvas, the evolution weights, spend and rate-limit caps, and `--wait`. Defaults and tooltips come from the command line's own parser, and the form shows the equivalent command. Offline mode is a checkbox, so a first look needs no model.
 
-Each run is a child process, `conveyor run --no-serve`, writing to the served database, so several can go at once and the dashboard follows them like any other run. **Stop run** in the header sends the process Ctrl+C. Stopping the server stops the runs it started. A run needs the API key in the environment `conveyor serve` was started from, so `OPENCODE_API_KEY=... uv run conveyor serve` or a `.env` file.
+Each run is a child process, `conveyor run --no-serve`, writing to the served database, so several can go at once and the dashboard follows them like any other run. **Stop run** in the header sends the process Ctrl+C. Stopping the server stops the runs it started. Pi needs an API key in the environment `conveyor serve` was started from, or an OpenAI Codex subscription login saved by `conveyor auth login openai`.
 
 Starting runs spends your money and your Claude usage, so it is only on when the server is bound to a loopback address (the default), and POSTs from other origins or hosts are refused. `--no-launch` turns it off.
 
 To serve it on a network (a container behind a proxy), set `CONVEYOR_LAUNCH_TOKEN` (16 characters or more) or pass `--launch-token`. The dashboard's reads stay open, but starting or stopping a run, and the form's options, ask for the token. The New run button prompts for it once and keeps it in that browser. With no `claude` on the host, the form defaults to the Pi harness. `Dockerfile` and `compose.yml` run exactly this: a container that only serves, with every run started from the UI.
 
-The Pi harness needs Node 20 or later and a one-time `(cd pi-agent && npm install)`.
+The Pi harness needs Node 22.19 or later and a one-time `(cd pi-agent && npm install)`.
+
+For the deployed service, sign in to your ChatGPT subscription once from the container:
+
+```sh
+docker exec -it conveyor-conveyor-1 conveyor auth login openai
+```
+
+Open the device-login URL it prints, enter the code, and approve access. The credential is stored at `/data/pi-auth.json` on the persistent Docker volume, so it survives `deploy-conveyor` redeploys. Check or remove it with `conveyor auth status` or `conveyor auth logout openai` inside the container. Select `openai-codex` as the Pi provider in the New run form.
 
 You need Claude Code installed and logged in, so `claude --version` has to work. conveyor uses whatever auth your `claude` uses. On a subscription the dollar figures are list price, not a bill, but they're the best single measure of how much of your plan's rate limit a run eats. Every session reports the five-hour and weekly usage windows. The dashboard shows them, and `--max-usage` (default 0.85) stops a run from starting new sessions once either window is that full, so a run never takes the last of a window you share with your own Claude use. On the plan these numbers come from, a five-hour window held roughly $13 to $15 of list-price Opus usage.
 
@@ -55,7 +63,7 @@ By that rate a 200-action painting is around 7 minutes and $1.50. `--lanes` sets
 Every model interaction is a job run by a harness, and there are two:
 
 - **`claude`** runs Claude Code headless, `claude -p`, with your Claude login. The default model is Claude Opus 5.5.
-- **`pi`** runs Pi's agent loop in a Node sidecar (`pi-agent/agent.mjs`) against any model on OpenCode Go or OpenRouter. Put `OPENCODE_API_KEY=...` or `OPENROUTER_API_KEY=...` in the environment or in a `.env` file here or in a parent directory. The default model is `glm-5.3-flash` on OpenCode Go; pick the provider with `--provider`.
+- **`pi`** runs Pi's agent loop in a Node sidecar (`pi-agent/agent.mjs`) on OpenCode Go, OpenRouter, or OpenAI Codex. OpenCode Go and OpenRouter use `OPENCODE_API_KEY` or `OPENROUTER_API_KEY`; OpenAI Codex uses a ChatGPT subscription login saved with `conveyor auth login openai`. The default is `glm-5.3-flash` on OpenCode Go. Choose `openai-codex` with `--provider` or the New run form.
 
 `--harness`, `--model` and `--effort` set every role. `--paint-*`, `--mutate-*` and `--judge-*` override one:
 

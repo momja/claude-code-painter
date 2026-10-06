@@ -1,6 +1,6 @@
 """
-The Pi harness: each job runs Pi's agent loop in a Node sidecar (`pi-agent/agent.mjs`), on any model OpenCode Go
-or OpenRouter serves.
+The Pi harness: each job runs Pi's agent loop in a Node sidecar (`pi-agent/agent.mjs`), on OpenCode Go,
+OpenRouter, or OpenAI Codex through a saved ChatGPT subscription login.
 
 The sidecar is a drop-in for `claude -p`. It launches the job's MCP server itself and hands its tools to the
 model, and it prints Claude Code's stream-json events, so the rest of conveyor records and shows a Pi session
@@ -44,22 +44,34 @@ class Provider:
     key: str
     label: str
     base_url: str
-    env_var: str
+    env_var: str | None
     default_model: str
     session_header: str | None = None  # OpenCode Go rejects requests without one (400 MissingSessionID)
     max_images: int | None = None  # images per request; GLM on OpenCode Go answers 400 too_many_images above 8
+    oauth: bool = False
+    login_command: str | None = None
 
 
 PROVIDERS = {p.key: p for p in (
     Provider("opencode-go", "OpenCode Go", "https://opencode.ai/zen/go/v1", "OPENCODE_API_KEY", "glm-5.3-flash",
              session_header="x-opencode-session", max_images=8),
     Provider("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", "z-ai/glm-5.3-flash"),
+    Provider("openai-codex", "OpenAI Codex", "https://chatgpt.com/backend-api", None, "gpt-5.4",
+             oauth=True, login_command="conveyor auth login openai"),
 )}
 DEFAULT_PROVIDER = "opencode-go"
+AUTH_FILE_ENV = "CONVEYOR_PI_AUTH_FILE"
+
+
+def credential_file() -> Path:
+    """The persistent OAuth credential file shared by the login command and Pi sidecars."""
+    return Path(os.environ.get(AUTH_FILE_ENV) or Path.home() / ".config" / "conveyor" / "pi-auth.json")
 
 
 def load_api_key(provider: Provider, env_file: str | Path | None = None) -> str | None:
     """The provider's key from the environment, else from `env_file` or the nearest `.env` up from the cwd."""
+    if not provider.env_var:
+        return None
     key = os.environ.get(provider.env_var, "").strip()
     if key:
         return key
@@ -77,11 +89,24 @@ def load_api_key(provider: Provider, env_file: str | Path | None = None) -> str 
     return None
 
 
+def provider_authenticated(provider: Provider) -> bool:
+    """Whether this provider has its required API key or saved OAuth credential."""
+    if provider.oauth:
+        try:
+            credential = json.loads(credential_file().read_text()).get(provider.key)
+            return isinstance(credential, dict) and credential.get("type") == "oauth"
+        except (OSError, json.JSONDecodeError):
+            return False
+    return bool(load_api_key(provider))
+
+
 # Which Pi API a model speaks when Pi's own table doesn't list it, from the SDK package models.dev names for it.
 API_BY_PACKAGE = {"@ai-sdk/openai": "openai-responses", "@ai-sdk/anthropic": "anthropic-messages"}
 
 
 def model_api(provider: Provider, model_id: str) -> str:
+    if provider.key == "openai-codex":
+        return "openai-codex-responses"
     entry = ((_catalog().get(provider.key) or {}).get("models") or {}).get(model_id) or {}
     return API_BY_PACKAGE.get((entry.get("provider") or {}).get("npm"), "openai-completions")
 
@@ -121,7 +146,7 @@ def thinking_level(effort: str | None, allowed: list[str] | None) -> str:
 def available(node: str | None = None) -> str | None:
     """Why the Pi harness can't run here, or None when it can."""
     if not (node or shutil.which("node")):
-        return "node is not on PATH; install Node 20 or later"
+        return "node is not on PATH; install Node 22.19 or later"
     if not (PI_DIR / "node_modules" / "@earendil-works" / "pi-agent-core").is_dir():
         return f"Pi isn't installed; run `npm install` in {PI_DIR}"
     return None
@@ -148,6 +173,10 @@ class PiAgent(ProcessHarness):
         self.faux = faux  # scripted replies for tests: the real agent loop and MCP plumbing, no network
         self.definition = model_def(self.provider, model) if faux is None else {"id": model, "input": ["text", "image"]}
 
+    @property
+    def authenticated(self) -> bool:
+        return bool(self.api_key) or provider_authenticated(self.provider)
+
     def describe(self) -> str:
         known = "" if self.faux is not None or self.definition.get("known") else " (not in the catalog: cost reads $0)"
         return f"pi: {self.model} on {self.provider.label}, thinking {self.level}{known}"
@@ -172,7 +201,8 @@ class PiAgent(ProcessHarness):
             "maxBudgetUsd": job.max_budget_usd, "compactEveryLooks": self.compact_every_looks, "faux": self.faux,
         }
         env = child_env()
-        if self.api_key:
+        env[AUTH_FILE_ENV] = str(credential_file())
+        if self.api_key and self.provider.env_var:
             env[self.provider.env_var] = self.api_key
         argv = [self.node, f"--max-old-space-size={self.heap_mb}", str(PI_SCRIPT)]
         return argv, (json.dumps(config) + "\n").encode(), env

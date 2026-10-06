@@ -173,11 +173,11 @@ class Launcher:
         from conveyor.claude import logged_in
         from conveyor.pi import PROVIDERS
         from conveyor.pi import available as pi_available
-        from conveyor.pi import load_api_key
+        from conveyor.pi import provider_authenticated
 
         version = claude_available("claude")
         problem = pi_available()
-        keys = {k: bool(load_api_key(p)) for k, p in PROVIDERS.items()}
+        keys = {k: provider_authenticated(p) for k, p in PROVIDERS.items()}
         if version is None:
             claude = {"ok": False, "detail": "`claude --version` fails; install Claude Code"}
         elif logged_in("claude") is False:
@@ -186,7 +186,8 @@ class Launcher:
             claude = {"ok": True, "detail": version}
         out = {"claude": claude,
                "pi": {"ok": problem is None, "detail": problem or "ready", "keys": keys,
-                      "env_vars": {k: p.env_var for k, p in PROVIDERS.items()}}}
+                      "env_vars": {k: p.env_var for k, p in PROVIDERS.items() if p.env_var},
+                      "login_commands": {k: p.login_command for k, p in PROVIDERS.items() if p.login_command}}}
         self._probe = (time.time(), out)
         return out
 

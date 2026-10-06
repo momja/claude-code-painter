@@ -27,6 +27,8 @@ import {
 } from "@earendil-works/pi-ai";
 import { opencodeGoProvider } from "@earendil-works/pi-ai/providers/opencode-go";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
+import { JsonCredentialStore } from "./credentials.mjs";
 
 const LENGTH_NUDGE =
 	"Your last reply ran out of room while thinking and made no tool calls. Don't analyze further. Reply now with tool calls.";
@@ -278,7 +280,7 @@ function makeCompactor({ models, model, everyLooks, headers, reserveTokens, onSu
 async function main() {
 	const cfg = await readConfig();
 	const started = Date.now();
-	const models = createModels();
+	const models = createModels({ credentials: new JsonCredentialStore() });
 	let model;
 	if (cfg.faux) {
 		const faux = fauxProvider({ provider: "faux", models: [{ id: cfg.model.id || "faux-model", reasoning: true }] });
@@ -286,8 +288,13 @@ async function main() {
 		model = faux.getModel(cfg.model.id || "faux-model");
 		faux.setResponses(cfg.faux.map(fauxMessage));
 	} else {
-		models.setProvider(cfg.provider === "openrouter" ? openrouterProvider() : opencodeGoProvider());
-		// Pi ships its own table for both providers; the catalog's definition covers a model this pi-ai predates.
+		const provider = cfg.provider === "openrouter"
+			? openrouterProvider()
+			: cfg.provider === "openai-codex"
+				? openaiCodexProvider()
+				: opencodeGoProvider();
+		models.setProvider(provider);
+		// Pi ships its own table for these providers; the catalog covers models this pi-ai predates.
 		model = models.getModel(cfg.provider, cfg.model.id) ?? unknownModel(models, cfg);
 	}
 

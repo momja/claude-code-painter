@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -62,7 +63,9 @@ def _harness(kind: str, model: str | None, effort: str | None, args, store, mete
         harness = PiAgent(model, provider=args.provider, effort=effort or "high", store=store, meter=meter,
                           lanes=args.lanes, compact_every_looks=getattr(args, "compact_every_looks", None),
                           stall_timeout=_stall_timeout(args))
-        if not harness.api_key:
+        if not harness.authenticated:
+            if harness.provider.login_command:
+                sys.exit(f"{harness.provider.label} is not signed in. Run `{harness.provider.login_command}`.")
             sys.exit(f"No {harness.provider.label} key. Set {harness.provider.env_var}, or put "
                      f"{harness.provider.env_var}=... in a .env file here or in a parent directory.")
     cache[key] = harness
@@ -328,6 +331,35 @@ def cmd_probe(args) -> None:
         print(f"Demo sheet written to {args.sheet}")
 
 
+def cmd_auth(args) -> None:
+    from conveyor.pi import AUTH_FILE_ENV
+    from conveyor.pi import PI_DIR
+    from conveyor.pi import PROVIDERS
+    from conveyor.pi import credential_file
+    from conveyor.pi import provider_authenticated
+
+    provider = PROVIDERS["openai-codex"]
+    if args.auth_action == "status":
+        if provider_authenticated(provider):
+            print("OpenAI Codex: signed in")
+            return
+        print(f"OpenAI Codex: not signed in. Run `{provider.login_command}`.")
+        raise SystemExit(1)
+
+    if args.auth_action == "logout":
+        action = "logout"
+    else:
+        action = "login"
+    script = PI_DIR / "auth.mjs"
+    if not script.is_file():
+        sys.exit(f"Pi auth helper is missing: {script}")
+    env = dict(os.environ)
+    env[AUTH_FILE_ENV] = str(credential_file())
+    result = subprocess.run(["node", str(script), action], env=env, check=False)
+    if result.returncode:
+        raise SystemExit(result.returncode)
+
+
 def cmd_serve(args) -> None:
     from conveyor.launch import Launcher
     from conveyor.server import make_server
@@ -371,20 +403,28 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
     mutate = sub.add_parser("mutate", help="Mutations only, no paintings: which niches does an operator reach?")
     probe = sub.add_parser("probe", help="Check an instrument and draw its demo sheet")
     serve = sub.add_parser("serve", help="Serve the dashboard for an existing database")
+    auth = sub.add_parser("auth", help="Manage model-provider sign-in")
+    auth_sub = auth.add_subparsers(dest="auth_action", required=True)
+    auth_login = auth_sub.add_parser("login", help="Sign in with a provider subscription")
+    auth_login.add_argument("provider", choices=["openai"], help="Provider to sign in to")
+    auth_logout = auth_sub.add_parser("logout", help="Remove saved provider credentials")
+    auth_logout.add_argument("provider", choices=["openai"], help="Provider to sign out of")
+    auth_sub.add_parser("status", help="Show OpenAI sign-in status")
 
     efforts = ["low", "medium", "high", "xhigh", "max"]
     for p in (run, paint, mutate):
         p.add_argument("--harness", default="claude", choices=["claude", "pi"],
-                       help="What runs the models: Claude Code (claude -p) or Pi (a Node sidecar, any model on "
-                            "OpenCode Go or OpenRouter). Sets every role; the --paint-/--mutate-/--judge- flags "
-                            "override one.")
+                       help="What runs the models: Claude Code (claude -p) or Pi (a Node sidecar). Sets every role; "
+                            "the --paint-/--mutate-/--judge- flags override one.")
         p.add_argument("--model", default=None,
                        help=f"Model for every role. Default: {DEFAULT_MODEL} on claude, the provider's default on pi "
                             "(glm-5.3-flash on OpenCode Go)")
         p.add_argument("--effort", default=DEFAULT_EFFORT, choices=efforts,
                        help="Thinking effort. Pi moves it to the nearest level the model publishes.")
-        p.add_argument("--provider", default="opencode-go", choices=["opencode-go", "openrouter"],
-                       help="Where the Pi harness calls models. Keys: OPENCODE_API_KEY or OPENROUTER_API_KEY.")
+        from conveyor.pi import PROVIDERS
+        p.add_argument("--provider", default="opencode-go", choices=list(PROVIDERS),
+                       help="Where Pi calls models. OpenAI Codex uses `conveyor auth login openai`; the other "
+                            "providers use API keys.")
         for role in ("paint", "mutate", "judge"):
             p.add_argument(f"--{role}-harness", default=None, choices=["claude", "pi"])
             p.add_argument(f"--{role}-model", default=None)
@@ -452,7 +492,9 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
                        "read from CONVEYOR_LAUNCH_TOKEN. Setting one turns launching on for a non-loopback --host.")
     for p, fn in ((run, cmd_run), (paint, cmd_paint), (mutate, cmd_mutate), (probe, cmd_probe), (serve, cmd_serve)):
         p.set_defaults(func=fn)
-    parser.commands = {"run": run, "paint": paint, "mutate": mutate, "probe": probe, "serve": serve}
+    auth.set_defaults(func=cmd_auth)
+    parser.commands = {"run": run, "paint": paint, "mutate": mutate, "probe": probe, "serve": serve,
+                       "auth": auth}
     return parser
 
 

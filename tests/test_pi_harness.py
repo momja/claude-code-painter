@@ -139,6 +139,33 @@ def test_thinking_levels_move_to_what_the_model_publishes():
     assert thinking_level("none", ["low"]) == "off"
 
 
+def test_openai_codex_provider_uses_the_chatgpt_subscription_api(monkeypatch, tmp_path):
+    from conveyor.pi import AUTH_FILE_ENV
+    from conveyor.pi import PROVIDERS
+    from conveyor.pi import model_api
+    from conveyor.pi import provider_authenticated
+
+    provider = PROVIDERS["openai-codex"]
+    assert provider.default_model == "gpt-5.4"
+    assert provider.oauth and provider.env_var is None
+    assert model_api(provider, provider.default_model) == "openai-codex-responses"
+    monkeypatch.setenv(AUTH_FILE_ENV, str(tmp_path / "pi-auth.json"))
+    assert not provider_authenticated(provider)
+    (tmp_path / "pi-auth.json").write_text(json.dumps({
+        "openai-codex": {"type": "oauth", "access": "test", "refresh": "test", "expires": 1},
+    }))
+    assert provider_authenticated(provider)
+
+
+def test_openai_auth_cli_and_provider_option_parse():
+    from conveyor.__main__ import build_parser
+
+    parser = build_parser()
+    assert parser.parse_args(["run", "--provider", "openai-codex", "--offline"]).provider == "openai-codex"
+    auth = parser.parse_args(["auth", "login", "openai"])
+    assert auth.auth_action == "login" and auth.provider == "openai"
+
+
 @needs_pi
 def test_roles_mix_harnesses(env, fake_claude, monkeypatch, capsys):
     from conveyor.__main__ import _roles

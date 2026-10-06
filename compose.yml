@@ -6,8 +6,9 @@
 #
 # The API key and the token come from .env, which the ansible playbook templates.
 #
-# Claude Code keeps its login in CLAUDE_CONFIG_DIR, on the volume, so it survives redeploys. Log in once:
+# Claude Code and Pi keep their logins on the volume, so they survive redeploys. Log in once:
 #   docker exec -it conveyor-conveyor-1 claude auth login
+#   docker exec -it conveyor-conveyor-1 conveyor auth login openai
 
 services:
   conveyor:
@@ -18,6 +19,7 @@ services:
     environment:
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:?put it in .env}
       CLAUDE_CONFIG_DIR: /data/claude
+      CONVEYOR_PI_AUTH_FILE: /data/pi-auth.json
       CONVEYOR_LAUNCH_TOKEN: ${CONVEYOR_LAUNCH_TOKEN:?put it in .env}
     volumes:
       - conveyor-runs:/data

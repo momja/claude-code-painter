@@ -5,7 +5,7 @@ Every model interaction (a painting, a mutation, a verdict) is one `Job` handed 
 agent process to the end and returns an `Outcome`. Two harnesses exist:
 
   claude  Claude Code headless (`claude -p`), see claude.py
-  pi      Pi's agent loop in a Node sidecar, any model on OpenCode Go or OpenRouter, see pi.py
+  pi      Pi's agent loop in a Node sidecar, on OpenCode Go, OpenRouter, or OpenAI Codex, see pi.py
 
 Both speak the same protocol to conveyor. A job's tools come from one stdio MCP server of ours (the paint
 server, the workbench), which the harness's process launches and talks to itself. The process prints Claude

@@ -1049,7 +1049,11 @@ function nrProblems(v) {
     if (!H[h].ok) out.push(`${h === "claude" ? "Claude Code" : "Pi"}: ${H[h].detail}.`);
     else if (h === "pi") {
       const prov = v.provider || O.defaults.provider;
-      if (!H.pi.keys[prov]) out.push(`No key for ${prov}. Set ${H.pi.env_vars[prov]} in the environment of \`conveyor serve\`, or in a .env file.`);
+      if (!H.pi.keys[prov]) {
+        const login = H.pi.login_commands?.[prov];
+        out.push(login ? `${prov} is not signed in. Run \`${login}\` in the container.`
+          : `No key for ${prov}. Set ${H.pi.env_vars[prov]} in the environment of \`conveyor serve\`, or in a .env file.`);
+      }
     }
   }
   return out;
@@ -1069,7 +1073,11 @@ function nrRefresh() {
   const H = O.harnesses;
   $("#nr-harness-status").innerHTML = `<span class="${H.claude.ok ? "good" : "bad"}">Claude Code: ${esc(H.claude.detail)}</span>`
     + `<span class="${H.pi.ok ? "good" : "warn"}">Pi: ${esc(H.pi.ok ? "ready" : H.pi.detail)}</span>`
-    + (H.pi.ok ? Object.entries(H.pi.keys).map(([k, ok]) => `<span class="${ok ? "good" : "faint"}">${esc(k)} key ${ok ? "found" : "not set"}</span>`).join("") : "");
+    + (H.pi.ok ? Object.entries(H.pi.keys).map(([k, ok]) => {
+        const state = ok ? (H.pi.login_commands?.[k] ? "signed in" : "key found")
+          : (H.pi.login_commands?.[k] ? "not signed in" : "key not set");
+        return `<span class="${ok ? "good" : "faint"}">${esc(k)} ${state}</span>`;
+      }).join("") : "");
   const problems = nrProblems(v);
   $("#nr-msg").className = ""; $("#nr-msg").textContent = problems.join(" ");
   $("#nr-go").disabled = problems.length > 0;
