@@ -30,12 +30,10 @@ from conveyor.mcp import ToolFailure
 from conveyor.mcp import image
 from conveyor.mcp import text
 from conveyor.painting.canvas import Canvas
-from conveyor.painting.canvas import error_table
 from conveyor.painting.canvas import gridded_png
 from conveyor.painting.canvas import load_target
 from conveyor.painting.canvas import to_hex
 from conveyor.painting.canvas import to_png
-from conveyor.painting.canvas import view_patch
 from conveyor.painting.canvas import view_png
 from conveyor.painting.critic import Critic
 from conveyor.painting.instrument import Instrument
@@ -112,9 +110,9 @@ class PaintSession:
         return json.dumps(self._pen_state())[:600]
 
     def working_state(self) -> dict:
-        """Current server state, not a model's recollection of earlier calls."""
+        """Painter-visible state. Quality metrics stay in diagnostics, not the working feedback."""
         return {"actions_used": self.applied, "actions_left": self.actions_left, "looks_left": self.looks_left,
-                "score": round(self.score, 4), "pixel_error": round(self.error, 1), "pen": self._pen_state(),
+                "pen": self._pen_state(),
                 "scope": list(self.scope_rect) if self.scope_rect else None, "plan": self.plan,
                 "finished": self.finished}
 
@@ -205,9 +203,8 @@ class PaintSession:
             raise ToolFailure(f"{e}. Nothing was painted and no action was used.")
         self.actions_left -= 1
         self.applied += 1
-        # The painter steers by what each call returns, so it gets the critic's score, the number the painting is
-        # judged by, and not only pixel error. With pixel error alone, a painter watched its swirl texture push the
-        # error up and stopped with 28 actions left, on the painting that turned out to score best of its run.
+        # Keep metrics for diagnostics and final evaluation, but don't make each stroke a numeric reward.
+        # Pixel-based feedback can discourage finishing shapes and brushwork that improve perceived likeness.
         old, self.error = self.error, self.total_error()
         old_score, self.scores = self.score, self.critic.score(self.canvas.img, self.target)
         snap = None
@@ -222,7 +219,7 @@ class PaintSession:
                      dry=self.canvas.dry, actions_left=self.actions_left, pen=self._pen_text(), snapshot=snap,
                      scope=list(self.scope_rect) if self.scope_rect else None,
                      ms=round((time.perf_counter() - started) * 1000, 1))
-        parts = [f"score {self.score:.4f} ({self.score - old_score:+.4f}), pixel error {self.error:.1f} ({self.error - old:+.1f})"]
+        parts = []
         if note:
             parts.append(note[:1].upper() + note[1:])
         if self.canvas.dry and "dry" not in note:
@@ -235,20 +232,15 @@ class PaintSession:
         return ". ".join(p.rstrip(". ") for p in parts) + "."
 
     def status(self) -> str:
-        sc = self.scores
-        style = ", ".join(f"{k} {v:.2f}" for k, v in sc["style_distance"].items())
         scope = "" if self.scope_rect is None else f" Scope is x {self.scope_rect[0]}-{self.scope_rect[2]}, y {self.scope_rect[1]}-{self.scope_rect[3]}."
-        return (f"{self.applied} actions used, {self.actions_left} left, {self.looks_text()}.{scope}\n"
-                f"Score {sc['total']:.4f}: pixel match {sc['pixel']:.3f} (60%), texture and palette match "
-                f"{sc['style']:.3f} (40%; distances from the target, 0 is a match: {style}). "
-                f"Pixel error {self.error:.1f}.\n" + error_table(self.canvas.img, self.target))
+        return f"{self.applied} actions used, {self.actions_left} left, {self.looks_text()}.{scope}"
 
     def looks_text(self) -> str:
         return "unlimited looks" if self.looks_left < 0 else f"{self.looks_left} looks left"
 
     def look(self, tool_use_id: str | None = None) -> tuple[str, bytes]:
         if self.looks_left == 0:
-            raise ToolFailure("No looks left. Keep painting from the score each call returns.")
+            raise ToolFailure("No looks left. Use the instrument's free views if available, or continue from your last view and plan.")
         if self.looks_left > 0:
             self.looks_left -= 1
         self._record(tool="look", tool_use_id=tool_use_id, status="applied", looks_left=self.looks_left,
@@ -258,7 +250,7 @@ class PaintSession:
     def view(self, tool: str, args: dict, tool_use_id: str | None = None) -> tuple[str, list[bytes]]:
         """
         One of the instrument's viewing calls. Free: no action, no look, and the painting cannot change under
-        one. The text says where the window was and how it fares against the target; the pictures are the views.
+        one. The text says where the window was; the pictures are the views.
         """
         started = time.perf_counter()
         try:
@@ -279,9 +271,8 @@ class PaintSession:
         if note:
             parts.append(note)
         for v in views:
-            parts.append(f"Window x {v.x0}-{v.x1}, y {v.y0}-{v.y1}, at {v.scale} image px per canvas px.\n"
-                         + error_table(self.canvas.img, self.target, rect=v.rect, patch=view_patch(v.span)))
-        parts.append(f"Free view: no action and no look used. Score {self.score:.4f}, pixel error {self.error:.1f}. "
+            parts.append(f"Window x {v.x0}-{v.x1}, y {v.y0}-{v.y1}, at {v.scale} image px per canvas px.")
+        parts.append("Free view: no action and no look used. "
                      f"{self.actions_left} actions left, {self.looks_text()}.")
         return "\n\n".join(parts), [view_png(v) for v in views]
 
@@ -299,8 +290,7 @@ class PaintSession:
             self._record(tool="scope", tool_use_id=tool_use_id, args=args, status="scope", scope=None,
                          error_after=round(self.error, 2), score_after=round(self.score, 4),
                          actions_left=self.actions_left, ms=ms())
-            return (f"Scope cleared: coordinates are canvas pixels again. Score {self.score:.4f}, pixel "
-                    f"error {self.error:.1f}. {self.actions_left} actions left.", [])
+            return (f"Scope cleared: coordinates are canvas pixels again. {self.actions_left} actions left.", [])
         try:
             x = float(args.get("x", self.canvas.width / 2))
             y = float(args.get("y", self.canvas.height / 2))
@@ -318,9 +308,8 @@ class PaintSession:
                      actions_left=self.actions_left, ms=ms())
         png = gridded_png(v.img, scale=v.scale, x0=x0, y0=y0, lx0=x0, ly0=y0)
         return (f"Scope is x {x0}-{x1}, y {y0}-{y1}: until cleared, paint calls take local coordinates 0-{side}, "
-                f"where local (0, 0) is canvas ({x0}, {y0}). Deltas, sizes and angles are unchanged.\n"
-                + error_table(self.canvas.img, self.target, rect=v.rect, patch=view_patch(side))
-                + f"\n\nFree: no action and no look used. Score {self.score:.4f}, pixel error {self.error:.1f}. "
+                f"where local (0, 0) is canvas ({x0}, {y0}). Deltas, sizes and angles are unchanged.\n\n"
+                "Free: no action and no look used. "
                 f"{self.actions_left} actions left, {self.looks_text()}.", [png])
 
     def finish(self, note: str, tool_use_id: str | None = None) -> str:
@@ -378,8 +367,8 @@ class PaintServer(StdioServer):
                 }, "required": ["calls"], "additionalProperties": False},
             })
         return tools + [
-            {"name": "look", "description": "See the whole canvas as it is now, with the score's parts and the "
-             "pixel error for each region. Usually limited: the status line says how many looks are left.",
+            {"name": "look", "description": "See the whole canvas as it is now, gridded in canvas pixels. "
+             "Usually limited: the status line says how many looks are left.",
              "inputSchema": {"type": "object", "properties": {}}},
             {"name": "finish", "description": "End the painting. Say what the target needed that these tools "
              "could not do, and which tool behaviour was hard to control. The instrument's designer reads it.",

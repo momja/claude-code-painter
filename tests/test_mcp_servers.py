@@ -45,7 +45,7 @@ def test_paint_server(tmp_path):
     assert not r["isError"] and "2 actions left" in r["content"][0]["text"]
     r = c.call("move", {"dx": 20, "dy": 0}, "b")
     text = r["content"][0]["text"]
-    assert text.startswith("score 0.") and "pixel error" in text and "load" in text
+    assert "score" not in text.lower() and "pixel error" not in text and "load" in text
     # The instrument's viewing tools are free: the window comes back gridded, and no action or look is spent.
     v = c.call("detail", {"x": 32, "y": 32, "span": 16}, "v")
     assert not v["isError"] and [b["type"] for b in v["content"]] == ["text", "image"]
@@ -56,7 +56,7 @@ def test_paint_server(tmp_path):
     assert bad["isError"] and "No action was used" in bad["content"][0]["text"]
     look = c.call("look", {})
     assert [b["type"] for b in look["content"]] == ["text", "image"]
-    assert "texture and palette match" in look["content"][0]["text"]
+    assert "2 actions used, 1 left, 0 looks left" in look["content"][0]["text"]
     assert "No looks left" in c.call("look", {})["content"][0]["text"]
     r = c.call("stop", {}, "c")
     assert "last action" in r["content"][0]["text"]

@@ -18,21 +18,24 @@ One call can cover at most {area_cap} pixels, about {share:.0%} of the canvas; a
 early and its result says so.
 
 Every call to an instrument tool costs one action, and you have {actions}. A call refused for bad arguments \
-costs nothing. Each result gives the score, the number your painting is judged by (0 to 1, higher is better), \
-and how the call changed it, then the pixel error, and how many actions are left. The score is 60% pixel match, \
-compared at full, half and quarter resolution, and 40% how closely the painting's texture and palette match the \
-target's: the direction of its brushwork, how many edges it has, how much fine detail, and its spread of colour. \
-Texture that runs the right way can raise the score even when it raises pixel error. `look` shows you the whole \
-canvas, the score's parts, and the pixel error per region; you have {looks} looks. `finish` ends the painting.
+costs nothing. Each result reports what the tool did and how many actions are left. Numeric quality metrics \
+are kept for diagnostics and final evaluation, not shown while you work. Compare the canvas visually with \
+the target: composition, recognisable shapes, colour relationships, edges and brushwork all matter. \
+`look` shows you the whole canvas; you have {looks} looks. `finish` ends the painting.
 
 The instrument may also define viewing tools of its own, listed under "Viewing tools" below. A viewing tool \
-shows you a window on the canvas at whatever zoom its designer chose, gridded and labelled in canvas pixels, \
-with the pixel error inside that window; some return several pictures at once. Views are free: no action, no \
-look, and nothing about the painting changes under one. Ask for a view before placing a small or detailed mark \
-— at this canvas size you cannot judge fine work from the whole-canvas picture alone.
+shows you a window on the canvas at whatever zoom its designer chose, gridded and labelled in canvas pixels. \
+Some return several pictures at once. Views are free: no action, no look, and nothing about the painting \
+changes under one. Ask for a view before placing a small or detailed mark. At this canvas size you cannot \
+judge fine work from the whole-canvas picture alone.
 
 Tool calls in one reply run in order, one after another. Group 10 to 40 paint actions per reply rather than \
 waiting for feedback after every mark.
+
+Before finishing, review the canvas against the target. Complete the major regions and defining shapes, \
+then use remaining actions for visible omissions and brushwork. Don't leave important regions unfinished \
+just because the next marks are uncertain. You may finish before the budget runs out if no useful visual \
+improvements remain; you don't need to spend actions on arbitrary marks.
 
 When you're done, or out of actions, call `finish` with a note for the instrument's designer: what the target \
 needed that these tools could not do, and which tool behaviour was hard to control. Be concrete: name the \
@@ -46,8 +49,9 @@ Prefer `paint_batch` to individual paint calls. Put 10 to 40 calls in a batch, w
 `defaults`. Set `tool` once and make `calls` a list of argument objects, or omit `tool` and use \
 [tool_name, arguments] pairs for mixed tools. For example, a pen sequence can batch start, moves and stop. \
 Only instrument paint tools belong in a batch; call views, scope and finish separately. Calls run in order, \
-each costs one action, and each gets its own area limit. The batch returns the final score and state, not \
-per-stroke feedback. It stops on a failed call; earlier successful calls stay painted and later calls are skipped.
+each costs one action, and each gets its own area limit. The batch returns the current pen state, plan and \
+remaining budget, not quality scores or per-stroke feedback. It stops on a failed call; earlier successful \
+calls stay painted and later calls are skipped.
 
 Update the optional `plan` in each batch, at most 1200 characters: regions done, regions still needed, \
 useful colours/settings, and mistakes to avoid. Old drawing history may be dropped, so keep everything you \
@@ -56,8 +60,8 @@ authoritative. Omit arguments that have defaults, and use rounded coordinates un
 
 JUDGE_RULE = """\
 When you finish, an expert judge looks at your painting beside the target and scores likeness, colour and \
-brushwork. The score after each call is a quick numeric measure that roughly tracks the judge; the judge's \
-verdict on the finished painting is what counts."""
+brushwork. Aim for a complete, convincing visual copy rather than a pixel-by-pixel match. The judge assesses \
+the finished image, not whether each individual stroke improved a numeric metric."""
 
 SCOPE_RULE = """\
 You can paint in a window. Call `scope` with a centre (x, y) in canvas pixels and a `span`, and it shows
@@ -66,8 +70,7 @@ window is `span` local pixels across. Until you clear it (`scope` with `clear` t
 takes local coordinates: positions bounded against the canvas (x, y and point lists) move into the window,
 while deltas, sizes, angles and colours are unchanged. Each result and every look names the active scope so
 you always know which coordinates you are using. Scoping is free, like a view: no action, no look. Use it
-before fine work, the way you would a view — the window's error table says where inside it the painting
-differs most from the target."""
+before fine work, the way you would a view. Compare the window visually with the same region of the target."""
 
 PAINTER_FIRST_MESSAGE = ("The target", "What each of the instrument's example call sequences draws, each on its own blank "
                          "canvas", "Your canvas is blank paper. Start painting.")
