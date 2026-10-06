@@ -1,41 +1,24 @@
-# One service that does the run and then keeps serving its own dashboard.
+# One service: the dashboard. Runs are started from its New run button, never by the container.
 #
-# `conveyor run` evolves and serves the dashboard live, and stays up after the last cycle so the champions and
-# transcripts remain browsable. If it crashes, the container falls back to `conveyor serve` on the same database.
+# `conveyor serve` listens on 0.0.0.0 behind Traefik, so starting a run asks for CONVEYOR_LAUNCH_TOKEN. The
+# runs are child processes of this one and write to the database on the volume. Stopping the container stops
+# them, so a run in flight gets stop_grace_period to finish its sessions.
 #
-# Run parameters come from .env, which the ansible playbook templates from group_vars/all.yml.
+# The API key and the token come from .env, which the ansible playbook templates.
 
 services:
   conveyor:
     build: .
     image: conveyor:local
     restart: unless-stopped
-    command:
-      - sh
-      - -c
-      - >-
-        conveyor run
-        --harness pi
-        --provider ${PROVIDER:-opencode-go}
-        --model ${PAINT_MODEL:-glm-5.3-flash}
-        --cycles ${CYCLES:-20}
-        --width ${WIDTH:-128}
-        --actions ${ACTIONS:-200}
-        --lanes ${LANES:-8}
-        --budget ${BUDGET:-5.0}
-        --db /data/${DB_NAME:-conveyor.db}
-        --host 0.0.0.0
-        --port 8765;
-        status=$$?;
-        echo "run exited with status $$status; serving the dashboard for review";
-        exec conveyor serve --db /data/${DB_NAME:-conveyor.db} --host 0.0.0.0 --port 8765
+    command: ["conveyor", "serve", "--db", "/data/${DB_NAME:-conveyor.db}", "--host", "0.0.0.0", "--port", "8765"]
     environment:
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:?put it in .env}
+      CONVEYOR_LAUNCH_TOKEN: ${CONVEYOR_LAUNCH_TOKEN:?put it in .env}
     volumes:
       - conveyor-runs:/data
     ports:
       - "8765:8765"
-    # A painting in flight should get the chance to finish its turn before the process dies.
     stop_grace_period: 60s
 
 volumes:

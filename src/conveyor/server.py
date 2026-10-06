@@ -19,6 +19,10 @@ With a launcher (`conveyor serve` on a loopback address) it can also start runs:
   GET  /api/launches/<id>            one launch: state, run id once it has one, the last lines of its output
   POST /api/launches                 start a run from {option: value}; answers 201 with the launch
   POST /api/launches/<id>/stop       stop it, as Ctrl+C would
+
+On a loopback address launching needs nothing more. Served to a network, it needs a token: the launcher is given
+one, and then these endpoints answer only to a request carrying it in X-Conveyor-Token. The dashboard's reads stay
+open. Without the token /api/options says `{"launch": true, "locked": true}` and the rest answer 401.
 """
 
 from __future__ import annotations
@@ -344,11 +348,15 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
         def _json(self, value: Any, status: int = 200) -> None:
             self._send(status, json.dumps(value, default=str).encode(), "application/json")
 
+        def _authorized(self) -> bool:
+            return launcher is not None and launcher.authorized(self.headers.get("X-Conveyor-Token"))
+
         def _guard_post(self) -> str | None:
             """Why this POST can't start or stop a run, or None. A page on another site can make a browser send a
             request to 127.0.0.1, so a POST must come from this server's own pages: a loopback Host (a rebound DNS
-            name fails here), no foreign Origin, and a JSON body (which a cross-site form can't send)."""
-            if _hostname(self.headers.get("Host", "")) not in LOCAL_HOSTS:
+            name fails here), no foreign Origin, and a JSON body (which a cross-site form can't send). With a token
+            the Host can be anything, since a page that doesn't know the token can't send it."""
+            if not launcher.token and _hostname(self.headers.get("Host", "")) not in LOCAL_HOSTS:
                 return "Host not allowed"
             origin = self.headers.get("Origin")
             if origin and urlparse(origin).netloc != self.headers.get("Host"):
@@ -364,6 +372,8 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                     return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 if (why := self._guard_post()) is not None:
                     return self._json({"error": why}, HTTPStatus.FORBIDDEN)
+                if not self._authorized():
+                    return self._json({"error": "launch token needed"}, HTTPStatus.UNAUTHORIZED)
                 length = int(self.headers.get("Content-Length") or 0)
                 if length > MAX_BODY:
                     return self._json({"error": "body too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
@@ -398,7 +408,12 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                     else:
                         self._send(200, data, "image/png" if parts[1].endswith("png") else "image/jpeg", cache=True)
                 elif parts == ["api", "options"]:
-                    self._json(launcher.options() if launcher else {"launch": False})
+                    if launcher is None:
+                        self._json({"launch": False})
+                    else:
+                        self._json(launcher.options() if self._authorized() else {"launch": True, "locked": True})
+                elif parts[:2] == ["api", "launches"] and launcher is not None and not self._authorized():
+                    self._json({"error": "launch token needed"}, HTTPStatus.UNAUTHORIZED)
                 elif parts[:2] == ["api", "launches"] and launcher is not None and len(parts) == 2:
                     self._json(launcher.list())
                 elif parts[:2] == ["api", "launches"] and launcher is not None and len(parts) == 3:

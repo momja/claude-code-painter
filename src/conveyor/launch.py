@@ -13,6 +13,7 @@ starts. Every value is passed as `--flag=value`, so no value can be read as anot
 from __future__ import annotations
 
 import argparse
+import hmac
 import os
 import re
 import signal
@@ -116,14 +117,18 @@ class Launch:
 
 class Launcher:
     def __init__(self, db: Path, build_parser: Callable[..., argparse.ArgumentParser], python: str | None = None,
-                 targets: list[str] | None = None) -> None:
+                 targets: list[str] | None = None, token: str | None = None) -> None:
         self.db = Path(db).resolve()
+        self.token = token or None  # when set, every launch endpoint wants it in X-Conveyor-Token
         self.python = python or sys.executable
         self._parser = build_parser(_Parser)
         self._targets = targets
         self._launches: dict[str, Launch] = {}
         self._lock = threading.Lock()
         self._probe: tuple[float, dict] | None = None
+
+    def authorized(self, presented: str | None) -> bool:
+        return not self.token or hmac.compare_digest((presented or "").encode(), self.token.encode())
 
     # ---- what the form offers -----------------------------------------------------------------------------
 
@@ -150,11 +155,14 @@ class Launcher:
                 help_[key] = action.help
                 if action.choices:
                     choices[key] = list(action.choices)
+        harnesses = self.harnesses()
+        if not harnesses["claude"]["ok"] and harnesses["pi"]["ok"]:
+            defaults["harness"] = "pi"  # a host without Claude Code (a container) starts on the one it has
         return {
             "launch": True, "db": str(self.db), "defaults": defaults, "help": help_, "choices": choices,
             "seeds": list(SEEDS), "targets": self.targets(),
             "models": {"claude": CLAUDE_MODELS, "pi": {k: [p.default_model] for k, p in PROVIDERS.items()}},
-            "harnesses": self.harnesses(),
+            "harnesses": harnesses,
         }
 
     def harnesses(self) -> dict:

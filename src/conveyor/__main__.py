@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import threading
@@ -336,13 +337,17 @@ def cmd_serve(args) -> None:
     if not db.exists():  # an existing file is left alone: it may be an archive
         init_db(db)
     launcher = None
+    token = args.launch_token or os.environ.get("CONVEYOR_LAUNCH_TOKEN") or None
+    if token and len(token) < 16:
+        sys.exit("The launch token is too short to guard a model budget; use at least 16 characters.")
     if args.no_launch:
         pass
-    elif args.host in LOOPBACK:
-        launcher = Launcher(db, build_parser)
+    elif args.host in LOOPBACK or token:
+        launcher = Launcher(db, build_parser, token=token)
     else:
         print(f"Starting runs from the dashboard is off: it would let anyone who can reach {args.host} spend your "
-              "model budget. Serve on 127.0.0.1 to turn it on.")
+              "model budget. Serve on 127.0.0.1, or set CONVEYOR_LAUNCH_TOKEN (or --launch-token) so that starting "
+              "a run asks for it.")
     server = make_server(db, args.host, args.port, launcher)
     print(f"Dashboard at http://{args.host}:{server.server_port}"
           + ("  (start runs from the New run button)" if launcher else ""))
@@ -443,6 +448,8 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
     probe.add_argument("instrument", help="A seed name or an instrument .py")
     probe.add_argument("--sheet", default=None, help="Write the demo sheet PNG here")
     serve.add_argument("--no-launch", action="store_true", help="Don't offer to start runs from the dashboard")
+    serve.add_argument("--launch-token", default=None, help="Secret that starting or stopping a run asks for; also "
+                       "read from CONVEYOR_LAUNCH_TOKEN. Setting one turns launching on for a non-loopback --host.")
     for p, fn in ((run, cmd_run), (paint, cmd_paint), (mutate, cmd_mutate), (probe, cmd_probe), (serve, cmd_serve)):
         p.set_defaults(func=fn)
     parser.commands = {"run": run, "paint": paint, "mutate": mutate, "probe": probe, "serve": serve}

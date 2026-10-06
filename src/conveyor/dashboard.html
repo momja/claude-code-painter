@@ -174,7 +174,7 @@ dialog#nr::backdrop { background: rgba(20, 18, 14, .5); }
 .nr-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px 14px; align-items: start; }
 .f { display: grid; gap: 3px; font-size: 12.5px; color: var(--muted); align-content: start; }
 .f > span:first-child { color: var(--ink); }
-.f input[type=text], .f input[type=number], .f select { width: 100%; max-width: none; font: inherit; padding: 5px 8px; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; }
+.f input[type=text], .f input[type=number], .f input[type=password], .f select { width: 100%; max-width: none; font: inherit; padding: 5px 8px; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; }
 .f input:focus, .f select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .f .hint { color: var(--faint); font-size: 11.5px; line-height: 1.35; }
 .f.check { grid-template-columns: auto 1fr; column-gap: 8px; align-items: start; }
@@ -198,7 +198,7 @@ dialog#nr::backdrop { background: rgba(20, 18, 14, .5); }
 @media (max-width: 600px) { .nr-roles { grid-template-columns: 1fr; } .nr-roles .colhead { display: none; } }
 #new-run { margin-left: auto; }
 #nr-form-view { display: contents; }
-#nr-form-view[hidden] { display: none; }
+#nr-form-view[hidden], #nr-unlock[hidden] { display: none; }
 .nr-scroll { min-height: 0; }
 </style>
 </head>
@@ -219,6 +219,15 @@ dialog#nr::backdrop { background: rgba(20, 18, 14, .5); }
         <div id="nr-msg"></div>
         <details><summary>Equivalent command</summary><pre id="nr-cmd-text"></pre></details>
         <div class="nr-actions"><button type="button" id="nr-cancel">Cancel</button><button type="submit" id="nr-go" class="primary">Start run</button></div>
+      </div>
+    </div>
+    <div id="nr-unlock" hidden>
+      <div class="nr-head"><h2>Unlock starting runs</h2><button type="button" id="nr-unlock-close">Close</button></div>
+      <div class="nr-progress">
+        <div class="muted">This server asks for its launch token before it starts or stops a run. It's saved in this browser.</div>
+        <label class="f"><span>Launch token</span><input type="password" id="nr-token" autocomplete="off" spellcheck="false"></label>
+        <div id="nr-unlock-msg" class="bad"></div>
+        <div class="nr-actions"><button type="submit" id="nr-unlock-go" class="primary">Unlock</button></div>
       </div>
     </div>
     <div id="nr-progress" hidden>
@@ -243,7 +252,13 @@ const ago = (ts) => { if (!ts) return "–"; const s = Math.max(0, Date.now() / 
 const dur = (a, b) => { if (!a) return "–"; const s = (b || Date.now() / 1000) - a; return s < 90 ? `${s.toFixed(0)}s` : `${(s / 60).toFixed(1)}m`; };
 const short = (id) => id ? String(id).slice(0, 6) : "–";
 const NODE_COLORS = { instrument: "#2f4b8f", painter: "#b3401a" };
-async function get(url) { const r = await fetch(url); if (!r.ok) throw new Error(`${r.status} ${url}`); return r.json(); }
+// The launch token, when the server wants one: kept in this browser only, sent with every request.
+const token = {
+  get() { try { return localStorage.getItem("conveyor-launch-token") || ""; } catch { return ""; } },
+  set(v) { try { v ? localStorage.setItem("conveyor-launch-token", v) : localStorage.removeItem("conveyor-launch-token"); } catch { /* private mode */ } },
+};
+const authHeaders = () => (token.get() ? { "X-Conveyor-Token": token.get() } : {});
+async function get(url) { const r = await fetch(url, { headers: authHeaders() }); if (!r.ok) throw new Error(`${r.status} ${url}`); return r.json(); }
 
 let state = { run: null, overview: null, timer: null, drawer: null, drawerTimer: null, slots: {}, orgs: [],
   lineage: { node: "instrument", newest: true, filter: "", focus: null }, layout: null, targets: {} };
@@ -1052,7 +1067,7 @@ function nrRefresh() {
 }
 
 async function api(method, url, body) {
-  const r = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const r = await fetch(url, { method, headers: { "Content-Type": "application/json", ...authHeaders() }, body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || `${r.status} ${url}`);
   return data;
@@ -1062,8 +1077,10 @@ async function openNewRun() {
   const dlg = $("#nr");
   try { nr.opts = await get("/api/options"); } catch (e) { alert(`Couldn't load the options: ${e.message}`); return; }
   if (!nr.opts.launch) return;
+  nr.locked = !!nr.opts.locked;
+  if (nr.locked) { showView("unlock"); if (!dlg.open) dlg.showModal(); $("#nr-token").focus(); return; }
   if (!nr.built) { $("#nr-fields").innerHTML = nrForm(); nr.built = true; }  // built once, so a second run starts from the last one's values
-  if (!nr.watch) { $("#nr-form-view").hidden = false; $("#nr-progress").hidden = true; nrRefresh(); }  // else a launch is still starting: show its progress
+  if (!nr.watch) { showView("form"); nrRefresh(); } else showView("progress");  // a launch still starting shows its progress
   if (!dlg.open) dlg.showModal();
 }
 
@@ -1082,7 +1099,7 @@ async function startRun(e) {
 // After Start: follow the child's output until it has made its run, then open that run.
 function watchLaunch(id) {
   nr.watch = id;
-  $("#nr-form-view").hidden = true; $("#nr-progress").hidden = false;
+  showView("progress");
   const tick = async () => {
     let l;
     try { l = await get(`/api/launches/${id}`); } catch { nr.timer = setTimeout(tick, 1500); return; }
@@ -1099,7 +1116,7 @@ function watchLaunch(id) {
 function finishWatch() { clearTimeout(nr.timer); nr.watch = null; }
 
 async function pollLaunches() {
-  try {
+  if (!nr.locked) try {
     nr.launches = await get("/api/launches");
     if (state.overview) pills(state.overview);
   } catch { /* the server is busy or gone; try again */ }
@@ -1109,6 +1126,7 @@ async function pollLaunches() {
 async function initLaunch() {
   try { nr.opts = await get("/api/options"); } catch { return; }
   if (!nr.opts.launch) return;
+  nr.locked = !!nr.opts.locked;
   for (const b of document.querySelectorAll("[data-new-run]")) b.hidden = false;
   pollLaunches();
 }
@@ -1123,7 +1141,23 @@ document.addEventListener("click", (e) => {
 });
 async function pollLaunchesOnce() { nr.launches = await get("/api/launches"); if (state.overview) pills(state.overview); }
 $("#nr-form").addEventListener("input", nrRefresh);
-$("#nr-form").addEventListener("submit", startRun);
+function showView(name) {
+  $("#nr-form-view").hidden = name !== "form"; $("#nr-progress").hidden = name !== "progress"; $("#nr-unlock").hidden = name !== "unlock";
+}
+async function unlock(e) {
+  e.preventDefault();
+  const value = $("#nr-token").value.trim();
+  if (!value) return;
+  token.set(value);
+  const o = await get("/api/options").catch(() => ({ locked: true }));
+  if (o.locked) { token.set(""); $("#nr-unlock-msg").textContent = "That token wasn't accepted."; return; }
+  $("#nr-token").value = ""; $("#nr-unlock-msg").textContent = "";
+  nr.locked = false;
+  await openNewRun();
+}
+$("#nr-form").addEventListener("submit", (e) => ($("#nr-unlock").hidden ? startRun(e) : unlock(e)));
+$("#nr-unlock-close").onclick = () => $("#nr").close();
+$("#nr-token").addEventListener("keydown", (e) => { if (e.key === "Enter") unlock(e); });
 $("#nr-close").onclick = $("#nr-cancel").onclick = () => $("#nr").close();
 $("#nr-back").onclick = () => { finishWatch(); openNewRun(); };
 $("#nr-hide").onclick = () => $("#nr").close();

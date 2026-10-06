@@ -135,3 +135,48 @@ def test_a_run_that_cannot_start_reports_why(served, monkeypatch, tmp_path):
     done = wait_for(lambda: (d := call(base, "GET", f"/api/launches/{launch['id']}")[1])["state"] != "running" and d)
     assert done["state"] == "failed" and done["run_id"] is None
     assert "claude --version" in " ".join(done["log"])
+
+
+TOKEN = "a-long-enough-launch-token"
+
+
+@pytest.fixture
+def guarded(tmp_path):
+    launcher = Launcher(tmp_path / "t.db", build_parser, token=TOKEN)
+    init_db(launcher.db)
+    server = make_server(launcher.db, "127.0.0.1", 0, launcher)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_port}", launcher
+    launcher.shutdown(grace=5)
+    server.shutdown()
+
+
+def test_a_token_locks_every_launch_endpoint(guarded):
+    base, _ = guarded
+    assert call(base, "GET", "/api/options")[1] == {"launch": True, "locked": True}
+    assert call(base, "GET", "/api/options", headers={"X-Conveyor-Token": "wrong"})[1]["locked"] is True
+    assert call(base, "GET", "/api/launches")[0] == 401
+    assert call(base, "POST", "/api/launches", {"offline": True})[0] == 401
+    assert call(base, "POST", "/api/launches", {"offline": True}, {"X-Conveyor-Token": "wrong"})[0] == 401
+    assert call(base, "POST", "/api/launches/x/stop", {})[0] == 401
+    assert call(base, "GET", "/api/runs")[0] == 200  # the dashboard's reads stay open
+
+
+def test_with_the_token_any_host_may_launch(guarded):
+    base, _ = guarded
+    ok = {"X-Conveyor-Token": TOKEN}
+    assert call(base, "GET", "/api/options", headers=ok)[1]["launch"] is True
+    # Behind a proxy the Host is the public name; the token is what proves the caller.
+    h = {**ok, "Host": "conveyor.example.com"}
+    status, launch = call(base, "POST", "/api/launches", {"offline": True, "cycles": 1, "width": 64, "actions": 8}, h)
+    assert status == 201
+    wait_for(lambda: call(base, "GET", f"/api/launches/{launch['id']}", headers=ok)[1]["state"] == "finished")
+    # A foreign Origin is still refused, token or not.
+    assert call(base, "POST", "/api/launches", {}, {**h, "Origin": "http://evil.example"})[0] == 403
+
+
+def test_the_form_defaults_to_pi_when_claude_is_missing(launcher, monkeypatch):
+    monkeypatch.setattr(Launcher, "harnesses", lambda self: {
+        "claude": {"ok": False, "detail": "missing"},
+        "pi": {"ok": True, "detail": "ready", "keys": {}, "env_vars": {}}})
+    assert launcher.options()["defaults"]["harness"] == "pi"

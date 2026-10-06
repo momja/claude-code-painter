@@ -23,6 +23,8 @@ Each run is a child process, `conveyor run --no-serve`, writing to the served da
 
 Starting runs spends your money and your Claude usage, so it is only on when the server is bound to a loopback address (the default), and POSTs from other origins or hosts are refused. `--no-launch` turns it off.
 
+To serve it on a network (a container behind a proxy), set `CONVEYOR_LAUNCH_TOKEN` (16 characters or more) or pass `--launch-token`. The dashboard's reads stay open, but starting or stopping a run, and the form's options, ask for the token. The New run button prompts for it once and keeps it in that browser. With no `claude` on the host, the form defaults to the Pi harness. `Dockerfile` and `compose.yml` run exactly this: a container that only serves, with every run started from the UI.
+
 The Pi harness needs Node 20 or later and a one-time `(cd pi-agent && npm install)`.
 
 You need Claude Code installed and logged in, so `claude --version` has to work. conveyor uses whatever auth your `claude` uses. On a subscription the dollar figures are list price, not a bill, but they're the best single measure of how much of your plan's rate limit a run eats. Every session reports the five-hour and weekly usage windows. The dashboard shows them, and `--max-usage` (default 0.85) stops a run from starting new sessions once either window is that full, so a run never takes the last of a window you share with your own Claude use. On the plan these numbers come from, a five-hour window held roughly $13 to $15 of list-price Opus usage.
