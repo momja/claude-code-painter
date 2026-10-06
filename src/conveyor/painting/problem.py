@@ -83,6 +83,7 @@ class Setup:
     judge: bool = True  # a model judges each finished painting; off in offline mode
     judge_weight: float = 0.5  # share of the score the judge's verdict carries; the rest is the numeric critic
     scope_views: bool = False  # the painter may set a scope and paint in it with local coordinates
+    paint_batch: bool = True  # compact ordered calls with shared arguments and one result
     confirm: int = 3  # paintings a challenger and the champion each stand on before the champion changes
     parents: int = 2
     operator_weights: dict[str, float] = field(default_factory=lambda: {"refine": 0.4, "invent": 0.4, "recombine": 0.2})
@@ -230,7 +231,7 @@ class Painter:
         d = self._session_dir("paint")
         job = {"source": instrument.genome["source"], "target": s.target, "width": s.width, "actions": s.actions,
                "looks": s.n_looks, "patch": s.n_patch, "seed": random.randrange(1 << 30), "snapshot_every": 5,
-               "scope": bool(s.scope_views)}
+               "scope": bool(s.scope_views), "paint_batch": bool(s.paint_batch)}
         (d / "job.json").write_text(json.dumps(job))
         started = time.time()
         ingest = _Ingest(self.store, d)
@@ -253,6 +254,8 @@ class Painter:
             system = (prompt.genome["prompt"].strip() + "\n\n" + prompts.PAINTER_RULES.format(
                 w=w, h=h, actions=s.actions, looks="unlimited" if s.n_looks < 0 else s.n_looks, reference=inst.reference(w, h),
                 area_cap=Canvas(h, w).area_cap, share=CALL_AREA_SHARE))
+            if s.paint_batch:
+                system += "\n\n" + prompts.BATCH_RULE
             if self.judge is not None:
                 system += "\n\n" + prompts.JUDGE_RULE
             if s.scope_views:
@@ -264,6 +267,8 @@ class Painter:
                 content += [{"type": "text", "text": second + ":"}, {"type": "png", "data": sheet}]
             content.append({"type": "text", "text": third})
             tools = [t.name for t in inst.spec.tools] + [v.name for v in inst.spec.views] + ["look", "finish"]
+            if s.paint_batch:
+                tools.append("paint_batch")
             if s.scope_views:
                 tools.append("scope")
             outcome = self.claude.run(Job(

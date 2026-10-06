@@ -94,6 +94,25 @@ def test_a_painting_is_recorded_end_to_end(env):
     assert len(strokes) == 10 and json.loads(strokes[0]["data"])["tool_use_id"] == "toolu_fake_1"
 
 
+def test_claude_painter_batches_keep_underlying_stroke_logs(env, monkeypatch):
+    store, claude, setup, log, _ = env
+    monkeypatch.setenv("FAKE_CLAUDE_BATCH", json.dumps({
+        "defaults": {"color": "#223344"}, "calls": [
+            ["start", {"x": 10, "y": 10}], ["move", {"dx": 20, "dy": 0}], ["stop", {}],
+        ], "plan": "First pass done.",
+    }))
+    painter = Painter(setup, store, claude)
+    inst = make_instrument(PEN, "pen", setup, store, painter.target.height)
+    p = painter.paint(inst, Organism(node="painter", genome={"prompt": prompts.INITIAL_STRATEGY}))
+    assert p.viable and p.details["stats"]["actions_used"] == 3
+    assert p.details["stats"]["tool_use"] == {"start": 1, "move": 1, "stop": 1}
+    strokes = [json.loads(r["data"]) for r in rows(store, "SELECT data FROM strokes ORDER BY idx")]
+    assert [s.get("batch_call") for s in strokes[:3]] == [1, 2, 3]
+    assert len({s["tool_use_id"] for s in strokes[:3]}) == 1
+    first = json.loads(log.read_text().splitlines()[0])["argv"]
+    assert "mcp__canvas__paint_batch" in first[first.index("--allowedTools") + 1]
+
+
 def test_instrument_mutator_submits_through_the_workbench(env, monkeypatch):
     store, claude, setup, _, _ = env
     monkeypatch.setenv("FAKE_CLAUDE_SUBMIT", PEN)

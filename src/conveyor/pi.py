@@ -158,7 +158,8 @@ class PiAgent(ProcessHarness):
     def __init__(self, model: str | None = None, *, provider: str = DEFAULT_PROVIDER, effort: str | None = "high",
                  store: Store | None = None, meter: Meter | None = None, lanes: int = 2, api_key: str | None = None,
                  max_tokens: int = 16_384, max_turns: int = 400, heap_mb: int = 384,
-                 compact_every_looks: int | None = None, stall_timeout: float | None = DEFAULT_STALL_TIMEOUT, timeout: float = 45 * 60,
+                 compact_every_looks: int | None = None, paint_context_turns: int = 2,
+                 stall_timeout: float | None = DEFAULT_STALL_TIMEOUT, timeout: float = 45 * 60,
                  node: str | None = None, faux: list[dict] | None = None) -> None:
         self.provider = PROVIDERS[provider]
         model = model or self.provider.default_model
@@ -168,7 +169,10 @@ class PiAgent(ProcessHarness):
         self.api_key = api_key if api_key is not None else load_api_key(self.provider)
         self.max_tokens = max_tokens
         self.max_turns = max_turns
-        self.compact_every_looks = compact_every_looks  # summarize the history once this many looks pile up
+        self.compact_every_looks = compact_every_looks  # explicit legacy summarization replaces bounded context
+        if not 0 <= paint_context_turns <= 20:
+            raise ValueError("paint_context_turns must be between 0 and 20")
+        self.paint_context_turns = paint_context_turns
         self.heap_mb = heap_mb
         self.faux = faux  # scripted replies for tests: the real agent loop and MCP plumbing, no network
         self.definition = model_def(self.provider, model) if faux is None else {"id": model, "input": ["text", "image"]}
@@ -199,6 +203,7 @@ class PiAgent(ProcessHarness):
             "systemPrompt": job.system_prompt, "content": content, "mcp": job.mcp, "tools": job.tools,
             "stopTools": job.stop_tools, "jsonSchema": job.json_schema, "maxTurns": self.max_turns,
             "maxBudgetUsd": job.max_budget_usd, "compactEveryLooks": self.compact_every_looks, "faux": self.faux,
+            "paintContextTurns": self.paint_context_turns if job.purpose == "paint" and not self.compact_every_looks else 0,
         }
         env = child_env()
         env[AUTH_FILE_ENV] = str(credential_file())

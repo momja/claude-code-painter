@@ -83,6 +83,18 @@ def test_options_come_from_the_parser(launcher):
     assert o["launch"] and o["defaults"]["cycles"] == 6 and o["defaults"]["harness"] == "claude"
     assert "round" in o["seeds"] and "self_portrait" in o["targets"]
     assert o["choices"]["effort"][0] == "low" and "db" not in o["defaults"]
+    assert o["defaults"]["paint_batch"] is True and o["defaults"]["paint_context_turns"] == 2
+
+
+def test_painter_cost_controls_round_trip_through_launcher(launcher):
+    argv = launcher.argv({"paint_batch": False, "paint_context_turns": 0})
+    assert "--no-paint-batch" in argv and "--paint-context-turns=0" in argv
+    args = build_parser().parse_args(argv)
+    from conveyor.__main__ import _setup
+    assert _setup(args).paint_batch is False and args.paint_context_turns == 0
+    for value in (-1, 21):
+        with pytest.raises(LaunchError, match="between"):
+            launcher.argv({"paint_context_turns": value})
 
 
 def test_post_guards(served):

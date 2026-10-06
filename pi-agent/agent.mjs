@@ -29,6 +29,7 @@ import { opencodeGoProvider } from "@earendil-works/pi-ai/providers/opencode-go"
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { JsonCredentialStore } from "./credentials.mjs";
+import { boundedPainterContext, textChars } from "./painter-context.mjs";
 
 const LENGTH_NUDGE =
 	"Your last reply ran out of room while thinking and made no tool calls. Don't analyze further. Reply now with tool calls.";
@@ -118,7 +119,9 @@ class McpClient {
 	}
 
 	call(name, args, toolUseId) {
-		return this.request("tools/call", { name, arguments: args, _meta: { "claudecode/toolUseId": toolUseId } });
+		return this.request("tools/call", { name, arguments: args, _meta: {
+			"claudecode/toolUseId": toolUseId, "conveyor/paintingState": true,
+		} });
 	}
 
 	close() {
@@ -301,6 +304,7 @@ async function main() {
 	let mcp = null;
 	let stopRequested = false;
 	let structured = null;
+	let paintingState = null;
 	const tools = [];
 	const serverName = cfg.mcp?.name || null;
 	if (cfg.mcp) {
@@ -317,6 +321,7 @@ async function main() {
 				executionMode: "sequential", // strokes land on one canvas in order
 				execute: async (toolCallId, args) => {
 					const result = await mcp.call(t.name, args, toolCallId);
+					if (result.structuredContent?.painting_state) paintingState = result.structuredContent.painting_state;
 					const content = (result.content || []).map((block) =>
 						block.type === "image"
 							? { type: "image", data: block.data, mimeType: block.mimeType || "image/png" }
@@ -324,7 +329,7 @@ async function main() {
 					);
 					if (result.isError) throw new Error(content.map((c) => c.text || "").join(" ") || "tool failed");
 					if ((cfg.stopTools || []).includes(t.name)) stopRequested = true;
-					return { content, details: {} };
+					return { content, details: paintingState ? { paintingState } : {} };
 				},
 			});
 		}
@@ -360,7 +365,7 @@ async function main() {
 	let overBudget = false;
 	let lastText = "";
 	let lastError = null;
-	const usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, reasoning: 0, compactions: 0 };
+	const usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, reasoning: 0, compactions: 0, context_trims: 0 };
 
 	// One line per request, so a stalled session shows what it was waiting on: how much it had sent, and (once the
 	// request ends) how long the first byte took. A request that never ends leaves only its `request_start`.
@@ -381,7 +386,7 @@ async function main() {
 				imageBytes += (block.data || "").length;
 			}
 		}
-		emit({ type: "system", subtype: "request_start", request: requestNo, messages: (context.messages || []).length, images, image_bytes: imageBytes });
+		emit({ type: "system", subtype: "request_start", request: requestNo, messages: (context.messages || []).length, images, image_bytes: imageBytes, text_chars: textChars(context.messages || []) });
 		return models.streamSimple(m, context, {
 			...options,
 			maxTokens: cfg.maxTokens,
@@ -399,8 +404,13 @@ async function main() {
 				everyLooks: cfg.compactEveryLooks,
 				headers,
 				reserveTokens: cfg.maxTokens || 16384,
-				onSummary: ({ summarized, kept, chars, usage }) => {
-					cost += usage?.cost?.total || 0;
+				onSummary: ({ summarized, kept, chars, usage: summaryUsage }) => {
+					cost += summaryUsage?.cost?.total || 0;
+					usage.input_tokens += summaryUsage?.input || 0;
+					usage.output_tokens += summaryUsage?.output || 0;
+					usage.cache_read_input_tokens += summaryUsage?.cacheRead || 0;
+					usage.cache_creation_input_tokens += summaryUsage?.cacheWrite || 0;
+					usage.reasoning += summaryUsage?.reasoning || 0;
 					usage.compactions += 1;
 					log(`compacted ${summarized} messages into ${chars} chars, kept ${kept}`);
 					emit({ type: "system", subtype: "compact_boundary", summarized, kept, summary_chars: chars });
@@ -416,7 +426,17 @@ async function main() {
 			tools,
 		},
 		streamFn,
-		transformContext: async (messages) => trimImages(compact ? await compact(messages) : messages, cfg.maxImages),
+		transformContext: async (messages) => {
+			const context = compact ? await compact(messages) : boundedPainterContext(messages, {
+				keepTurns: cfg.paintContextTurns,
+				state: paintingState,
+				onTrim: (stats) => {
+					usage.context_trims += 1;
+					emit({ type: "system", subtype: "painter_context", ...stats });
+				},
+			});
+			return trimImages(context, cfg.maxImages);
+		},
 		sessionId: cfg.sessionId,
 		toolExecution: "sequential",
 		shouldStopAfterTurn: async () => stopRequested || overBudget || turn >= (cfg.maxTurns || 400),
@@ -501,6 +521,7 @@ async function main() {
 			cache_creation_input_tokens: usage.cache_creation_input_tokens,
 			output_tokens_details: { thinking_tokens: usage.reasoning },
 			compactions: usage.compactions,
+			context_trims: usage.context_trims,
 		},
 		result: lastText,
 		structured_output: structured,

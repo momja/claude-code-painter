@@ -26,7 +26,7 @@ def _setup(args):
                  paint_budget_usd=getattr(args, "paint_cap", 8.0), mutate_budget_usd=getattr(args, "mutate_cap", 4.0),
                  operator_weights=weights, judge=getattr(args, "judge", False),
                  judge_weight=getattr(args, "judge_weight", 0.5), confirm=max(1, getattr(args, "confirm", 3)),
-                 scope_views=getattr(args, "scope", False))
+                 scope_views=getattr(args, "scope", False), paint_batch=getattr(args, "paint_batch", True))
 
 
 def _stall_timeout(args) -> float | None:
@@ -62,6 +62,7 @@ def _harness(kind: str, model: str | None, effort: str | None, args, store, mete
             sys.exit(f"The Pi harness can't run: {problem}.")
         harness = PiAgent(model, provider=args.provider, effort=effort or "high", store=store, meter=meter,
                           lanes=args.lanes, compact_every_looks=getattr(args, "compact_every_looks", None),
+                          paint_context_turns=getattr(args, "paint_context_turns", 2),
                           stall_timeout=_stall_timeout(args))
         if not harness.authenticated:
             if harness.provider.login_command:
@@ -436,6 +437,9 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
         p.add_argument("--compact-every-looks", type=int, default=None, metavar="N",
                        help="Pi only: summarize the conversation once N looks (canvas images) have piled up, "
                             "keeping the task and the newest look. Default: never.")
+        p.add_argument("--paint-context-turns", type=int, default=2, metavar="N", choices=range(21),
+                       help="Pi painter only: keep N recent turns, the latest view and server state. "
+                            "Default: 2. 0 keeps full history. --compact-every-looks selects legacy summarization instead.")
         p.add_argument("--autocompact", type=int, default=None, metavar="TOKENS",
                        help="Claude only: compact the context once it passes this many tokens (100000 to 1000000). "
                             "Default: the CLI's own threshold.")
@@ -463,6 +467,8 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
         p.add_argument("--judge-weight", type=float, default=0.5, help="Share of the score the judge carries")
         p.add_argument("--scope", action=argparse.BooleanOptionalAction, default=False,
                        help="The painter may set a scope and paint in it with local coordinates (default off)")
+        p.add_argument("--paint-batch", action=argparse.BooleanOptionalAction, default=True,
+                       help="Offer compact batches with shared arguments and one result (default on)")
         p.add_argument("--no-serve", action="store_true", help="Don't serve the dashboard")
         p.add_argument("--offline", action="store_true", help="No model: the greedy painter and a scripted mutator")
     run.add_argument("--cycles", type=int, default=6)

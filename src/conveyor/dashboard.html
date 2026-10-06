@@ -851,7 +851,10 @@ function sessionDetail(s) {
   const req = s.request || {};
   const usage = s.usage || {};
   const strokesById = {}, snapOf = {};
-  for (const st of s.strokes) if (st.data.tool_use_id) { strokesById[st.data.tool_use_id] = st; if (st.snapshot) snapOf[st.data.tool_use_id] = st.snapshot; }
+  for (const st of s.strokes) if (st.data.tool_use_id) {
+    (strokesById[st.data.tool_use_id] ||= []).push(st);
+    if (st.snapshot) snapOf[st.data.tool_use_id] = st.snapshot;
+  }
   const results = {};
   for (const e of s.events) if (e.kind === "tool_result") results[e.data.tool_use_id] = e.data;
   const head = `<div class="call-head"><span class="tag">${esc(s.status)}</span><span class="tag">${esc(req.harness || "claude")}</span><span>${esc(s.model)} · effort ${esc(s.effort || "–")}</span>
@@ -868,21 +871,26 @@ function sessionDetail(s) {
     if (e.kind === "thinking") return `<div class="event thinking">${esc(d.text)}</div>`;
     if (e.kind === "text") return `<div class="event text">${esc(d.text)}</div>`;
     if (e.kind === "tool_use") {
-      const r = results[d.id], st = strokesById[d.id]?.data;
+      const r = results[d.id], calls = (strokesById[d.id] || []).map((x) => x.data);
+      const st = calls.at(-1), painted = calls.filter((x) => x.score_before != null);
+      const first = painted[0], last = painted.at(-1);
       const long = d.input && typeof d.input.source === "string";
       let effect = "";
-      if (st && st.score_before != null) {
-        const ds = st.score_after - st.score_before;
-        effect = `<span class="${ds > 0 ? "delta-neg" : ds < 0 ? "delta-pos" : "muted"} mono">score ${fmt(st.score_after, 4)} (${ds >= 0 ? "+" : ""}${ds.toFixed(4)})</span>`;
+      if (first) {
+        const ds = last.score_after - first.score_before;
+        effect = `<span class="${ds > 0 ? "delta-neg" : ds < 0 ? "delta-pos" : "muted"} mono">score ${fmt(last.score_after, 4)} (${ds >= 0 ? "+" : ""}${ds.toFixed(4)})</span>`;
       } else if (st && st.error_before != null) {
         const delta = st.error_after - st.error_before;
         effect = `<span class="${delta < 0 ? "delta-neg" : delta > 0 ? "delta-pos" : "muted"} mono">error ${fmt(st.error_after, 1)} (${delta >= 0 ? "+" : ""}${delta.toFixed(1)})</span>`;
       }
-      if (st?.dry) effect += ` <span class="warn">ran dry</span>`;
+      if (calls.some((x) => x.dry)) effect += ` <span class="warn">ran dry</span>`;
+      const batch = calls.some((x) => x.batch_call != null) ? `<details><summary>${calls.length} underlying calls</summary>${calls.map((x) =>
+        `<div class="mono ${x.status === "rejected" ? "bad" : "muted"}">${x.batch_call}. ${esc(x.tool)} ${esc(compactArgs(x.args))} → ${esc(x.error || x.status)}${x.score_after != null ? ` · score ${fmt(x.score_after, 4)}` : ""}${x.dry ? " · ran dry" : ""}</div>`).join("")}</details>` : "";
       return `<div class="event call ${r?.is_error ? "err" : ""}"><div class="call-head"><span class="name">${esc(d.name)}</span>
         <span class="call-args mono">${esc(compactArgs(d.input))}</span> ${effect}</div>
         ${long ? `<details><summary>source (${d.input.source.length} chars)</summary><pre>${esc(d.input.source)}</pre></details>` : ""}
         ${r ? `<div class="${r.is_error ? "bad" : "muted"} mono" style="white-space:pre-wrap;font-size:12px">${esc(r.text)}</div>${r.images?.length ? `<div class="imgs">${r.images.map((n) => img(n)).join("")}</div>` : ""}` : `<div class="faint">waiting for the result…</div>`}
+        ${batch}
         ${st?.pen ? `<div class="faint mono" style="font-size:11.5px">pen ${esc(st.pen)}</div>` : ""}
         ${snapOf[d.id] ? `<img class="snap" src="/artifacts/${esc(snapOf[d.id])}" loading="lazy" alt="canvas after call ${esc(st?.i)}">` : ""}</div>`;
     }
@@ -942,6 +950,7 @@ const NR_SECTIONS = [
     { k: "judge", label: "Model judge", type: "check", model: true, hint: "Scores likeness, colour and brushwork." },
     { k: "judge_weight", label: "Judge's share of the score", type: "number", step: "0.05", min: 0, max: 1, model: true },
     { k: "scope", label: "Scoped painting", type: "check", hint: "The painter may paint in local coordinates." },
+    { k: "paint_batch", label: "Compact paint batches", type: "check", hint: "Shared arguments, ordered actions and one result. On by default." },
   ] },
   { title: "Evolution", sub: "Where the instruments start and how they change.", custom: "evolution" },
   { title: "Limits", sub: "A run shares your Claude usage windows with everything else you do.", model: true, fields: [
@@ -951,7 +960,8 @@ const NR_SECTIONS = [
     { k: "mutate_cap", label: "Cap per mutation (USD)", type: "number", step: "any", min: 0.01 },
     { custom: "wait" },
     { k: "autocompact", label: "Claude: compact at (tokens)", type: "number", int: true, min: 100000, max: 1000000, ph: "CLI default" },
-    { k: "compact_every_looks", label: "Pi: compact every N looks", type: "number", int: true, min: 1, ph: "never" },
+    { k: "paint_context_turns", label: "Pi painter: recent turns", type: "number", int: true, min: 0, max: 20, hint: "Default 2, plus the latest view and server state. 0 keeps full history." },
+    { k: "compact_every_looks", label: "Pi: compact every N looks", type: "number", int: true, min: 1, ph: "never", hint: "Legacy model summarization, replaces bounded painter history when set." },
   ] },
 ];
 

@@ -56,7 +56,11 @@ By that rate a 200-action painting is around 7 minutes and $1.50. `--lanes` sets
 
 **Sessions that die.** A provider can take a request and then say nothing until the connection drops. `--stall-timeout` (default 600 seconds, 0 turns it off) kills a session that prints nothing for that long, instead of holding a lane for the full 45 minutes. A session cut off this way, or by a crash or a timeout, is not scored as a bad painting. Its job runs again, twice at most. If it still fails, the evaluation is recorded as inconclusive: the organism keeps its viability and its standing, and a champion that fails a rescore stays champion. The Pi sidecar logs each request (`request_start` with the images and bytes it sent, `request_end` with the time to first event), so a stalled session shows what it was waiting on.
 
-**Long sessions.** `--compact-every-looks N` (Pi only) summarizes the conversation once N canvas views have piled up, keeping the task and the newest view. `--autocompact TOKENS` (Claude only) sets the window the CLI compacts against, 100000 to 1000000. Neither is on by default.
+**Painter token usage.** `paint_batch` is on by default for both harnesses. It puts up to 40 ordered instrument calls in one tool call, shares repeated arguments, and returns one final score and state instead of per-stroke feedback. Each underlying call still uses one action and gets its own area limit. The first failure stops the batch, keeps earlier successful calls, and skips the rest. Stroke logs and replay snapshots still record each underlying call. `--no-paint-batch` removes this tool and its prompt instructions.
+
+Pi paintings also use bounded working history by default. `--paint-context-turns 2` keeps the latest two complete assistant turns, the complete turn containing the newest canvas view, the initial task with its target and demo sheet, and current server state. Other retained canvas images are omitted. The painter saves a working plan of at most 1200 characters in each batch; the server supplies pen state, active scope, remaining actions and looks, and score. No model summary call is needed. Only the model-facing history is shortened; the full transcript stays in the database. Mutators and judges are unchanged. `request_start` reports model-facing text characters as well as image counts, and `painter_context` reports each trim's before/after text sizes. These are size diagnostics, not tokenizer measurements.
+
+For a full-history comparison, use `--no-paint-batch --paint-context-turns 0`. Bounded history is Pi-only; Claude Code keeps its own context handling. An explicit `--compact-every-looks N` selects the older Pi model-summarization mode instead of bounded painter history. `--autocompact TOKENS` sets Claude Code's compaction window, 100000 to 1000000. Neither model-summarization setting is on by default.
 
 ## Harnesses
 
@@ -101,6 +105,19 @@ claude -p --input-format stream-json --output-format stream-json --verbose
 The first user message goes in over stdin, because stream-json is how it carries images: the target with a labelled coordinate grid, and the instrument's demo sheet. Then stdin closes and the CLI runs the agent loop until the painter calls `finish`.
 
 Claude Code launches the paint server, `painting/paintserver.py`, as a child process and talks MCP to it over stdio. The paint server owns the canvas and the instrument's `pen` state. It applies each call and answers with the critic's score and how the call changed it, the pixel error, and the actions left. It logs every call to `calls.jsonl` with its arguments, its effect, the pen's state after it, and a canvas snapshot every five calls. Claude Code runs the tool calls of one reply one at a time, in order, which a probe confirmed, so strokes land in the order the model wrote them.
+
+The painter normally groups marks through `paint_batch`. For a single tool it can send:
+
+```json
+{
+  "tool": "stroke",
+  "defaults": {"angle": 0, "length": 30, "size": 6, "color": "#6f8fb5"},
+  "calls": [{"x": 10, "y": 20}, {"x": 30, "y": 25, "color": "#223344"}],
+  "plan": "Background blocked in. Face and jacket next."
+}
+```
+
+For mixed tools, `calls` contains `[tool_name, arguments]` pairs. Shared defaults apply only to parameters that each tool accepts, and call arguments override them. Views, scope, finish and nested batches cannot go inside a batch. The original instrument tools remain available for individual calls.
 
 The painter ends with a note for the instrument's designer saying what the target needed that the tools couldn't do. That note goes to the next mutation. Here is part of the first real one, from the pen seed:
 
@@ -267,6 +284,7 @@ src/conveyor/
     problem.py     the painter, the painting cache, evaluators, mutators, the graph, the roles
 pi-agent/
   agent.mjs        the Pi sidecar: an MCP client, Pi's agent loop, and Claude Code's stream-json on stdout
+  painter-context.mjs  bounded painter history, complete tool-call groups and server checkpoints
 tests/
   fake_claude.py   a stand-in `claude` that speaks stream-json and drives the MCP servers
 ```

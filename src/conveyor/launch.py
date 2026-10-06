@@ -47,11 +47,11 @@ ALLOWED = {
     "mutate_harness": "text", "mutate_model": "text", "mutate_effort": "text",
     "judge_harness": "text", "judge_model": "text", "judge_effort": "text",
     "target": "text", "width": "int", "actions": "int", "looks": "int",
-    "judge": "toggle", "judge_weight": "float", "scope": "toggle",
+    "judge": "toggle", "judge_weight": "float", "scope": "toggle", "paint_batch": "toggle",
     "seeds": "list", "parents": "int", "confirm": "int",
     "refine": "float", "invent": "float", "recombine": "float",
     "lanes": "int", "paint_cap": "float", "mutate_cap": "float", "max_usage": "float",
-    "compact_every_looks": "int", "autocompact": "int",
+    "compact_every_looks": "int", "autocompact": "int", "paint_context_turns": "int",
 }
 # Sanity bounds, to catch a typo before it spends money. (low, high), inclusive.
 BOUNDS = {
@@ -59,7 +59,7 @@ BOUNDS = {
     "looks": (-1, 500), "judge_weight": (0, 1), "parents": (1, 10), "confirm": (1, 10),
     "refine": (0, 100), "invent": (0, 100), "recombine": (0, 100), "lanes": (1, 8),
     "paint_cap": (0.01, 1000), "mutate_cap": (0.01, 1000), "max_usage": (0.05, 1),
-    "compact_every_looks": (1, 500), "autocompact": (100_000, 1_000_000),
+    "compact_every_looks": (1, 500), "autocompact": (100_000, 1_000_000), "paint_context_turns": (0, 20),
 }
 
 

@@ -37,7 +37,7 @@ def test_paint_server(tmp_path):
                                                    "looks": 1, "snapshot_every": 1}))
     c = Client("conveyor.painting.paintserver", tmp_path)
     names = [t["name"] for t in c.rpc("tools/list")["result"]["tools"]]
-    assert names == ["start", "move", "stop", "detail", "look", "finish"]
+    assert names == ["start", "move", "stop", "detail", "paint_batch", "look", "finish"]
 
     bad = c.call("move", {"dx": "far"})
     assert bad["isError"] and "no action was used" in bad["content"][0]["text"]

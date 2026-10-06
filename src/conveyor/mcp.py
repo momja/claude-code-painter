@@ -47,6 +47,10 @@ class StdioServer:
         """Run a tool. Return content blocks; raise ToolFailure for an error result."""
         raise NotImplementedError
 
+    def structured_content(self, meta: dict) -> dict | None:
+        """Optional machine-readable state alongside tool text, including after a partial failure."""
+        return None
+
     def serve(self, stdin: TextIO | None = None, stdout: TextIO | None = None) -> None:
         stdin = stdin or sys.stdin
         out = stdout or sys.stdout
@@ -87,6 +91,9 @@ class StdioServer:
                     result = {"content": content, "isError": False}
                 except ToolFailure as e:
                     result = {"content": [text(str(e))], "isError": True}
+                structured = self.structured_content(meta)
+                if structured is not None:
+                    result["structuredContent"] = structured
             elif method == "ping":
                 result = {}
             else:

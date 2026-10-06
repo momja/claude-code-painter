@@ -42,6 +42,8 @@ from conveyor.painting.instrument import Instrument
 from conveyor.painting.instrument import ToolError
 
 MAX_REJECTS = 60  # calls refused for bad arguments before the painting is ended, so a confused model can't loop
+MAX_BATCH_CALLS = 40
+MAX_PLAN_CHARS = 1200
 
 
 class PaintSession:
@@ -58,6 +60,9 @@ class PaintSession:
         self.looks_left = int(job.get("looks", 8))
         self.scope_rect: tuple[int, int, int, int] | None = None  # active window (x0, y0, x1, y1), or whole-canvas
         self.scope_enabled = bool(job.get("scope", False))
+        self.batch_enabled = bool(job.get("paint_batch", True))
+        self.plan = ""
+        self._batch_call: int | None = None
         self.snapshot_every = int(job.get("snapshot_every", 5))
         self.applied = 0
         self.rejected = 0
@@ -88,9 +93,11 @@ class PaintSession:
     def _record(self, **entry) -> None:
         self.index += 1
         entry = {"i": self.index, "t": round(time.time(), 3), **entry}
+        if self._batch_call is not None:
+            entry["batch_call"] = self._batch_call
         self._log.write(json.dumps(entry, default=str) + "\n")
 
-    def _pen_text(self) -> str:
+    def _pen_state(self) -> dict:
         def tidy(v):
             if isinstance(v, float):
                 return round(v, 3)
@@ -99,7 +106,78 @@ class PaintSession:
             if isinstance(v, list | tuple):
                 return [tidy(x) for x in v]
             return v
-        return json.dumps(tidy(self.pen), default=str)[:600]
+        return json.loads(json.dumps(tidy(self.pen), default=str))
+
+    def _pen_text(self) -> str:
+        return json.dumps(self._pen_state())[:600]
+
+    def working_state(self) -> dict:
+        """Current server state, not a model's recollection of earlier calls."""
+        return {"actions_used": self.applied, "actions_left": self.actions_left, "looks_left": self.looks_left,
+                "score": round(self.score, 4), "pixel_error": round(self.error, 1), "pen": self._pen_state(),
+                "scope": list(self.scope_rect) if self.scope_rect else None, "plan": self.plan,
+                "finished": self.finished}
+
+    def _prepare_batch(self, args: dict) -> tuple[list[tuple[str, dict]], str]:
+        calls, defaults, plan = args.get("calls"), args.get("defaults", {}), args.get("plan", self.plan)
+        if not isinstance(calls, list) or not 1 <= len(calls) <= MAX_BATCH_CALLS:
+            raise ToolFailure(f"paint_batch needs 1 to {MAX_BATCH_CALLS} calls. Nothing was painted.")
+        if not isinstance(defaults, dict) or not isinstance(plan, str) or len(plan) > MAX_PLAN_CHARS:
+            raise ToolFailure(f"defaults must be an object and plan at most {MAX_PLAN_CHARS} characters. Nothing was painted.")
+        specs = {t.name: {p.name for p in t.params} for t in self.inst.spec.tools}
+        prepared = []
+        for i, call in enumerate(calls, 1):
+            tool = args.get("tool")
+            if isinstance(call, list) and len(call) == 2:
+                tool, call = call
+            if not isinstance(tool, str) or tool not in specs or not isinstance(call, dict):
+                raise ToolFailure(f"Call {i}: use an argument object with tool set, or [paint_tool, arguments]. "
+                                  "Views, scope, finish and nested batches are not allowed. Nothing was painted.")
+            shared = {k: v for k, v in defaults.items() if k in specs[tool]}
+            prepared.append((tool, {**shared, **call}))
+        known = set().union(*(specs[tool] for tool, _ in prepared))
+        if set(defaults) - known:
+            raise ToolFailure("Unknown shared parameters: " + ", ".join(sorted(set(defaults) - known)) + ". Nothing was painted.")
+        return prepared, plan
+
+    def batch(self, args: dict, tool_use_id: str | None = None) -> str:
+        """Ordered paint calls with shared arguments and one result. Stop on the first failed call."""
+        if self.finished:
+            raise ToolFailure("The painting is finished. Don't call any more tools.")
+        try:
+            prepared, plan = self._prepare_batch(args)
+        except ToolFailure as e:
+            self.rejected += 1
+            self._record(tool="paint_batch", tool_use_id=tool_use_id, args=args, status="rejected", error=str(e))
+            if self.rejected >= MAX_REJECTS:
+                self.finished = True
+                raise ToolFailure(f"{e} Too many refused calls; the painting has been ended.") from e
+            raise
+        self.plan = plan
+        before, dry = self.applied, 0
+        error = None
+        try:
+            for i, (tool, call) in enumerate(prepared, 1):
+                if self.actions_left <= 0:
+                    break
+                self._batch_call = i
+                try:
+                    self.apply(tool, call, tool_use_id)
+                    dry += int(self.canvas.dry)
+                except ToolFailure as e:
+                    error = f"Call {i} ({tool}) failed: {e}"
+                    break
+        finally:
+            self._batch_call = None
+        used = self.applied - before
+        result = (f"Applied {used}/{len(prepared)} calls; {dry} hit the area limit. "
+                  f"Skipped {len(prepared) - used - int(error is not None)} calls.\n"
+                  + "State: " + json.dumps(self.working_state(), separators=(",", ":")))
+        if error:
+            raise ToolFailure(error + " Earlier successful calls remain painted.\n" + result)
+        if self.actions_left == 0:
+            result += "\nNo actions left. Call finish with your note."
+        return result
 
     # ---- the three kinds of call --------------------------------------------------------------------------
 
@@ -279,6 +357,26 @@ class PaintServer(StdioServer):
                     "clear": {"type": "boolean", "description": "Drop the scope; coordinates are "
                     "canvas pixels again."}}},
             })
+        if self.s.batch_enabled:
+            tools.append({
+                "name": "paint_batch",
+                "description": "Paint up to 40 calls in order, with one summary result. Set tool for argument-only "
+                "calls, or use [tool_name, arguments] pairs to mix tools. Shared defaults apply only to matching "
+                "parameters; each call overrides them. Each call costs one action and has its own area limit. "
+                "Stops at the first failure or when actions run out; earlier successful calls remain painted. "
+                "Keep a short working plan here so it survives history trimming.",
+                "inputSchema": {"type": "object", "properties": {
+                    "tool": {"type": "string", "enum": [t.name for t in self.s.inst.spec.tools]},
+                    "defaults": {"type": "object", "description": "Shared instrument arguments, overridden per call."},
+                    "calls": {"type": "array", "minItems": 1, "maxItems": MAX_BATCH_CALLS, "items": {"anyOf": [
+                        {"type": "object"},
+                        {"type": "array", "minItems": 2, "maxItems": 2,
+                         "items": {"anyOf": [{"type": "string"}, {"type": "object"}]}},
+                    ]}},
+                    "plan": {"type": "string", "maxLength": MAX_PLAN_CHARS,
+                             "description": "What is done, what remains, useful colours/settings and mistakes to avoid."},
+                }, "required": ["calls"], "additionalProperties": False},
+            })
         return tools + [
             {"name": "look", "description": "See the whole canvas as it is now, with the score's parts and the "
              "pixel error for each region. Usually limited: the status line says how many looks are left.",
@@ -288,8 +386,16 @@ class PaintServer(StdioServer):
              "inputSchema": {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}},
         ]
 
+    def structured_content(self, meta: dict) -> dict | None:
+        # Pi asks for this separately from model-visible text. Other clients keep their usual MCP result.
+        return {"painting_state": self.s.working_state()} if meta.get("conveyor/paintingState") else None
+
     def call(self, name: str, args: dict, meta: dict) -> list[dict]:
         tool_use_id = meta.get("claudecode/toolUseId")
+        if name == "paint_batch":
+            if not self.s.batch_enabled:
+                raise ToolFailure("No tool named paint_batch.")
+            return [text(self.s.batch(args, tool_use_id))]
         if name == "look":
             status, png = self.s.look(tool_use_id)
             return [text(status), image(png)]

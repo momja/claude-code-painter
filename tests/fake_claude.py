@@ -113,8 +113,12 @@ if cfg:
     emit({"type": "assistant", "message": {"id": "msg_think", "content": [{"type": "thinking", "thinking": "Planning the work."}]}})
     i = 0
     if server_name == "canvas":
-        for t in tools:
-            if t["name"] in ("look", "finish"):
+        batch = os.environ.get("FAKE_CLAUDE_BATCH")
+        if batch:
+            i += 1
+            call(server, i, "paint_batch", json.loads(batch))
+        for t in ([] if batch else tools):
+            if t["name"] in ("look", "finish", "paint_batch"):
                 continue
             props = t["inputSchema"].get("properties", {})
             arguments = {k: sample(v) for k, v in props.items() if k in t["inputSchema"].get("required", [])}

@@ -31,8 +31,8 @@ with the pixel error inside that window; some return several pictures at once. V
 look, and nothing about the painting changes under one. Ask for a view before placing a small or detailed mark \
 — at this canvas size you cannot judge fine work from the whole-canvas picture alone.
 
-Tool calls in one reply run in order, one after another. Put many calls in each reply, 10 to 40, rather than \
-one at a time.
+Tool calls in one reply run in order, one after another. Group 10 to 40 paint actions per reply rather than \
+waiting for feedback after every mark.
 
 When you're done, or out of actions, call `finish` with a note for the instrument's designer: what the target \
 needed that these tools could not do, and which tool behaviour was hard to control. Be concrete: name the \
@@ -40,6 +40,19 @@ region, the mark you wanted, and what the tool did instead.
 
 The instrument:
 {reference}"""
+
+BATCH_RULE = """\
+Prefer `paint_batch` to individual paint calls. Put 10 to 40 calls in a batch, with shared arguments in \
+`defaults`. Set `tool` once and make `calls` a list of argument objects, or omit `tool` and use \
+[tool_name, arguments] pairs for mixed tools. For example, a pen sequence can batch start, moves and stop. \
+Only instrument paint tools belong in a batch; call views, scope and finish separately. Calls run in order, \
+each costs one action, and each gets its own area limit. The batch returns the final score and state, not \
+per-stroke feedback. It stops on a failed call; earlier successful calls stay painted and later calls are skipped.
+
+Update the optional `plan` in each batch, at most 1200 characters: regions done, regions still needed, \
+useful colours/settings, and mistakes to avoid. Old drawing history may be dropped, so keep everything you \
+need to carry forward in this plan. The server's current pen state, scope and remaining actions are \
+authoritative. Omit arguments that have defaults, and use rounded coordinates unless finer precision matters."""
 
 JUDGE_RULE = """\
 When you finish, an expert judge looks at your painting beside the target and scores likeness, colour and \

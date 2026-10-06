@@ -99,7 +99,7 @@ MAX_DOC = 1500
 MAX_NOTE = 300
 MAX_VIEWS_PER_CALL = 4  # pictures one viewing call may return; each costs the painter tokens
 CALL_TIMEOUT = 1.0  # seconds of wall clock per tool call
-RESERVED = {"look", "finish", "scope"}
+RESERVED = {"look", "finish", "scope", "paint_batch"}
 PARAM_TYPES = {"number", "integer", "boolean", "color", "choice", "points", "numbers"}
 TOOL_ARGS = ("args", "pen", "canvas", "rng")
 

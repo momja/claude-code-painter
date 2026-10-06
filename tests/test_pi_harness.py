@@ -63,6 +63,10 @@ def test_pi_compacts_after_n_looks(env):
     assert len(starts) == 3 and all(e["images"] >= 1 for e in starts)  # each request logs what it sent
     assert [e["messages"] for e in starts] == [1, 4, 5]  # the third goes out compacted: 7 messages became 5
     assert sum(e["subtype"] == "request_end" for e in events) == 3
+    [(usage,)] = rows(store, "SELECT usage FROM sessions")
+    usage = json.loads(usage)
+    assert usage["compactions"] == 1
+    assert usage["input_tokens"] > sum(e["input_tokens"] for e in events if e["subtype"] == "request_end")
 
 
 @needs_pi
@@ -122,6 +126,70 @@ def test_an_instrument_mutation_on_pi(env):
                   empty_niches=[], wanted_niche="stateful/scalar/medium")
     [child] = mutator.propose(ctx)
     assert mutator.name == "pi:invent" and child.viable and child.traits["stateful"] and child.summary == "a pen"
+
+
+@needs_pi
+def test_batches_and_bounded_context_keep_full_recording(env):
+    store, meter, setup = env
+    defaults = {"angle": 0, "length": 30, "size": 6, "color": "#6f8fb5"}
+    batches = [{"blocks": [{"tool": "paint_batch", "args": {
+        "tool": "stroke", "defaults": defaults, "calls": [{"x": 10, "y": 10 + i}],
+        "plan": f"Background pass {i} done. Face next.",
+    }}] + ([{"tool": "look", "args": {}}] if i == 0 else [])} for i in range(7)]
+    faux = batches + [{"blocks": [{"tool": "finish", "args": {"note": "ok"}}]}]
+    pi = PiAgent("faux-model", store=store, meter=meter, faux=faux)
+    painter = Painter(setup, store, pi)
+    inst = make_instrument(ROUND, "round", setup, store, painter.target.height)
+    p = painter.paint(inst, Organism(node="painter", genome={"prompt": prompts.INITIAL_STRATEGY}))
+    assert p.viable and p.details["stats"]["tool_use"] == {"stroke": 7}
+    [(usage, turns)] = rows(store, "SELECT usage, num_turns FROM sessions")
+    usage = json.loads(usage)
+    assert turns == 8 and usage["compactions"] == 0 and usage["context_trims"] >= 4
+    events = [json.loads(d) for (d,) in rows(store, "SELECT data FROM session_events WHERE kind='other'")]
+    starts = [e for e in events if e["subtype"] == "request_start"]
+    assert len(starts) == 8 and max(e["messages"] for e in starts) <= 9
+    assert all(e["images"] >= 1 for e in starts) and starts[-1]["images"] == 3  # target, demo, older latest view
+    assert starts[-1]["text_chars"] < starts[3]["text_chars"] + 200
+    trims = [e for e in events if e["subtype"] == "painter_context"]
+    assert trims[-1]["after_chars"] < trims[-1]["before_chars"]
+    strokes = [json.loads(d) for (d,) in rows(store, "SELECT data FROM strokes ORDER BY idx")]
+    assert len(strokes) == 9  # all seven actions, look and finish still recorded
+    assert sum(s.get("batch_call") == 1 for s in strokes) == 7
+    assert all(s.get("tool_use_id") for s in strokes)
+
+
+@needs_pi
+def test_mixed_batch_schema_on_pi(env):
+    store, meter, setup = env
+    faux = [{"blocks": [{"tool": "paint_batch", "args": {
+        "defaults": {"color": "#223344"},
+        "calls": [["start", {"x": 10, "y": 10}], ["move", {"dx": 20, "dy": 0}], ["stop", {}]],
+        "plan": "First pass done.",
+    }}]}, {"blocks": [{"tool": "finish", "args": {"note": "ok"}}]}]
+    painter = Painter(setup, store, PiAgent("faux-model", store=store, meter=meter, faux=faux))
+    inst = make_instrument(PEN, "pen", setup, store, painter.target.height)
+    p = painter.paint(inst, Organism(node="painter", genome={"prompt": prompts.INITIAL_STRATEGY}))
+    assert p.viable and p.details["stats"]["tool_use"] == {"start": 1, "move": 1, "stop": 1}
+    calls = [json.loads(d) for (d,) in rows(store, "SELECT data FROM strokes ORDER BY idx")]
+    assert [c.get("batch_call") for c in calls[:3]] == [1, 2, 3]
+    assert len({c["tool_use_id"] for c in calls[:3]}) == 1
+
+
+@needs_pi
+def test_context_configuration_is_painter_only(env):
+    from conveyor.harness import Job
+
+    store, meter, setup = env
+    pi = PiAgent("faux-model", store=store, meter=meter, faux=[], paint_context_turns=3)
+    def config(purpose):
+        return json.loads(pi.command(Job(purpose=purpose, system_prompt="s", content=[], cwd=setup.work_dir))[1])
+    assert config("paint")["paintContextTurns"] == 3
+    assert config("mutate strategy")["paintContextTurns"] == 0
+    assert config("judge")["paintContextTurns"] == 0
+    pi.compact_every_looks = 2
+    assert config("paint")["paintContextTurns"] == 0  # explicit legacy mode takes precedence
+    with pytest.raises(ValueError, match="between 0 and 20"):
+        PiAgent("faux-model", faux=[], paint_context_turns=-1)
 
 
 def test_rate_limits_are_per_harness():
