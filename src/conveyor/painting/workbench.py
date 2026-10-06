@@ -29,12 +29,15 @@ def describe(report: dict, wanted_niche: str | None = None) -> str:
     t = report["traits"]
     reach = f"median reach per call {t['reach'] * 100:.0f}% of the canvas diagonal" if t.get("reach") is not None else "no reach measured"
     tools = ", ".join(f"{x['name']}({', '.join(x['params'])})" for x in report.get("tools", []))
+    views = ", ".join(f"{x['name']}({', '.join(x['params'])})" for x in report.get("views", []))
     lines = [
         f"Valid. Niche: {report['niche']} (keeps state between calls: {'yes' if t['stateful'] else 'no'}; "
         f"list parameters: {'yes' if t['list_params'] else 'no'}; {reach}; reads the canvas: "
         f"{'yes' if t['reads_canvas'] else 'no'}).",
         f"Tools: {tools}.",
     ]
+    if views:
+        lines.append(f"Viewing tools: {views}. Each was probed once with arbitrary arguments.")
     if wanted_niche:
         lines.append(f"You were asked for {wanted_niche}: " + ("this matches." if report["niche"] == wanted_niche
                                                                  else "this lands somewhere else."))

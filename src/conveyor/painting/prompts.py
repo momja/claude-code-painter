@@ -22,8 +22,14 @@ costs nothing. Each result gives the score, the number your painting is judged b
 and how the call changed it, then the pixel error, and how many actions are left. The score is 60% pixel match, \
 compared at full, half and quarter resolution, and 40% how closely the painting's texture and palette match the \
 target's: the direction of its brushwork, how many edges it has, how much fine detail, and its spread of colour. \
-Texture that runs the right way can raise the score even when it raises pixel error. `look` shows you the canvas, \
-the score's parts, and the pixel error per region; you have {looks} looks. `finish` ends the painting.
+Texture that runs the right way can raise the score even when it raises pixel error. `look` shows you the whole \
+canvas, the score's parts, and the pixel error per region; you have {looks} looks. `finish` ends the painting.
+
+The instrument may also define viewing tools of its own, listed under "Viewing tools" below. A viewing tool \
+shows you a window on the canvas at whatever zoom its designer chose, gridded and labelled in canvas pixels, \
+with the pixel error inside that window; some return several pictures at once. Views are free: no action, no \
+look, and nothing about the painting changes under one. Ask for a view before placing a small or detailed mark \
+— at this canvas size you cannot judge fine work from the whole-canvas picture alone.
 
 Tool calls in one reply run in order, one after another. Put many calls in each reply, 10 to 40, rather than \
 one at a time.
@@ -39,6 +45,16 @@ JUDGE_RULE = """\
 When you finish, an expert judge looks at your painting beside the target and scores likeness, colour and \
 brushwork. The score after each call is a quick numeric measure that roughly tracks the judge; the judge's \
 verdict on the finished painting is what counts."""
+
+SCOPE_RULE = """\
+You can paint in a window. Call `scope` with a centre (x, y) in canvas pixels and a `span`, and it shows
+that square window labelled from its own top-left corner: local (0, 0) is the window's corner, and the
+window is `span` local pixels across. Until you clear it (`scope` with `clear` true), every paint call
+takes local coordinates: positions bounded against the canvas (x, y and point lists) move into the window,
+while deltas, sizes, angles and colours are unchanged. Each result and every look names the active scope so
+you always know which coordinates you are using. Scoping is free, like a view: no action, no look. Use it
+before fine work, the way you would a view — the window's error table says where inside it the painting
+differs most from the target."""
 
 PAINTER_FIRST_MESSAGE = ("The target", "What each of the instrument's example call sequences draws, each on its own blank "
                          "canvas", "Your canvas is blank paper. Start painting.")
@@ -70,14 +86,29 @@ An instrument is one Python module with four parts:
         pen.update(down=True, x=args["x"], y=args["y"], color=args["color"], size=args["size"])
         return "pen down"                          # optional short note the painter sees after the call
 
+    VIEWS = {                                      # optional: 1 to 4 viewing tools, how the painter sees its canvas
+        "detail": {
+            "doc": "Look closely at (x, y): a window `span` px across.",
+            "params": {
+                "x": {"type": "number", "min": 0, "max": "width"},
+                "y": {"type": "number", "min": 0, "max": "height"},
+                "span": {"type": "number", "min": 16, "max": 256, "default": 64},
+            },
+        },
+    }
+
+    def detail(args, pen, canvas, rng):            # a view function takes the same four arguments
+        return canvas.view(args["x"], args["y"], args["span"])   # and returns a view, or a list of views
+
 Top-level statements are limited to the docstring, literal constants, and function definitions. Helper functions
 are fine.
 
-Parameter types: "number" and "integer" (`min` and `max` may be numbers or the strings "width" and "height";
-values outside are clamped), "boolean", "color" (the painter sends hex; your function receives an (r, g, b)
+Parameter types: "number" and "integer" (`min` and `max` may be numbers or the strings "width", "height" and \
+"radius", the canvas's brush limit; values outside are clamped), "boolean", "color" (the painter sends hex; your function receives an (r, g, b)
 tuple in 0..1), "choice" (with "options": a list of strings), "points" (a list of [x, y] pairs, up to 64;
 "min_items" and "max_items" optional), "numbers" (a list of numbers, up to 64). A parameter with a "default"
-is optional.
+is optional. Bounds written against "width", "height" or "radius" track the canvas, so an instrument written
+this way reads right at any canvas size.
 
 `args` holds the call's arguments, validated and with defaults filled in. `pen` is a dict that persists across
 every call of one painting and starts as a copy of STATE. `rng` is a numpy Generator (random, uniform, normal,
@@ -87,10 +118,18 @@ integers, choice, permutation, standard_normal). `canvas` is the only way to put
     canvas.stamp(x, y, mask, color, opacity=1.0)                  press a 2-D array of 0..1 centred on (x, y)
     canvas.smudge(x, y, radius, dx, dy, strength=0.5)             drag the paint under (x, y) by (dx, dy)
     canvas.pick(x, y)                                             the canvas colour there, as (r, g, b)
+    canvas.view(x, y, span, scale=4)                              a `span` px window centred on (x, y), rendered
+                                                                  `scale` image px per canvas px (1 to 8)
     canvas.width, canvas.height, canvas.max_radius, canvas.area_left
 
 dab, stamp and smudge return False once the call has run out of area; stop drawing when they do. Colours
-accept an (r, g, b) tuple in 0..1 or a hex string. Paint composites translucently: new = old * (1 - a) + colour * a.'''
+accept an (r, g, b) tuple in 0..1 or a hex string. Paint composites translucently: new = old * (1 - a) + colour * a.
+
+A viewing tool returns `canvas.view(...)`, a list of up to four views, or either of those with a short note as \
+a second element: `return views, "what the painter should notice"`. Viewing is free for the painter — no \
+action, no look — and it can never change the painting: the canvas and the pen are put back after every view \
+call, so a view that draws is a view that shows nothing it drew. The probe calls each viewing tool once with \
+arguments nobody chose, so it must work with any in-range arguments it may be given.'''''
 
 DESIGNER_SYSTEM = """\
 You design instruments for a painter. The painter is another Claude model. It copies a target painting onto a \
@@ -108,6 +147,12 @@ call reports that it ran dry.
 - A dab or smudge radius is at most {max_radius:g} px; a stamp mask at most {side} x {side}.
 - A call runs for at most {timeout:g} s.
 - Tools never see the target. `canvas.pick` reads the canvas, not the target.
+
+Seeing is part of the interface, so it is yours too. The painter also has `look`, which shows the whole canvas \
+once per look from a small budget, but at {w} x {h} px that picture is too coarse for fine work: a painter that \
+can only look whole-canvas paints like it. VIEWS holds up to {max_views} viewing tools of your own — a close-up \
+on a region, a mid-scale working view, whatever the tools call for. Viewing calls cost the painter nothing \
+(no action, no look) and cannot change the painting, but they run under the same time limit as any other call.
 
 Sandbox: no imports, classes, try/except, raise, print, or names starting with an underscore. `np` (a common \
 subset), `math`, and simple builtins are in scope. The workbench says exactly what it refuses.
@@ -130,7 +175,7 @@ or over 30% of the canvas diagonal."""
 REFINE_TASK = """\
 Improve this instrument where the painting fell short. Keep its interface recognisable, because the painter's \
 strategy was tuned for it: you may change what the tools draw, adjust their parameters, and add or remove a \
-tool. Say in the summary what you changed and which failure it addresses."""
+tool or a viewing tool. Say in the summary what you changed and which failure it addresses."""
 
 INVENT_TASK = """\
 Design an instrument that works differently from the current one in kind, not degree: a different way of \

@@ -37,10 +37,12 @@ from typing import Any
 from conveyor.claude import BudgetExhausted
 from conveyor.claude import RateLimited
 from conveyor.harness import SessionCutOff
+from conveyor.harness import SessionFailed
 from conveyor.store import Store
 from conveyor.store import new_id
 
 CUT_OFF_RETRIES = 3  # times one job runs again after a usage limit ends its session partway
+SESSION_RETRIES = 2  # times one job runs again after its session is cut off by a stall, a crash or a timeout
 
 
 @dataclass
@@ -73,6 +75,9 @@ class Evaluation:
     session_id: str | None = None
     error: str | None = None
     feedback: dict = field(default_factory=dict)  # what a mutator gets to see: images, notes, worst regions
+    # The sessions behind it kept failing, so nothing was learned about the organism. Unlike a non-viable result it
+    # leaves the organism's viability and standing alone.
+    inconclusive: bool = False
     id: str = field(default_factory=new_id)
     started: float = field(default_factory=time.time)
     ended: float | None = None
@@ -140,6 +145,9 @@ class Population:
             self._tally(org.id, [ev], tries=1)
 
     def rescore(self, org_id: str, ev: Evaluation) -> None:
+        """A new standing against a new partner. An inconclusive evaluation leaves the old standing as it was."""
+        if ev.inconclusive:
+            return
         with self._lock:
             self._tally(org_id, [ev], tries=1)
 
@@ -253,14 +261,22 @@ class Conductor:
                 raise
 
     def _patiently(self, what: str, fn: Callable[[], Any]) -> Any:
-        """`fn()`, run again when a usage limit ended its session partway and this run waits out limits."""
-        for attempt in range(CUT_OFF_RETRIES + 1):
+        """`fn()`, run again when its session was cut off: by a usage limit (if this run waits out limits), or by
+        a stall, a crash or a timeout (twice at most; after that the failure goes to the caller)."""
+        cut_offs = failures = 0
+        while True:
             try:
                 return fn()
             except SessionCutOff as e:
-                if not self.wait_out_limits or attempt == CUT_OFF_RETRIES or self.stopped:
+                if not self.wait_out_limits or cut_offs == CUT_OFF_RETRIES or self.stopped:
                     raise
+                cut_offs += 1
                 self.log(f"  {what}: {e}; it runs again once the limit resets")
+            except SessionFailed as e:
+                if failures == SESSION_RETRIES or self.stopped:
+                    raise
+                failures += 1
+                self.log(f"  {what}: {e}; trying again ({failures}/{SESSION_RETRIES})")
 
     def partner_of(self, node: Node) -> Organism | None:
         return self.champions.get(node.partner) if node.partner else None
@@ -282,7 +298,8 @@ class Conductor:
             "score": ev.score, "viable": int(ev.viable), "started": ev.started, "ended": ev.ended or time.time(),
             "details": ev.details, "artifacts": ev.artifacts, "session_id": ev.session_id, "error": ev.error,
         })
-        self.store.update_organism(ev.organism_id, viable=int(ev.viable))
+        if not ev.inconclusive:
+            self.store.update_organism(ev.organism_id, viable=int(ev.viable))
 
     def _status(self, node: str, status: str, **extra: Any) -> None:
         self.store.emit("node_status", node=node, status=status, **extra)
@@ -300,6 +317,11 @@ class Conductor:
                                      lambda: node.evaluate(org, partner, reason, sample))
             except (BudgetExhausted, RateLimited):
                 raise
+            except SessionFailed as e:
+                self.log(f"  {node.name} {org.id[:6]} ({reason}): no result, {e}")
+                ev = Evaluation(organism_id=org.id, score=0.0, viable=False, inconclusive=True, reason=reason,
+                                partner_id=partner.id if partner else None, error=str(e),
+                                details={"inconclusive": True})
             except Exception as e:  # noqa: BLE001 - an evaluator crash is recorded, not fatal
                 traceback.print_exc()
                 ev = Evaluation(organism_id=org.id, score=0.0, viable=False, reason=reason,
@@ -425,7 +447,8 @@ class Conductor:
             self.pops[node.name].add(child, ev)
             out.append((child, ev))
             parent_ev = self.pops[node.name].evals.get(parent.id)
-            verdict = ("not viable" if not ev.viable else
+            verdict = ("no result (its sessions kept failing)" if ev.inconclusive else
+                       "not viable" if not ev.viable else
                        f"{ev.score:.3f} vs parent {parent_ev.score:.3f}" if parent_ev else f"{ev.score:.3f}")
             self.log(f"  {node.name}: {mutator.name} child {child.id[:6]} ({child.niche or '-'}) {verdict}")
         return out
@@ -445,7 +468,8 @@ class Conductor:
         pop = self.pops[node.name]
         champ = pop.champion()
         self.store.emit("iteration", node=node.name, iteration=self.iterations[node.name], n_new=len(results),
-                        n_nonviable=sum(1 for _, e in results if not e.viable),
+                        n_nonviable=sum(1 for _, e in results if not e.viable and not e.inconclusive),
+                        n_inconclusive=sum(1 for _, e in results if e.inconclusive),
                         best_id=champ[0].id if champ else None, best_score=champ[1].score if champ else None,
                         population=len(pop.organisms), niches=sorted(pop.niches()))
         self._check_champion(node, cascade=True, reason="evolution")
@@ -524,6 +548,8 @@ class Conductor:
                 ev = self._evaluate(node, org, f"rescore after {because} changed")
                 pop.rescore(org.id, ev)
                 done.add(org.id)
+                if ev.inconclusive:
+                    continue  # its standing is unchanged; the next rescore tries again
                 self.store.emit("rescored", node=node.name, organism_id=org.id, old_score=old.score,
                                 new_score=ev.score, because=because)
         # The champion's new standing gets its full count of evaluations too. That is usually free: the partner's

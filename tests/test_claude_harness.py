@@ -42,6 +42,13 @@ def rows(store, sql, *args):
     return [dict(r) for r in conn.execute(sql, args)]
 
 
+def test_argv_passes_autocompact_only_when_set(env):
+    job = Job(purpose="x", system_prompt="S", content=[], cwd=env[2].work_dir)
+    assert "--autocompact" not in ClaudeCode(Settings(binary="claude")).argv(job)
+    argv = ClaudeCode(Settings(binary="claude", autocompact=150_000)).argv(job)
+    assert argv[argv.index("--autocompact") + 1] == "150000"
+
+
 def test_argv_isolates_the_session(env):
     _, claude, _, _, _ = env
     argv = claude.argv(Job(purpose="x", system_prompt="S", content=[], cwd=env[2].work_dir,
@@ -61,6 +68,7 @@ def test_a_painting_is_recorded_end_to_end(env):
     p = painter.paint(inst, prompt)
     assert p.viable and 0 < p.score < 1
     assert p.details["stats"]["tool_use"] == {"start": 2, "move": 2, "stop": 2}
+    assert p.details["stats"]["views_used"] == 2  # the fake painter used the seed's viewing tool twice, free
     assert p.details["note"] == "The fake painter wanted thinner lines."
     # The judge's verdict (5, 6, 4, 5: a mean of 5, so (5 - 1) / 9) carries half the score.
     judged = p.details["judge"]
@@ -81,9 +89,9 @@ def test_a_painting_is_recorded_end_to_end(env):
     [session] = rows(store, "SELECT * FROM sessions WHERE purpose='paint'")
     assert session["status"] == "ok" and session["purpose"] == "paint" and session["cost"] == pytest.approx(0.01)
     kinds = [r["kind"] for r in rows(store, "SELECT kind FROM session_events WHERE session_id=? ORDER BY idx", session["id"])]
-    assert kinds.count("tool_use") == 8 and kinds.count("tool_result") == 8 and "thinking" in kinds and kinds[-1] == "result"
+    assert kinds.count("tool_use") == 10 and kinds.count("tool_result") == 10 and "thinking" in kinds and kinds[-1] == "result"
     strokes = rows(store, "SELECT data FROM strokes WHERE session_id=?", session["id"])
-    assert len(strokes) == 8 and json.loads(strokes[0]["data"])["tool_use_id"] == "toolu_fake_1"
+    assert len(strokes) == 10 and json.loads(strokes[0]["data"])["tool_use_id"] == "toolu_fake_1"
 
 
 def test_instrument_mutator_submits_through_the_workbench(env, monkeypatch):
@@ -241,6 +249,56 @@ def test_a_painting_the_limit_cuts_off_raises_and_the_next_waits_for_the_reset(t
     assert p.details["stats"]["tool_use"] == {"start": 2, "move": 2, "stop": 2}
     assert not meter.limited("claude")
     store.close()
+
+
+@pytest.mark.parametrize("failure", ["FAKE_CLAUDE_STALL", "FAKE_CLAUDE_DROP"])
+def test_a_painting_whose_session_dies_raises_and_is_neither_scored_nor_cached(tmp_path, fake_claude, monkeypatch,
+                                                                              failure):
+    from conveyor.harness import SessionFailed
+
+    flag = tmp_path / "flag"
+    flag.touch()
+    monkeypatch.setenv(failure, str(flag))
+    store = Store(tmp_path / "run.db", run_name="test")
+    claude = ClaudeCode(Settings(binary=str(fake_claude), stall_timeout=4.0), store, Meter(budget_usd=10), lanes=1)
+    painter = Painter(Setup(width=64, actions=10, work_dir=tmp_path / "sessions", judge=False), store, claude)
+    inst = make_instrument(PEN, "pen", painter.setup, store, painter.target.height)
+    prompt = Organism(node="painter", genome={"prompt": prompts.INITIAL_STRATEGY})
+    with pytest.raises(SessionFailed, match="stalled" if failure.endswith("STALL") else "terminated"):
+        painter.paint(inst, prompt)
+    [failed] = rows(store, "SELECT status, error FROM sessions")
+    assert failed["status"] == "error"
+    p = painter.paint(inst, prompt)  # nothing was cached: this is a whole new painting
+    assert p.viable and p.details["stats"]["tool_use"] == {"start": 2, "move": 2, "stop": 2}
+    assert p.details["stats"]["finished"]
+    store.close()
+
+
+def test_a_session_that_goes_quiet_is_killed_but_a_slow_one_that_talks_is_not(tmp_path):
+    import sys
+
+    from conveyor.harness import Job
+    from conveyor.harness import ProcessHarness
+
+    class Script(ProcessHarness):
+        name = "script"
+
+        def __init__(self, code, **kw):
+            super().__init__(model="m", effort=None, store=None, meter=Meter(), lanes=1, timeout=30, **kw)
+            self.code = code
+
+        def command(self, job):
+            return [sys.executable, "-u", "-c", self.code], b"", {}
+
+    chatty = ("import time, json\nfor i in range(6):\n time.sleep(0.4); print(json.dumps({'type':'assistant','message':"
+              "{'content':[]}}))\nprint(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'ok'}))")
+    silent = "import time; time.sleep(30)"
+    job = Job(purpose="x", system_prompt="", content=[], cwd=tmp_path)
+    ok = Script(chatty, stall_timeout=1.0).run(job)
+    assert ok.ok and not ok.interrupted  # 2.4s in all, never 1s without a word
+    cut = Script(silent, stall_timeout=1.0).run(job)
+    assert not cut.ok and cut.interrupted and cut.error.startswith("stalled") and cut.seconds < 10
+    assert Script(silent, stall_timeout=None).stall_timeout is None
 
 
 def test_recombine_sees_both_parents(env, monkeypatch):

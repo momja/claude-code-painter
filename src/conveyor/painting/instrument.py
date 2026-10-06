@@ -28,12 +28,31 @@ The module contract:
         pen.update(x=args["x"], y=args["y"], color=args["color"], down=True)
         return "pen down"                # optional: a short note the painter sees after the call
 
-Parameter types: number, integer (with `min`/`max`, which may be "width" or "height"), boolean, color (the tool
+    VIEWS = {                          # optional: 0 to 4 viewing tools, the painter's eyes on its own canvas
+        "detail": {"doc": "Look closely at (x, y): a window `span` px across.",
+                   "params": {"x": {"type": "number", "min": 0, "max": "width"},
+                              "y": {"type": "number", "min": 0, "max": "height"},
+                              "span": {"type": "number", "min": 16, "max": 256, "default": 64}}},
+    }
+
+    def detail(args, pen, canvas, rng):  # a view function returns canvas.view(...) and never paints
+        return canvas.view(args["x"], args["y"], args["span"])
+
+Parameter types: number, integer (with `min`/`max`, which may be "width", "height" or "radius" — the canvas's
+brush limit — or their negatives), boolean, color (the tool
 receives an (r, g, b) tuple in 0..1), choice (`options`), points (a list of [x, y], up to 64), numbers (a list of
 numbers, up to 64). A parameter with a `default` is optional.
 
-`pen` persists across every call of one painting. `canvas` is the only way to put paint down (see canvas.py).
-Tools never see the target.
+`pen` persists across every call of one painting. `canvas` is the only way to put paint down (see canvas.py),
+and `canvas.view(x, y, span, scale=4)` is the only way to show the painter a piece of it. Tools never see the
+target. A viewing call costs the painter no action and no look, and cannot change the painting: the canvas and
+the pen are put back after every view call.
+
+The painter may set a scope, a square window it then paints in with local coordinates. Scoped calls arrive
+with their canvas positions already shifted into place, so tool code never sees the scope. For the shift to
+treat a parameter as a position, bound it 0-based against the canvas (`max` of 'width'/'height' with no
+negative `min`); a symmetric bound ('-width' to 'width') marks a delta and is left alone, as are sizes
+('radius'), `points` are always positions. Keep positions 0-based and the tools paint scoped for free.
 
 The sandbox is not a security boundary. It stops a mutator from wandering into the filesystem or the MCP
 channel by accident: no imports, no classes, no try/raise, no underscored names, no print, and attributes only
@@ -64,19 +83,23 @@ import numpy as np
 from conveyor.painting.canvas import Canvas
 from conveyor.painting.canvas import CanvasError
 from conveyor.painting.canvas import PAPER
+from conveyor.painting.canvas import View
+from conveyor.painting.canvas import brush_limit
 from conveyor.painting.canvas import labelled_sheet
 from conveyor.painting.canvas import parse_color
 
 MAX_SOURCE = 12_000
 MAX_TOOLS = 8
+MAX_VIEWS = 4
 MAX_PARAMS = 8
 MAX_LIST_ITEMS = 64
 MAX_EXAMPLES = 6
 MAX_EXAMPLE_CALLS = 16
 MAX_DOC = 1500
 MAX_NOTE = 300
+MAX_VIEWS_PER_CALL = 4  # pictures one viewing call may return; each costs the painter tokens
 CALL_TIMEOUT = 1.0  # seconds of wall clock per tool call
-RESERVED = {"look", "finish"}
+RESERVED = {"look", "finish", "scope"}
 PARAM_TYPES = {"number", "integer", "boolean", "color", "choice", "points", "numbers"}
 TOOL_ARGS = ("args", "pen", "canvas", "rng")
 
@@ -105,7 +128,7 @@ NP_ATTRS = {
     "stack", "std", "sum", "tan", "tanh", "where", "zeros", "zeros_like", "max", "min", "median",
 }
 RNG_ATTRS = {"choice", "integers", "normal", "permutation", "random", "standard_normal", "uniform"}
-CANVAS_ATTRS = {"dab", "stamp", "smudge", "pick", "width", "height", "area_left", "max_radius"}
+CANVAS_ATTRS = {"dab", "stamp", "smudge", "pick", "view", "width", "height", "area_left", "max_radius"}
 VALUE_ATTRS = {
     # dict
     "get", "keys", "values", "items", "update", "pop", "setdefault", "copy", "clear",
@@ -176,7 +199,12 @@ class ParamSpec:
         if value is None:
             return None
         if isinstance(value, str):
-            return float({"width": width, "height": height}[value])
+            # Bounds may be written against the canvas, so one instrument reads right at any size: "width",
+            # "height", and "radius", the canvas's brush limit. "-width" and friends give the mirror bound,
+            # for deltas.
+            neg = value.startswith("-")
+            size = float({"width": width, "height": height, "radius": brush_limit(width, height)}[value.lstrip("-")])
+            return -size if neg else size
         return float(value)
 
     def json_schema(self, width: int, height: int) -> dict:
@@ -227,11 +255,12 @@ class ToolSpec:
 class Spec:
     doc: str
     tools: list[ToolSpec]
+    views: list[ToolSpec]
     state: dict
     examples: list[list[tuple[str, dict]]]
 
     def tool(self, name: str) -> ToolSpec:
-        for t in self.tools:
+        for t in [*self.tools, *self.views]:
             if t.name == name:
                 return t
         raise ToolError(f"no tool named {name!r}")
@@ -309,8 +338,12 @@ def _param(tool: str, name: str, raw: Any) -> ParamSpec:
     p = ParamSpec(name=name, type=kind, doc=str(raw.get("doc", ""))[:300])
     for k in ("min", "max"):
         v = raw.get(k)
-        if v is not None and not (isinstance(v, int | float) or v in ("width", "height")):
-            raise InstrumentError(f"parameter {where}: {k} must be a number, 'width' or 'height'")
+        ok = isinstance(v, int | float) or (isinstance(v, str)
+                                           and v.lstrip("-") in ("width", "height", "radius")
+                                           and v.count("-") == v.startswith("-"))
+        if v is not None and not ok:
+            raise InstrumentError(f"parameter {where}: {k} must be a number, 'width', 'height' or 'radius' "
+                                  f"(or their negatives)")
         setattr(p, k, v)
     if kind == "choice":
         opts = raw.get("options")
@@ -327,6 +360,29 @@ def _param(tool: str, name: str, raw: Any) -> ParamSpec:
     return p
 
 
+def _tool_spec(kind: str, name: str, raw: Any, fns: dict[str, Callable]) -> ToolSpec:
+    """One entry of TOOLS or VIEWS: name, docs, parameters, and the function behind it."""
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", name):
+        raise InstrumentError(f"tool name {name!r}: use lowercase letters, digits and underscores")
+    if name in RESERVED:
+        raise InstrumentError(f"tool name {name!r} is taken by the harness")
+    if not isinstance(raw, dict):
+        raise InstrumentError(f"{kind}[{name!r}] must be a dict with 'doc' and 'params'")
+    params_raw = raw.get("params", {})
+    if not isinstance(params_raw, dict):
+        raise InstrumentError(f"{kind}[{name!r}]['params'] must be a dict")
+    if len(params_raw) > MAX_PARAMS:
+        raise InstrumentError(f"tool {name} has {len(params_raw)} parameters, limit {MAX_PARAMS}")
+    fn = fns.get(name)
+    if fn is None:
+        raise InstrumentError(f"tool {name} has no function `def {name}(args, pen, canvas, rng)`")
+    got = fn.__code__.co_varnames[: fn.__code__.co_argcount]
+    if tuple(got) != TOOL_ARGS:
+        raise InstrumentError(f"`def {name}` must take (args, pen, canvas, rng), got ({', '.join(got)})")
+    return ToolSpec(name=name, doc=str(raw.get("doc", ""))[:600],
+                    params=[_param(name, k, v) for k, v in params_raw.items()])
+
+
 def _spec(tree: ast.Module, fns: dict[str, Callable]) -> Spec:
     doc = ast.get_docstring(tree) or ""
     if len(doc) > MAX_DOC:
@@ -336,27 +392,16 @@ def _spec(tree: ast.Module, fns: dict[str, Callable]) -> Spec:
         raise InstrumentError("define TOOLS = {name: {'doc': ..., 'params': {...}}} with at least one tool")
     if len(tools_raw) > MAX_TOOLS:
         raise InstrumentError(f"{len(tools_raw)} tools, limit {MAX_TOOLS}")
-    tools = []
-    for name, raw in tools_raw.items():
-        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", name):
-            raise InstrumentError(f"tool name {name!r}: use lowercase letters, digits and underscores")
-        if name in RESERVED:
-            raise InstrumentError(f"tool name {name!r} is taken by the harness")
-        if not isinstance(raw, dict):
-            raise InstrumentError(f"TOOLS[{name!r}] must be a dict with 'doc' and 'params'")
-        params_raw = raw.get("params", {})
-        if not isinstance(params_raw, dict):
-            raise InstrumentError(f"TOOLS[{name!r}]['params'] must be a dict")
-        if len(params_raw) > MAX_PARAMS:
-            raise InstrumentError(f"tool {name} has {len(params_raw)} parameters, limit {MAX_PARAMS}")
-        fn = fns.get(name)
-        if fn is None:
-            raise InstrumentError(f"tool {name} has no function `def {name}(args, pen, canvas, rng)`")
-        got = fn.__code__.co_varnames[: fn.__code__.co_argcount]
-        if tuple(got) != TOOL_ARGS:
-            raise InstrumentError(f"`def {name}` must take (args, pen, canvas, rng), got ({', '.join(got)})")
-        tools.append(ToolSpec(name=name, doc=str(raw.get("doc", ""))[:600],
-                              params=[_param(name, k, v) for k, v in params_raw.items()]))
+    tools = [_tool_spec("TOOLS", name, raw, fns) for name, raw in tools_raw.items()]
+    views_raw = _literal(tree, "VIEWS", {})
+    if not isinstance(views_raw, dict):
+        raise InstrumentError("VIEWS must be a dict of viewing tools, or left out")
+    if len(views_raw) > MAX_VIEWS:
+        raise InstrumentError(f"{len(views_raw)} viewing tools, limit {MAX_VIEWS}")
+    for name in views_raw:
+        if name in tools_raw:
+            raise InstrumentError(f"viewing tool {name!r} is already a tool name")
+    views = [_tool_spec("VIEWS", name, raw, fns) for name, raw in views_raw.items()]
     state = _literal(tree, "STATE", {})
     if not isinstance(state, dict):
         raise InstrumentError("STATE must be a dict")
@@ -376,11 +421,99 @@ def _spec(tree: ast.Module, fns: dict[str, Callable]) -> Spec:
             if not (isinstance(call, list | tuple) and len(call) == 2 and isinstance(call[0], str)
                     and isinstance(call[1], dict)):
                 raise InstrumentError(f"EXAMPLES[{i}][{j}] must be [tool_name, {{args}}]")
+            if call[0] in views_raw:
+                raise InstrumentError(f"EXAMPLES[{i}][{j}] calls the viewing tool {call[0]!r}; examples show what "
+                                      "the drawing tools draw")
             if call[0] not in tools_raw:
                 raise InstrumentError(f"EXAMPLES[{i}][{j}] calls unknown tool {call[0]!r}")
             calls.append((call[0], dict(call[1])))
         examples.append(calls)
-    return Spec(doc=doc, tools=tools, state=state, examples=examples)
+    return Spec(doc=doc, tools=tools, views=views, state=state, examples=examples)
+
+
+def _tool_lines(t: ToolSpec, width: int, height: int) -> list[str]:
+    lines = [f"- {t.name}: {t.doc}"]
+    for p in t.params:
+        lo, hi = p.bound(p.min, width, height), p.bound(p.max, width, height)
+        rng_text = f" {lo:g} to {hi:g}" if lo is not None and hi is not None else ""
+        opt = f" (default {json.dumps(p.default)})" if p.has_default else ""
+        choices = f" one of {p.options}" if p.type == "choice" else ""
+        lines.append(f"    {p.name}: {p.type}{rng_text}{choices}{opt}. {p.doc}".rstrip(". ") + ".")
+    return lines
+
+
+def _views_from(out: Any, tool: str) -> tuple[list[View], str]:
+    """What a view function may return: a view, a list of views, or either of those with a note."""
+    note = ""
+    if isinstance(out, tuple) and len(out) == 2 and isinstance(out[1], str):
+        out, note = out
+    if isinstance(out, View):
+        views = [out]
+    elif isinstance(out, list | tuple) and out and all(isinstance(v, View) for v in out):
+        views = list(out)
+    else:
+        raise ToolError(f"{tool}: a view function must return canvas.view(...) or a list of views, got "
+                        f"{type(out).__name__}")
+    if len(views) > MAX_VIEWS_PER_CALL:
+        raise ToolError(f"{tool}: {len(views)} views in one call, limit {MAX_VIEWS_PER_CALL}")
+    return views, note[:MAX_NOTE]
+
+
+def _scoped_args(spec: ToolSpec, raw_args: Any, scope: tuple[int, int, int, int]) -> Any:
+    """
+    Shift a scoped call's local coordinates into canvas coordinates. `scope` is the active window's
+    (x0, y0, x1, y1); local (0, 0) is its top-left corner. Only canvas positions move: a number/integer
+    whose range is 0-based against the canvas (`max` of 'width'/'height' with no negative `min`) is an
+    absolute position and gains the window's origin, and `points` are positions by definition. Deltas
+    (`min` of '-width'/'-height'), sizes ('radius'), angles, colours and everything else pass through
+    unchanged, so instruments must keep positions 0-based for their tools to paint scoped. Anything the
+    shift pushes past the canvas edge is clamped into range by coercion, like any other call.
+    """
+    if not isinstance(raw_args, dict):
+        return raw_args
+    x0, y0, _, _ = scope
+    out = dict(raw_args)
+    for p in spec.params:
+        if p.name not in out or out[p.name] is None:
+            continue
+        value = out[p.name]
+        if p.type in ("number", "integer") and p.max in ("width", "height") and p.min in (None, 0):
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                continue
+            out[p.name] = value + (x0 if p.max == "width" else y0)
+        elif p.type == "points" and isinstance(value, list | tuple):
+            shifted = []
+            for item in value:
+                try:
+                    x, y = (float(c) for c in item)
+                except (TypeError, ValueError):
+                    shifted.append(item)
+                    continue
+                shifted.append([x + x0, y + y0])
+            out[p.name] = shifted
+    return out
+
+
+def synth_args(params: list[ParamSpec], width: int, height: int) -> dict:
+    """Arguments no one chose: what the probe calls a viewing tool with, one in-range value per parameter."""
+    out: dict[str, Any] = {}
+    for p in params:
+        if p.has_default:
+            out[p.name] = p.default
+        elif p.type in ("number", "integer"):
+            lo, hi = p.bound(p.min, width, height), p.bound(p.max, width, height)
+            out[p.name] = (0.0 if lo is None or hi is None else (lo + hi) / 2)
+        elif p.type == "boolean":
+            out[p.name] = False
+        elif p.type == "color":
+            out[p.name] = "#000000"
+        elif p.type == "choice":
+            out[p.name] = p.options[0]
+        elif p.type == "points":
+            out[p.name] = [[width / 2, height / 2]]
+        else:
+            out[p.name] = [0.0]
+    return out
 
 
 class Instrument:
@@ -485,8 +618,10 @@ class Instrument:
     # ---- calling ------------------------------------------------------------------------------------------
 
     def call(self, tool: str, raw_args: Any, pen: dict, canvas: Canvas, rng: np.random.Generator,
-             timeout: float = CALL_TIMEOUT) -> str:
+             timeout: float = CALL_TIMEOUT, scope: tuple[int, int, int, int] | None = None) -> str:
         """Run one tool call. Returns the tool's note ('' if none). Raises ToolError."""
+        if scope is not None:
+            raw_args = _scoped_args(self.spec.tool(tool), raw_args, scope)
         args = self.coerce(tool, raw_args, canvas.width, canvas.height)
         canvas.begin_call()
         try:
@@ -500,21 +635,47 @@ class Instrument:
             raise ToolError(f"{tool} raised {type(e).__name__}: {e}") from e
         return "" if note is None else str(note)[:MAX_NOTE]
 
+    def view(self, tool: str, raw_args: Any, pen: dict, canvas: Canvas, rng: np.random.Generator,
+             timeout: float = CALL_TIMEOUT) -> tuple[list[View], str]:
+        """
+        Run one viewing call and return the views it asked for, plus its note. A view call is read-only by
+        construction: whatever it does, the canvas and the pen are put back before anyone sees the result.
+        """
+        args = self.coerce(tool, raw_args, canvas.width, canvas.height)
+        before, pen_before = canvas.snapshot(), copy.deepcopy(pen)
+        canvas.begin_call()
+        try:
+            with deadline(timeout), np.errstate(all="ignore"):
+                out = self.fns[tool](args, pen, canvas, rng)
+        except ToolTimeout:
+            raise
+        except (CanvasError, ToolError) as e:
+            raise ToolError(f"{tool}: {e}") from e
+        except Exception as e:  # noqa: BLE001 - the tool is the instrument's code, not ours
+            raise ToolError(f"{tool} raised {type(e).__name__}: {e}") from e
+        finally:
+            canvas.restore(before)
+            pen.clear()
+            pen.update(pen_before)
+        return _views_from(out, tool)
+
     def mcp_tools(self, width: int, height: int) -> list[dict]:
         return [{"name": t.name, "description": t.doc, "inputSchema": t.json_schema(width, height)}
                 for t in self.spec.tools]
+
+    def mcp_views(self, width: int, height: int) -> list[dict]:
+        return [{"name": t.name, "description": t.doc, "inputSchema": t.json_schema(width, height)}
+                for t in self.spec.views]
 
     def reference(self, width: int, height: int) -> str:
         """The instrument as the painter reads it: its docstring, then every tool and parameter."""
         lines = [self.spec.doc.strip() or "(no description)", ""]
         for t in self.spec.tools:
-            lines.append(f"- {t.name}: {t.doc}")
-            for p in t.params:
-                lo, hi = p.bound(p.min, width, height), p.bound(p.max, width, height)
-                rng_text = f" {lo:g} to {hi:g}" if lo is not None and hi is not None else ""
-                opt = f" (default {json.dumps(p.default)})" if p.has_default else ""
-                choices = f" one of {p.options}" if p.type == "choice" else ""
-                lines.append(f"    {p.name}: {p.type}{rng_text}{choices}{opt}. {p.doc}".rstrip(". ") + ".")
+            lines += _tool_lines(t, width, height)
+        if self.spec.views:
+            lines += ["", "Viewing tools (free: no action, no look, and they never change the painting):"]
+            for t in self.spec.views:
+                lines += _tool_lines(t, width, height)
         return "\n".join(lines)
 
 
@@ -561,6 +722,7 @@ def static_traits(inst: Instrument) -> dict:
     list_params = any(p.type in ("points", "numbers") for t in inst.spec.tools for p in t.params)
     return {
         "n_tools": len(tool_names),
+        "n_views": len(inst.spec.views),
         "max_params": max((len(t.params) for t in inst.spec.tools), default=0),
         "stateful": writes_state,
         "list_params": list_params,
@@ -663,11 +825,25 @@ def probe(source: str, width: int, height: int, seed: int = 0) -> dict:
     if not painted_any and not report["errors"]:
         report["errors"].append("no example laid any paint, so there is nothing to show the painter")
     traits["reach"] = float(np.median(reaches)) if reaches else None
+    # Viewing tools get the same chance: called once with arbitrary in-range arguments, on a blank canvas, and
+    # refused if they raise or return no view. A painter meets them cold, so a view that only works on some
+    # arguments is a broken tool.
+    for t in inst.spec.views:
+        canvas = Canvas(height, width)
+        pen = inst.new_state()
+        try:
+            views, _ = inst.view(t.name, synth_args(t.params, width, height), pen, canvas, np.random.default_rng(seed))
+        except ToolError as e:
+            report["errors"].append(f"view {t.name} failed its probe call: {e}")
+            continue
+        if not views:
+            report["errors"].append(f"view {t.name} returned no view")
     report["traits"] = traits
     report["niche"] = niche_of(traits)
     report["sheet"] = labelled_sheet(cells)
     report["ok"] = not report["errors"]
     report["tools"] = [{"name": t.name, "params": [p.name for p in t.params]} for t in inst.spec.tools]
+    report["views"] = [{"name": t.name, "params": [p.name for p in t.params]} for t in inst.spec.views]
     return report
 
 

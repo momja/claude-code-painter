@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from conveyor.harness import Job
+from conveyor.harness import SessionFailed
 from conveyor.harness import ProcessHarness
 from conveyor.store import new_id
 
@@ -86,6 +87,8 @@ class ClaudeJudge:
             node="judge", organism_id=organism_id))
         out = outcome.structured if isinstance(outcome.structured, dict) else _json_in(outcome.result)
         if not out or any(not isinstance(out.get(c), int | float) for c in CRITERIA):
+            if outcome.interrupted:
+                raise SessionFailed(f"the judge's session ended early: {outcome.error}")
             raise JudgeError(f"the judge returned no usable verdict ({outcome.error or outcome.result[:200]!r})")
         scores = {c: int(min(10, max(1, round(float(out[c]))))) for c in CRITERIA}
         return Verdict(scores=scores, critique=str(out.get("critique", "")).strip()[:1500],

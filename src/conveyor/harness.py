@@ -39,6 +39,7 @@ from typing import Any
 from conveyor.store import Store
 from conveyor.store import new_id
 
+DEFAULT_STALL_TIMEOUT = 600.0  # seconds of silence from a session before it is killed as stalled
 HARD_CAP_MULTIPLE = 1.25  # past budget x this, no new session starts
 RESET_GRACE = 60.0  # seconds a waiting run gives a window past its reported reset, in case the clocks disagree
 
@@ -53,6 +54,11 @@ class RateLimited(RuntimeError):
 
 class SessionCutOff(RateLimited):
     """A usage limit ended a session partway. Its work is incomplete, so its job should run again, not count."""
+
+
+class SessionFailed(RuntimeError):
+    """A session ended early for a reason that says nothing about the work: a stalled or dropped stream, a crash,
+    a timeout. Its job should run again, and if it keeps failing it counts as no result, not as a bad one."""
 
 
 @dataclass
@@ -86,6 +92,13 @@ class Outcome:
     structured: Any = None
     seconds: float = 0.0
     tool_calls: int = 0
+
+    @property
+    def interrupted(self) -> bool:
+        """Cut off by something outside the work (a stall, a dropped stream, a crash, a timeout), as opposed to
+        finishing, being stopped on purpose, or hitting the spend cap."""
+        return not self.ok and bool(self.error) and self.error != "stopped" \
+            and not self.error.startswith("error_max_budget_usd")
 
 
 class Meter:
@@ -234,8 +247,12 @@ class ProcessHarness:
     name = "process"
 
     def __init__(self, *, model: str, effort: str | None, store: Store | None, meter: Meter | None, lanes: int,
-                 timeout: float) -> None:
+                 timeout: float, stall_timeout: float | None = DEFAULT_STALL_TIMEOUT) -> None:
+        """`stall_timeout`: kill a session that prints nothing for this many seconds (None: only `timeout` applies).
+        A provider can accept a request and then say nothing until the connection drops, which otherwise holds a
+        lane for the whole `timeout`. The clock is monotonic, so a laptop asleep doesn't count against it."""
         self.model = model
+        self.stall_timeout = stall_timeout
         self.effort = effort
         self.store = store
         self.meter = meter or Meter()
@@ -321,11 +338,22 @@ class ProcessHarness:
         timed_out = threading.Event()
         proc_done = threading.Event()
         limit = job.timeout or self.timeout
+        stalled = threading.Event()
+        last_seen = [time.monotonic()]
+        tick = min(5.0, max(0.05, (self.stall_timeout or 20.0) / 4))
 
         def watchdog() -> None:
-            if not proc_done.wait(limit):
-                timed_out.set()
-                _kill(proc)
+            deadline = time.monotonic() + limit
+            while not proc_done.wait(tick):
+                now = time.monotonic()
+                if now >= deadline:
+                    timed_out.set()
+                    _kill(proc)
+                    return
+                if self.stall_timeout and now - last_seen[0] >= self.stall_timeout:
+                    stalled.set()
+                    _kill(proc)
+                    return
 
         threading.Thread(target=watchdog, daemon=True).start()
         try:
@@ -336,6 +364,7 @@ class ProcessHarness:
         got_result = False
         try:
             for raw in proc.stdout:
+                last_seen[0] = time.monotonic()
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
@@ -354,6 +383,8 @@ class ProcessHarness:
         tail = b"".join(stderr).decode(errors="replace")[-1500:]
         if timed_out.is_set():
             out.ok, out.error = False, f"timed out after {limit:.0f}s"
+        elif stalled.is_set():
+            out.ok, out.error = False, f"stalled: nothing from the model for {self.stall_timeout:.0f}s"
         elif self._stopping.is_set() and not got_result:
             out.ok, out.error = False, "stopped"
         elif not got_result:
@@ -437,7 +468,8 @@ class ProcessHarness:
         elif kind == "system" and sub in ("thinking_tokens",):
             pass  # an estimate that streams many times a second; the result has the real count
         else:
-            self._event(sid, "other", {"type": kind, "subtype": sub})
+            extra = {k: v for k, v in msg.items() if k not in ("type", "subtype")} if kind == "system" else {}
+            self._event(sid, "other", {"type": kind, "subtype": sub, **extra})
         return False
 
 

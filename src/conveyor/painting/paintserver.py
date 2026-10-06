@@ -35,6 +35,8 @@ from conveyor.painting.canvas import gridded_png
 from conveyor.painting.canvas import load_target
 from conveyor.painting.canvas import to_hex
 from conveyor.painting.canvas import to_png
+from conveyor.painting.canvas import view_patch
+from conveyor.painting.canvas import view_png
 from conveyor.painting.critic import Critic
 from conveyor.painting.instrument import Instrument
 from conveyor.painting.instrument import ToolError
@@ -54,6 +56,8 @@ class PaintSession:
         self.rng = np.random.default_rng(job.get("seed", 0))
         self.actions_left = int(job.get("actions", 200))
         self.looks_left = int(job.get("looks", 8))
+        self.scope_rect: tuple[int, int, int, int] | None = None  # active window (x0, y0, x1, y1), or whole-canvas
+        self.scope_enabled = bool(job.get("scope", False))
         self.snapshot_every = int(job.get("snapshot_every", 5))
         self.applied = 0
         self.rejected = 0
@@ -109,7 +113,7 @@ class PaintSession:
         pen_before = copy.deepcopy(self.pen)
         started = time.perf_counter()
         try:
-            note = self.inst.call(tool, args, self.pen, self.canvas, self.rng)
+            note = self.inst.call(tool, args, self.pen, self.canvas, self.rng, scope=self.scope_rect)
         except ToolError as e:
             # Nothing a failed call did should stick: not half a stroke, not a half-updated pen.
             self.canvas.restore(before)
@@ -138,12 +142,16 @@ class PaintSession:
                      error_before=round(old, 2), error_after=round(self.error, 2), score_before=round(old_score, 4),
                      score_after=round(self.score, 4), area=self.canvas.area_used,
                      dry=self.canvas.dry, actions_left=self.actions_left, pen=self._pen_text(), snapshot=snap,
+                     scope=list(self.scope_rect) if self.scope_rect else None,
                      ms=round((time.perf_counter() - started) * 1000, 1))
         parts = [f"score {self.score:.4f} ({self.score - old_score:+.4f}), pixel error {self.error:.1f} ({self.error - old:+.1f})"]
         if note:
             parts.append(note[:1].upper() + note[1:])
         if self.canvas.dry and "dry" not in note:
             parts.append("The call hit its area limit and stopped early")
+        if self.scope_rect is not None:
+            x0, y0, x1, y1 = self.scope_rect
+            parts.append(f"Scope is x {x0}-{x1}, y {y0}-{y1}: that call's coordinates were local")
         parts.append("That was your last action. Call finish with your note" if last
                      else f"{self.actions_left} actions left")
         return ". ".join(p.rstrip(". ") for p in parts) + "."
@@ -151,18 +159,91 @@ class PaintSession:
     def status(self) -> str:
         sc = self.scores
         style = ", ".join(f"{k} {v:.2f}" for k, v in sc["style_distance"].items())
-        return (f"{self.applied} actions used, {self.actions_left} left, {self.looks_left} looks left.\n"
+        scope = "" if self.scope_rect is None else f" Scope is x {self.scope_rect[0]}-{self.scope_rect[2]}, y {self.scope_rect[1]}-{self.scope_rect[3]}."
+        return (f"{self.applied} actions used, {self.actions_left} left, {self.looks_text()}.{scope}\n"
                 f"Score {sc['total']:.4f}: pixel match {sc['pixel']:.3f} (60%), texture and palette match "
                 f"{sc['style']:.3f} (40%; distances from the target, 0 is a match: {style}). "
                 f"Pixel error {self.error:.1f}.\n" + error_table(self.canvas.img, self.target))
 
+    def looks_text(self) -> str:
+        return "unlimited looks" if self.looks_left < 0 else f"{self.looks_left} looks left"
+
     def look(self, tool_use_id: str | None = None) -> tuple[str, bytes]:
-        if self.looks_left <= 0:
+        if self.looks_left == 0:
             raise ToolFailure("No looks left. Keep painting from the score each call returns.")
-        self.looks_left -= 1
+        if self.looks_left > 0:
+            self.looks_left -= 1
         self._record(tool="look", tool_use_id=tool_use_id, status="applied", looks_left=self.looks_left,
                      error_after=round(self.error, 2), score_after=round(self.score, 4))
         return self.status(), gridded_png(self.canvas.img)
+
+    def view(self, tool: str, args: dict, tool_use_id: str | None = None) -> tuple[str, list[bytes]]:
+        """
+        One of the instrument's viewing calls. Free: no action, no look, and the painting cannot change under
+        one. The text says where the window was and how it fares against the target; the pictures are the views.
+        """
+        started = time.perf_counter()
+        try:
+            views, note = self.inst.view(tool, args, self.pen, self.canvas, self.rng)
+        except ToolError as e:
+            self.rejected += 1
+            self._record(tool=tool, tool_use_id=tool_use_id, args=args, status="rejected", error=str(e),
+                         ms=round((time.perf_counter() - started) * 1000, 1))
+            if self.rejected >= MAX_REJECTS:
+                self.finished = True
+                raise ToolFailure(f"{e}. Too many refused calls; the painting has been ended.")
+            raise ToolFailure(f"{e}. No action was used.")
+        self._record(tool=tool, tool_use_id=tool_use_id, args=args, status="view", note=note,
+                     views=[list(v.rect) for v in views], error_after=round(self.error, 2),
+                     score_after=round(self.score, 4), actions_left=self.actions_left,
+                     ms=round((time.perf_counter() - started) * 1000, 1))
+        parts = []
+        if note:
+            parts.append(note)
+        for v in views:
+            parts.append(f"Window x {v.x0}-{v.x1}, y {v.y0}-{v.y1}, at {v.scale} image px per canvas px.\n"
+                         + error_table(self.canvas.img, self.target, rect=v.rect, patch=view_patch(v.span)))
+        parts.append(f"Free view: no action and no look used. Score {self.score:.4f}, pixel error {self.error:.1f}. "
+                     f"{self.actions_left} actions left, {self.looks_text()}.")
+        return "\n\n".join(parts), [view_png(v) for v in views]
+
+    def scope(self, args: dict, tool_use_id: str | None = None) -> tuple[str, list[bytes]]:
+        """
+        Set or clear the painting scope, the window later paint calls address in local coordinates.
+        Free: no action, no look, and the painting cannot change under one. `clear` drops the scope;
+        otherwise (x, y, span) centres a square window like a view. The picture comes back labelled from
+        the window's own corner, so the painter reads local coordinates straight off it.
+        """
+        started = time.perf_counter()
+        ms = lambda: round((time.perf_counter() - started) * 1000, 1)
+        if args.get("clear") in (True, "true", "1", 1):
+            self.scope_rect = None
+            self._record(tool="scope", tool_use_id=tool_use_id, args=args, status="scope", scope=None,
+                         error_after=round(self.error, 2), score_after=round(self.score, 4),
+                         actions_left=self.actions_left, ms=ms())
+            return (f"Scope cleared: coordinates are canvas pixels again. Score {self.score:.4f}, pixel "
+                    f"error {self.error:.1f}. {self.actions_left} actions left.", [])
+        try:
+            x = float(args.get("x", self.canvas.width / 2))
+            y = float(args.get("y", self.canvas.height / 2))
+            span = float(args.get("span", 64))
+            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(span)):
+                raise ValueError
+        except (TypeError, ValueError):
+            raise ToolFailure("scope needs numbers for x, y and span, or clear for the whole canvas.")
+        v = self.canvas.view(x, y, span)
+        self.scope_rect = v.rect
+        x0, y0, x1, y1 = v.rect
+        side = x1 - x0
+        self._record(tool="scope", tool_use_id=tool_use_id, args=args, status="scope", scope=list(v.rect),
+                     error_after=round(self.error, 2), score_after=round(self.score, 4),
+                     actions_left=self.actions_left, ms=ms())
+        png = gridded_png(v.img, scale=v.scale, x0=x0, y0=y0, lx0=x0, ly0=y0)
+        return (f"Scope is x {x0}-{x1}, y {y0}-{y1}: until cleared, paint calls take local coordinates 0-{side}, "
+                f"where local (0, 0) is canvas ({x0}, {y0}). Deltas, sizes and angles are unchanged.\n"
+                + error_table(self.canvas.img, self.target, rect=v.rect, patch=view_patch(side))
+                + f"\n\nFree: no action and no look used. Score {self.score:.4f}, pixel error {self.error:.1f}. "
+                f"{self.actions_left} actions left, {self.looks_text()}.", [png])
 
     def finish(self, note: str, tool_use_id: str | None = None) -> str:
         if self.finished:
@@ -184,9 +265,23 @@ class PaintServer(StdioServer):
 
     def tools(self) -> list[dict]:
         w, h = self.s.canvas.width, self.s.canvas.height
-        return self.s.inst.mcp_tools(w, h) + [
-            {"name": "look", "description": "See the canvas as it is now, with the score's parts and the pixel error "
-             "for each region. Limited: the status line says how many looks are left.",
+        tools = self.s.inst.mcp_tools(w, h) + self.s.inst.mcp_views(w, h)
+        if self.s.scope_enabled:
+            tools.append({
+                "name": "scope",
+                "description": "Paint in a window: set a scope centred on (x, y), `span` canvas px across, "
+                "and later paint calls take local coordinates from its top-left corner until cleared. "
+                "Free: no action, no look, and the painting cannot change under one.",
+                "inputSchema": {"type": "object", "properties": {
+                    "x": {"type": "number", "description": "Centre x in canvas pixels."},
+                    "y": {"type": "number", "description": "Centre y in canvas pixels."},
+                    "span": {"type": "number", "description": "Window width in canvas px."},
+                    "clear": {"type": "boolean", "description": "Drop the scope; coordinates are "
+                    "canvas pixels again."}}},
+            })
+        return tools + [
+            {"name": "look", "description": "See the whole canvas as it is now, with the score's parts and the "
+             "pixel error for each region. Usually limited: the status line says how many looks are left.",
              "inputSchema": {"type": "object", "properties": {}}},
             {"name": "finish", "description": "End the painting. Say what the target needed that these tools "
              "could not do, and which tool behaviour was hard to control. The instrument's designer reads it.",
@@ -200,6 +295,14 @@ class PaintServer(StdioServer):
             return [text(status), image(png)]
         if name == "finish":
             return [text(self.s.finish(args.get("note", ""), tool_use_id))]
+        if name in {v.name for v in self.s.inst.spec.views}:
+            status, pngs = self.s.view(name, args, tool_use_id)
+            return [text(status), *(image(p) for p in pngs)]
+        if name == "scope":
+            if not self.s.scope_enabled:
+                raise ToolFailure("No tool named scope.")
+            status, pngs = self.s.scope(args, tool_use_id)
+            return [text(status), *(image(p) for p in pngs)]
         if name not in {t.name for t in self.s.inst.spec.tools}:
             raise ToolFailure(f"No tool named {name}.")
         return [text(self.s.apply(name, args, tool_use_id))]

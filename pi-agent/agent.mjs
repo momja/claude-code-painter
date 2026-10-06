@@ -10,7 +10,13 @@
 // `respond` tool whose parameters are the job's JSON schema.
 
 import { spawn } from "node:child_process";
-import { Agent } from "@earendil-works/pi-agent-core";
+import {
+	Agent,
+	BACKGROUND_CONTEXT,
+	COMPACTION_SUMMARY_PREFIX,
+	COMPACTION_SUMMARY_SUFFIX,
+	generateSummaryWithUsage,
+} from "@earendil-works/pi-agent-core";
 import {
 	createModels,
 	fauxAssistantMessage,
@@ -189,6 +195,84 @@ function fauxMessage(response) {
 	return fauxAssistantMessage(blocks, { stopReason });
 }
 
+// Compaction after N looks. Pi's own compaction waits for the context window to fill, which these runs rarely
+// reach: a provider cuts the stream off or limits images first. So the sidecar compacts on a count instead. Once
+// `everyLooks` canvas views (tool results holding an image) have piled up since the last compaction, everything
+// before the most recent look is summarized to text (the summarizer drops images) and replaced by that summary.
+// The first message (the task and the target) and the newest look onward stay as they are.
+const COMPACT_INSTRUCTIONS =
+	"This is a painter's working history. Keep what it needs to carry on: the plan, which regions are done and " +
+	"which are not, the colours and sizes that worked, mistakes to avoid, and the latest score with the actions and " +
+	"looks left. Leave out per-stroke detail.";
+
+function looksIn(messages) {
+	return messages.filter(
+		(m) => m.role === "toolResult" && Array.isArray(m.content) && m.content.some((b) => b.type === "image"),
+	).length;
+}
+
+// Where to cut: the start of the assistant turn that made the newest look, so the tail keeps that look and every
+// tool call keeps its result. -1 when there is no such turn after `from`.
+function cutBeforeLastLook(messages, from) {
+	let look = -1;
+	for (let i = messages.length - 1; i >= from; i--) {
+		const m = messages[i];
+		if (m.role === "toolResult" && Array.isArray(m.content) && m.content.some((b) => b.type === "image")) {
+			look = i;
+			break;
+		}
+	}
+	for (let i = look; i > from; i--) if (messages[i].role === "assistant") return i;
+	return -1;
+}
+
+function makeCompactor({ models, model, everyLooks, headers, reserveTokens, onSummary }) {
+	let boundary = 1; // messages[1..boundary) are summarized; messages[boundary..] are live
+	let summary = null;
+	let broken = false;
+	// The summary request is a plain completion; this wrapper adds the provider's session header to it.
+	const withHeaders = {
+		completeSimple: (m, aiContext, options) =>
+			models.completeSimple(m, aiContext, { ...options, headers: { ...options?.headers, ...headers } }),
+	};
+	const view = (messages) =>
+		summary === null
+			? messages
+			: [
+					messages[0],
+					{ role: "user", content: COMPACTION_SUMMARY_PREFIX + summary + COMPACTION_SUMMARY_SUFFIX, timestamp: Date.now() },
+					...messages.slice(boundary),
+				];
+	return async (messages) => {
+		if (broken || messages.length <= boundary) return view(messages);
+		try {
+			if (looksIn(messages.slice(boundary)) < everyLooks) return view(messages);
+			const cut = cutBeforeLastLook(messages, boundary);
+			if (cut <= boundary) return view(messages);
+			const result = await generateSummaryWithUsage(
+				messages.slice(boundary, cut),
+				withHeaders,
+				model,
+				reserveTokens,
+				COMPACT_INSTRUCTIONS,
+				summary ?? undefined,
+				undefined,
+				undefined,
+				undefined,
+				BACKGROUND_CONTEXT,
+			);
+			if (!result.ok) throw new Error(result.error?.message || String(result.error));
+			summary = result.value.text;
+			onSummary({ summarized: cut - boundary, kept: messages.length - cut, chars: summary.length, usage: result.value.usage });
+			boundary = cut;
+		} catch (error) {
+			broken = true; // one failure and we stop trying; the image trim still holds the request down
+			log(`compaction failed, continuing without it: ${error?.message || error}`);
+		}
+		return view(messages);
+	};
+}
+
 // ---- main ---------------------------------------------------------------------------------------------------
 
 async function main() {
@@ -269,16 +353,53 @@ async function main() {
 	let overBudget = false;
 	let lastText = "";
 	let lastError = null;
-	const usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, reasoning: 0 };
+	const usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, reasoning: 0, compactions: 0 };
 
-	const streamFn = (m, context, options) =>
-		models.streamSimple(m, context, {
+	// One line per request, so a stalled session shows what it was waiting on: how much it had sent, and (once the
+	// request ends) how long the first byte took. A request that never ends leaves only its `request_start`.
+	let requestNo = 0;
+	let requestStart = 0;
+	let firstEventMs = null;
+	const streamFn = (m, context, options) => {
+		requestNo += 1;
+		requestStart = Date.now();
+		firstEventMs = null;
+		let images = 0;
+		let imageBytes = 0;
+		for (const msg of context.messages || []) {
+			if (!Array.isArray(msg.content)) continue;
+			for (const block of msg.content) {
+				if (block.type !== "image") continue;
+				images += 1;
+				imageBytes += (block.data || "").length;
+			}
+		}
+		emit({ type: "system", subtype: "request_start", request: requestNo, messages: (context.messages || []).length, images, image_bytes: imageBytes });
+		return models.streamSimple(m, context, {
 			...options,
 			maxTokens: cfg.maxTokens,
 			maxRetries: 3,
 			// OpenCode Go rejects a request without this header and routes on it; this pi-ai doesn't send it.
-			headers: cfg.sessionHeader ? { [cfg.sessionHeader]: cfg.sessionId } : undefined,
+			headers,
 		});
+	};
+
+	const headers = cfg.sessionHeader ? { [cfg.sessionHeader]: cfg.sessionId } : undefined;
+	const compact = cfg.compactEveryLooks
+		? makeCompactor({
+				models,
+				model,
+				everyLooks: cfg.compactEveryLooks,
+				headers,
+				reserveTokens: cfg.maxTokens || 16384,
+				onSummary: ({ summarized, kept, chars, usage }) => {
+					cost += usage?.cost?.total || 0;
+					usage.compactions += 1;
+					log(`compacted ${summarized} messages into ${chars} chars, kept ${kept}`);
+					emit({ type: "system", subtype: "compact_boundary", summarized, kept, summary_chars: chars });
+				},
+			})
+		: null;
 
 	const agent = new Agent({
 		initialState: {
@@ -288,16 +409,27 @@ async function main() {
 			tools,
 		},
 		streamFn,
-		transformContext: async (messages) => trimImages(messages, cfg.maxImages),
+		transformContext: async (messages) => trimImages(compact ? await compact(messages) : messages, cfg.maxImages),
 		sessionId: cfg.sessionId,
 		toolExecution: "sequential",
 		shouldStopAfterTurn: async () => stopRequested || overBudget || turn >= (cfg.maxTurns || 400),
 	});
 
 	agent.subscribe(async (event) => {
+		if (event.type === "message_update" && firstEventMs === null) firstEventMs = Date.now() - requestStart;
 		if (event.type === "message_end" && event.message?.role === "assistant") {
 			turn += 1;
 			const m = event.message;
+			emit({
+				type: "system",
+				subtype: "request_end",
+				request: requestNo,
+				first_event_ms: firstEventMs,
+				total_ms: Date.now() - requestStart,
+				stop_reason: m.stopReason,
+				error: m.errorMessage || null,
+				input_tokens: m.usage?.input || 0,
+			});
 			const u = m.usage || {};
 			usage.input_tokens += u.input || 0;
 			usage.output_tokens += u.output || 0;
@@ -361,6 +493,7 @@ async function main() {
 			cache_read_input_tokens: usage.cache_read_input_tokens,
 			cache_creation_input_tokens: usage.cache_creation_input_tokens,
 			output_tokens_details: { thinking_tokens: usage.reasoning },
+			compactions: usage.compactions,
 		},
 		result: lastText,
 		structured_output: structured,

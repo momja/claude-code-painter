@@ -9,6 +9,7 @@ from conveyor.evolve import Mutator
 from conveyor.evolve import Node
 from conveyor.evolve import Organism
 from conveyor.harness import SessionCutOff
+from conveyor.harness import SessionFailed
 from conveyor.store import Store
 
 NICHES = ["low", "high"]
@@ -203,3 +204,80 @@ def test_without_waiting_a_cut_off_stops_the_run_and_scores_nothing(store):
     conductor.run(2)
     assert conductor.stop_reason == "the claude usage limit ended a paint session partway"
     assert not conductor.pops["a"].evals
+
+
+def fails(evaluate, when):
+    """`evaluate`, but a session dies (a stall, a dropped stream) whenever `when(org, reason)`; counts every call."""
+    calls = []
+
+    def wrapped(org, partner, reason, sample=0):
+        calls.append((org.id, reason))
+        if when(org, reason):
+            raise SessionFailed("the painting session ended after 0 of 10 actions: stalled")
+        return evaluate(org, partner, reason, sample)
+    wrapped.calls = calls
+    return wrapped
+
+
+def test_a_session_that_dies_is_run_again(store):
+    ns = nodes([Nudge(3)], [Nudge(1)])
+    seen = []
+    ns[0].evaluate = fails(ns[0].evaluate, lambda org, reason: not seen.append(org.id) and len(seen) == 1)
+    conductor = Conductor(ns, store, lanes=1)
+    conductor.run(1)
+    assert conductor.stop_reason is None
+    store.flush()
+    import sqlite3
+    seed_evals = sqlite3.connect(store.path).execute(
+        "SELECT score, viable FROM evaluations WHERE organism_id=? AND reason='seed'", (ns[0].seeds[0].id,)).fetchall()
+    assert seed_evals == [(1.0, 1)]  # the failed try left nothing behind
+
+
+def test_a_child_whose_sessions_keep_dying_is_not_marked_non_viable(store):
+    ns = nodes([Nudge(3)], [Nudge(1)])
+    ns[0].evaluate = fails(ns[0].evaluate, lambda org, reason: org.genome["x"] == 4)
+    conductor = Conductor(ns, store, lanes=1)
+    conductor.run(1)
+    store.flush()
+    import sqlite3
+    db = sqlite3.connect(store.path)
+    children = [o for o in conductor.pops["a"].organisms.values() if o.genome["x"] == 4]
+    assert children
+    for child in children:
+        ev = conductor.pops["a"].evals[child.id]
+        assert ev.inconclusive and not ev.viable
+        [(viable,)] = db.execute("SELECT viable FROM organisms WHERE id=?", (child.id,)).fetchall()
+        assert viable is None  # never evaluated, which is not the same as no good
+    assert sum(1 for org_id, _ in ns[0].evaluate.calls if org_id == children[0].id) == 3  # once, then twice more
+    [(n_bad, n_none)] = db.execute(
+        "SELECT sum(json_extract(data, '$.n_nonviable')), sum(json_extract(data, '$.n_inconclusive')) "
+        "FROM events WHERE kind='iteration'").fetchall()
+    assert (n_bad, n_none) == (0, len(children))
+    assert conductor.champions["a"].genome["x"] == 1  # the seed stands; nothing was lost to the failures
+
+
+def test_a_rescore_whose_session_dies_leaves_the_champion_standing(store):
+    ns = nodes([Nudge(3)], [Nudge(1)])
+    ns[0].evaluate = fails(ns[0].evaluate, lambda org, reason: reason.startswith("rescore"))
+    conductor = Conductor(ns, store, lanes=1)
+    conductor.run(3)
+    store.flush()
+    import sqlite3
+    assert any(reason.startswith("rescore") for _, reason in ns[0].evaluate.calls)  # b's champion did change
+    assert conductor.champions["a"] is not None and conductor.pops["a"].champion() is not None
+    bad = sqlite3.connect(store.path).execute("SELECT count(*) FROM organisms WHERE node='a' AND viable=0").fetchone()
+    assert bad == (0,)
+
+
+def test_an_inconclusive_evaluation_changes_no_standing():
+    from conveyor.evolve import Population
+
+    org = Organism(node="a", genome={"x": 1})
+    pop = Population()
+    pop.add(org, Evaluation(organism_id=org.id, score=2.0))
+    pop.repeat(org.id, Evaluation(organism_id=org.id, score=4.0))
+    unknown = Evaluation(organism_id=org.id, score=0.0, viable=False, inconclusive=True)
+    pop.rescore(org.id, unknown)
+    pop.repeat(org.id, unknown)
+    assert pop.evals[org.id].score == 3.0 and pop.evals[org.id].viable and pop.count(org.id) == 2
+    assert pop.champion()[0] is org

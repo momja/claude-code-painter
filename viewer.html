@@ -444,14 +444,14 @@ function seek(p){
   // marker + color
   const m=$("#mark");m.innerHTML="";
   const xy=strokeXY(s?.args);
-  if(xy&&fr.url){const W=128,H=128;const[x,y]=xy;
+  if(xy&&fr.url){const W=img.naturalWidth||128,H=img.naturalHeight||128;const[x,y]=xy;
     if(x>=-W&&x<=2*W&&y>=-H&&y<=2*H){const d=document.createElement("div");d.className="dotmark";
       d.style.left=(x/W*100)+"%";d.style.top=(y/H*100)+"%";
       const col=s.args?.color;if(typeof col==="string"&&/^#/.test(col))d.style.color=col;else d.style.color="#2f4b8f";
       if(typeof col==="string"&&/^#/.test(col))d.style.background=col;
       m.appendChild(d);}}
   const col=s?.args?.color;
-  $("#strokeInfo").innerHTML=`<b>#${state.pos+1} ${esc(s?.tool||"")}</b> ${s?.status==="rejected"?'<span class="tag">rejected</span>':""} ${s?.snap?'<span class="tag">snapshot</span>':""}
+  $("#strokeInfo").innerHTML=`<b>#${state.pos+1} ${esc(s?.tool||"")}</b> ${s?.status==="rejected"?'<span class="tag">rejected</span>':""} ${s?.status==="view"?'<span class="tag">view · free</span>':""} ${s?.snap?'<span class="tag">snapshot</span>':""}
     ${typeof col==="string"?`<span class="swatch" style="background:${esc(col)}"></span><span class="mono">${esc(col)}</span>`:""}
     <span class="mono muted">${esc(compactArgs(s?.args).slice(0,180))}</span><br>
     <span class="${(s?.score_after-s?.score_before)>=0?"ok":"err"}">score ${fmt(s?.score_after)} (${(s?.score_after-s?.score_before)>=0?"+":""}${fmt((s?.score_after??0)-(s?.score_before??0),4)})</span>
@@ -472,7 +472,7 @@ function renderStrokes(){
     const d=(s.score_after??0)-(s.score_before??0);
     const col=s.args?.color;
     return `<tr class="clickable" data-i="${i}"><td class="num">${i+1}</td>
-      <td><b>${esc(s.tool||"")}</b>${s.snap?` <span class="tag">◉</span>`:""}${s.status==="rejected"?` <span class="tag">rejected</span>`:""}</td>
+      <td><b>${esc(s.tool||"")}</b>${s.snap?` <span class="tag">◉</span>`:""}${s.status==="rejected"?` <span class="tag">rejected</span>`:""}${s.status==="view"?` <span class="tag">view</span>`:""}</td>
       <td class="mono muted">${typeof col==="string"?`<span class="swatch" style="background:${esc(col)}"></span>`:""}${esc(compactArgs(s.args).slice(0,120))}</td>
       <td class="num ${d>=0?"ok":"err"}">${(d>=0?"+":"")}${fmt(d,3)}</td><td></td></tr>`;}).join("");
   $("#strokeRows").querySelectorAll("tr").forEach(tr=>tr.onclick=()=>{stop();seek(+tr.dataset.i);});

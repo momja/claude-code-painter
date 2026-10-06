@@ -37,7 +37,7 @@ def test_paint_server(tmp_path):
                                                    "looks": 1, "snapshot_every": 1}))
     c = Client("conveyor.painting.paintserver", tmp_path)
     names = [t["name"] for t in c.rpc("tools/list")["result"]["tools"]]
-    assert names == ["start", "move", "stop", "look", "finish"]
+    assert names == ["start", "move", "stop", "detail", "look", "finish"]
 
     bad = c.call("move", {"dx": "far"})
     assert bad["isError"] and "no action was used" in bad["content"][0]["text"]
@@ -46,6 +46,14 @@ def test_paint_server(tmp_path):
     r = c.call("move", {"dx": 20, "dy": 0}, "b")
     text = r["content"][0]["text"]
     assert text.startswith("score 0.") and "pixel error" in text and "load" in text
+    # The instrument's viewing tools are free: the window comes back gridded, and no action or look is spent.
+    v = c.call("detail", {"x": 32, "y": 32, "span": 16}, "v")
+    assert not v["isError"] and [b["type"] for b in v["content"]] == ["text", "image"]
+    vtext = v["content"][0]["text"]
+    assert "Free view: no action and no look used" in vtext and "1 actions left" in vtext
+    assert "x 24-40, y 24-40" in vtext  # the window is named in canvas pixels
+    bad = c.call("detail", {"span": "wide"})
+    assert bad["isError"] and "No action was used" in bad["content"][0]["text"]
     look = c.call("look", {})
     assert [b["type"] for b in look["content"]] == ["text", "image"]
     assert "texture and palette match" in look["content"][0]["text"]
@@ -58,6 +66,8 @@ def test_paint_server(tmp_path):
 
     calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
     assert [(x["tool"], x["status"]) for x in calls][:3] == [("move", "rejected"), ("start", "applied"), ("move", "applied")]
+    assert [(x["tool"], x["status"]) for x in calls][3] == ("detail", "view")
+    assert calls[3]["views"] == [[24, 24, 40, 40]] and "score_before" not in calls[3]  # a view changes nothing
     assert calls[1]["tool_use_id"] == "a" and '"down": true' in calls[1]["pen"]
     assert calls[2]["score_after"] != calls[2]["score_before"]
     assert json.loads((tmp_path / "finish.json").read_text())["note"] == "needed a fill"

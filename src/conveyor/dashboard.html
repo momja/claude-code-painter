@@ -157,6 +157,49 @@ details > summary { cursor: pointer; color: var(--muted); }
   .archive { grid-template-columns: 60px repeat(3, minmax(0, 1fr)); }
   .archive .wide-only { display: none; }
 }
+/* new run */
+header .spacer { flex: 1; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; padding: 4px 14px; }
+button.primary:disabled { opacity: .45; cursor: not-allowed; }
+button.stop { border-color: var(--bad); color: var(--bad); }
+dialog#nr { width: min(820px, 96vw); max-height: 92vh; padding: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+dialog#nr::backdrop { background: rgba(20, 18, 14, .5); }
+#nr form { display: flex; flex-direction: column; max-height: 92vh; }
+.nr-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px 10px; }
+.nr-head h2 { margin: 0; font-size: 18px; }
+.nr-scroll { overflow-y: auto; padding: 0 20px 14px; display: grid; gap: 16px; }
+.nr-sec { border-top: 1px solid var(--line); padding-top: 12px; }
+.nr-sec > h3 { margin: 0 0 2px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.nr-sec > .sub { color: var(--faint); font-size: 12.5px; margin-bottom: 10px; }
+.nr-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px 14px; align-items: start; }
+.f { display: grid; gap: 3px; font-size: 12.5px; color: var(--muted); align-content: start; }
+.f > span:first-child { color: var(--ink); }
+.f input[type=text], .f input[type=number], .f select { width: 100%; max-width: none; font: inherit; padding: 5px 8px; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; }
+.f input:focus, .f select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.f .hint { color: var(--faint); font-size: 11.5px; line-height: 1.35; }
+.f.check { grid-template-columns: auto 1fr; column-gap: 8px; align-items: start; }
+.f.check input { margin-top: 3px; }
+.f.check .hint { grid-column: 2; }
+.f.wide { grid-column: 1 / -1; }
+.nr-seeds { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.nr-roles { display: grid; grid-template-columns: 60px repeat(3, minmax(0, 1fr)); gap: 8px 10px; align-items: center; margin-top: 8px; font-size: 12.5px; }
+.nr-roles .colhead { color: var(--muted); font-size: 11.5px; }
+.nr-roles input, .nr-roles select { width: 100%; font: inherit; padding: 4px 6px; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; max-width: none; }
+#nr.offline .needs-model { opacity: .4; pointer-events: none; }
+.nr-status { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 6px 0 0; font-size: 12.5px; }
+.nr-foot { border-top: 1px solid var(--line); padding: 10px 20px 14px; display: grid; gap: 8px; background: var(--surface); border-radius: 0 0 12px 12px; }
+.nr-foot pre { margin: 6px 0 0; }
+.nr-actions { display: flex; justify-content: flex-end; gap: 8px; align-items: center; }
+#nr-msg:empty { display: none; }
+#nr-msg { color: var(--bad); font-size: 13px; }
+#nr-msg.warn { color: var(--warn); }
+.nr-progress { padding: 4px 20px 20px; display: grid; gap: 10px; }
+.nr-progress pre { max-height: 40vh; overflow-y: auto; }
+@media (max-width: 600px) { .nr-roles { grid-template-columns: 1fr; } .nr-roles .colhead { display: none; } }
+#new-run { margin-left: auto; }
+#nr-form-view { display: contents; }
+#nr-form-view[hidden] { display: none; }
+.nr-scroll { min-height: 0; }
 </style>
 </head>
 <body>
@@ -164,8 +207,27 @@ details > summary { cursor: pointer; color: var(--muted); }
   <h1>conveyor</h1>
   <select id="run"></select>
   <span id="pills" style="display:flex;flex-wrap:wrap;gap:8px"></span>
+  <button id="new-run" class="primary" data-new-run hidden>New run</button>
 </header>
 <main id="main"><div class="empty-state">Loading…</div></main>
+<dialog id="nr" aria-label="New run">
+  <form id="nr-form" autocomplete="off">
+    <div id="nr-form-view">
+      <div class="nr-head"><h2>New run</h2><button type="button" id="nr-close">Close</button></div>
+      <div class="nr-scroll" id="nr-fields"></div>
+      <div class="nr-foot">
+        <div id="nr-msg"></div>
+        <details><summary>Equivalent command</summary><pre id="nr-cmd-text"></pre></details>
+        <div class="nr-actions"><button type="button" id="nr-cancel">Cancel</button><button type="submit" id="nr-go" class="primary">Start run</button></div>
+      </div>
+    </div>
+    <div id="nr-progress" hidden>
+      <div class="nr-head"><h2 id="nr-progress-title">Starting the run…</h2><button type="button" id="nr-hide">Hide</button></div>
+      <div class="nr-progress"><pre id="nr-progress-log"></pre>
+        <div class="nr-actions"><button type="button" id="nr-back" hidden>Back to the form</button></div></div>
+    </div>
+  </form>
+</dialog>
 <aside id="drawer" aria-hidden="true">
   <div class="bar"><span class="title" id="drawer-title"></span><button id="drawer-close">Close</button></div>
   <div class="body" id="drawer-body"></div>
@@ -187,14 +249,18 @@ let state = { run: null, overview: null, timer: null, drawer: null, drawerTimer:
   lineage: { node: "instrument", newest: true, filter: "", focus: null }, layout: null, targets: {} };
 
 // ---- runs --------------------------------------------------------------------------------------------------
-async function loadRuns() {
+async function loadRuns(open) {
   const runs = await get("/api/runs");
   const sel = $("#run");
-  const want = new URLSearchParams(location.search).get("run");
+  const want = open || new URLSearchParams(location.search).get("run");
   sel.innerHTML = runs.map((r) => `<option value="${esc(r.id)}">${esc(r.name)} · ${new Date(r.started * 1000).toLocaleString()} · ${r.n_organisms} organisms${r.finished ? "" : " · running"}</option>`).join("");
-  if (!runs.length) { $("#main").innerHTML = `<div class="empty-state">No runs in this database yet.</div>`; return; }
+  if (!runs.length) {
+    $("#main").innerHTML = `<div class="empty-state">No runs in this database yet.<p><button class="primary" data-new-run${nr.opts?.launch ? "" : " hidden"}>Start the first run</button></p></div>`;
+    state.slots = {}; return;
+  }
   state.run = runs.find((r) => r.id === want)?.id || runs[0].id;
   sel.value = state.run;
+  if (open) history.replaceState(null, "", `?run=${state.run}`);
   sel.onchange = () => { state.run = sel.value; history.replaceState(null, "", `?run=${state.run}${location.hash}`); refresh(); };
   await refresh();  // the drawer's ancestry reads the organisms this loads
 }
@@ -236,6 +302,8 @@ function pills(ov) {
     p.push(`<span class="pill" title="Claude Code rate-limit windows">limit <b class="${rl.status === "rejected" ? "bad" : ""}">${esc(windows || rl.status)}</b></span>`);
   }
   if (ov.finished?.reason || ov.stopping?.reason) p.push(`<span class="pill">${esc(ov.finished?.reason || ov.stopping?.reason)}</span>`);
+  const mine = running && nr.launches.find((l) => l.run_id === ov.run.id && (l.state === "running" || l.state === "stopping"));
+  if (mine) p.push(mine.state === "stopping" ? `<span class="pill"><b>stopping…</b></span>` : `<button class="stop" data-stop="${esc(mine.id)}">Stop run</button>`);
   $("#pills").innerHTML = p.join("");
 }
 
@@ -716,7 +784,7 @@ function organismDetail(o) {
       <div class="imgs" style="margin-top:8px">${ev.artifacts?.pair ? `<figure>${img(ev.artifacts.pair)}<figcaption>target · painting</figcaption></figure>` : ""}
         ${ev.artifacts?.heat ? `<figure>${img(ev.artifacts.heat, "", "error")}<figcaption>error</figcaption></figure>` : ""}</div>
       ${c.total != null ? `<div class="muted" style="font-size:12.5px;margin-top:6px">pixel ${fmt(c.pixel)} (${(c.scales || []).map((s) => `1/${s.factor}: rmse ${fmt(s.rmse)}`).join(", ")}) · style ${fmt(c.style)} (${Object.entries(c.style_distance || {}).map(([k, v]) => `${k} ${fmt(v, 2)}`).join(", ")})</div>` : ""}
-      ${st.actions_used != null ? `<div class="muted" style="font-size:12.5px">${st.actions_used}/${st.actions_budget} actions (${uses || "none"}) · ${st.looks_used} looks · ${st.refused} refused · ${st.ran_dry} ran dry${st.finished ? "" : " · never called finish"}</div>` : ""}
+      ${st.actions_used != null ? `<div class="muted" style="font-size:12.5px">${st.actions_used}/${st.actions_budget} actions (${uses || "none"}) · ${st.looks_used} looks${st.views_used != null ? ` · ${st.views_used} views` : ""} · ${st.refused} refused · ${st.ran_dry} ran dry${st.finished ? "" : " · never called finish"}</div>` : ""}
       ${d.judge && d.judge.scores ? `<div style="margin-top:6px"><div class="muted" style="font-size:12px">judge: likeness ${d.judge.scores.likeness} · colour ${d.judge.scores.colour} · brushwork ${d.judge.scores.brushwork} · overall ${d.judge.scores.overall} → ${fmt(d.judge.score)}, weight ${d.judge.weight}${d.judge.session_id ? ` · <a data-session="${esc(d.judge.session_id)}">session</a>` : ""}</div><div class="note">${esc(d.judge.critique)}</div></div>` : ""}
       ${d.judge && d.judge.error ? `<div class="warn" style="font-size:12.5px;margin-top:6px">${esc(d.judge.error)}</div>` : ""}
       ${d.note ? `<div style="margin-top:6px"><div class="muted" style="font-size:12px">painter's note</div><div class="note">${esc(d.note)}</div></div>` : ""}
@@ -824,7 +892,244 @@ function bindReplay(s) {
   range.oninput = show; show();
 }
 
+// ---- new run -----------------------------------------------------------------------------------------------
+// Starts `conveyor run` as a child process of the server. The form is built from /api/options, so its defaults
+// and tooltips are the command line's own. Only values that differ from a default are sent.
+const nr = { opts: null, launches: [], timer: null, watch: null };
+const ROLES = ["paint", "mutate", "judge"];
+const dash = (k) => k.replace(/_/g, "-");
+const quote = (s) => /^[\w.,:/@%+=-]+$/.test(s) ? s : JSON.stringify(s);
+
+// Each field: k is the `run` option. type: text, number, check, select. Numbers: int, scale (shown / sent).
+const NR_SECTIONS = [
+  { title: "Run", sub: "How long it goes on and what it may spend.", fields: [
+    { k: "name", label: "Name", type: "text", ph: "automatic" },
+    { k: "cycles", label: "Cycles", type: "number", int: true, min: 1, hint: "One cycle: paint, then mutate and repaint." },
+    { k: "budget", label: "Budget (USD)", type: "number", step: "any", min: 0.01, model: true, hint: "List price. The run stops after the current iteration once it's spent." },
+    { k: "offline", label: "Offline", type: "check", hint: "No model: a greedy painter and scripted mutators. About 5 s, free." },
+  ] },
+  { title: "Models", sub: "Which harness and model do the painting, mutating and judging.", model: true, custom: "models" },
+  { title: "Painting", sub: "The target and how much the painter gets.", model: false, fields: [
+    { k: "target", label: "Target", type: "select", from: "targets" },
+    { k: "width", label: "Canvas width (px)", type: "number", int: true, min: 64, max: 2048 },
+    { k: "actions", label: "Actions per painting", type: "number", int: true, min: 1 },
+    { k: "looks", label: "Looks per painting", type: "number", int: true, min: -1, ph: "auto", hint: "Auto: one per 25 actions, at least 4. -1 is unlimited." },
+    { k: "judge", label: "Model judge", type: "check", model: true, hint: "Scores likeness, colour and brushwork." },
+    { k: "judge_weight", label: "Judge's share of the score", type: "number", step: "0.05", min: 0, max: 1, model: true },
+    { k: "scope", label: "Scoped painting", type: "check", hint: "The painter may paint in local coordinates." },
+  ] },
+  { title: "Evolution", sub: "Where the instruments start and how they change.", custom: "evolution" },
+  { title: "Limits", sub: "A run shares your Claude usage windows with everything else you do.", model: true, fields: [
+    { k: "lanes", label: "Sessions at once", type: "number", int: true, min: 1, max: 8 },
+    { k: "max_usage", label: "Stop starting sessions at (% of window)", type: "number", int: true, scale: 100, min: 5, max: 100 },
+    { k: "paint_cap", label: "Cap per painting (USD)", type: "number", step: "any", min: 0.01 },
+    { k: "mutate_cap", label: "Cap per mutation (USD)", type: "number", step: "any", min: 0.01 },
+    { custom: "wait" },
+    { k: "autocompact", label: "Claude: compact at (tokens)", type: "number", int: true, min: 100000, max: 1000000, ph: "CLI default" },
+    { k: "compact_every_looks", label: "Pi: compact every N looks", type: "number", int: true, min: 1, ph: "never" },
+  ] },
+];
+
+function nrOptions(list, current, blank) {
+  return (blank != null ? [`<option value="">${esc(blank)}</option>`] : [])
+    .concat(list.map((x) => `<option value="${esc(x)}"${x === current ? " selected" : ""}>${esc(x)}</option>`)).join("");
+}
+
+function nrField(f) {
+  const O = nr.opts;
+  if (f.custom === "wait") {
+    return `<div class="f wide"><label class="f check"><input type="checkbox" name="wait_on"><span>Wait out usage limits instead of stopping</span>
+      <span class="hint">New sessions pause until the window resets, then carry on. Raise the budget to match.</span></label>
+      <label class="f" style="max-width:200px"><span>Wait for resets up to (hours)</span><input type="number" name="wait_hours" value="6" min="0.1" max="168" step="any"></label></div>`;
+  }
+  const d = O.defaults[f.k], tip = esc(O.help[f.k] || "");
+  const cls = (f.model ? " needs-model" : "");
+  const hint = f.hint ? `<span class="hint">${esc(f.hint)}</span>` : "";
+  if (f.type === "check") return `<label class="f check${cls}" title="${tip}"><input type="checkbox" name="${f.k}"${d ? " checked" : ""}><span>${esc(f.label)}</span>${hint}</label>`;
+  if (f.type === "select") return `<label class="f${cls}" title="${tip}"><span>${esc(f.label)}</span><select name="${f.k}">${nrOptions(O[f.from], d)}</select>${hint}</label>`;
+  const shown = d == null ? "" : f.scale ? Math.round(d * f.scale) : d;
+  const attrs = f.type === "number" ? `type="number" step="${f.step || (f.int ? 1 : "any")}"${f.min != null ? ` min="${f.min}"` : ""}${f.max != null ? ` max="${f.max}"` : ""}` : `type="text"`;
+  return `<label class="f${cls}" title="${tip}"><span>${esc(f.label)}</span><input name="${f.k}" ${attrs} value="${esc(shown)}" placeholder="${esc(f.ph || "")}">${hint}</label>`;
+}
+
+function nrModels() {
+  const O = nr.opts, H = O.harnesses;
+  const role = (r) => `<span>${r}</span>
+    <select name="${r}_harness">${nrOptions(O.choices.harness, "", "same")}</select>
+    <input type="text" name="${r}_model" list="nr-dl-${r}" placeholder="same">
+    <select name="${r}_effort">${nrOptions(O.choices.effort, "", "same")}</select>`;
+  return `<div class="nr-fields">
+      <label class="f" title="${esc(O.help.harness)}"><span>Harness</span><select name="harness">${nrOptions(O.choices.harness, O.defaults.harness)}</select></label>
+      <label class="f"><span>Model</span><input type="text" name="model" list="nr-dl-model" placeholder=""></label>
+      <label class="f" title="${esc(O.help.effort)}"><span>Effort</span><select name="effort">${nrOptions(O.choices.effort, O.defaults.effort)}</select></label>
+      <label class="f" data-pi title="${esc(O.help.provider)}"><span>Pi provider</span><select name="provider">${nrOptions(O.choices.provider, O.defaults.provider)}</select></label>
+    </div>
+    <div class="nr-status" id="nr-harness-status"></div>
+    <details style="margin-top:10px"><summary>Different models per role</summary>
+      <div class="muted" style="font-size:12.5px;margin-top:6px">Blank means the same as above. A role on a different harness doesn't inherit the model.</div>
+      <div class="nr-roles"><span></span><span class="colhead">Harness</span><span class="colhead">Model</span><span class="colhead">Effort</span>${ROLES.map(role).join("")}</div>
+    </details>
+    <datalist id="nr-dl-model"></datalist>${ROLES.map((r) => `<datalist id="nr-dl-${r}"></datalist>`).join("")}`;
+}
+
+function nrEvolution() {
+  const O = nr.opts, seeds = String(O.defaults.seeds || "").split(",");
+  const w = (k, label) => nrField({ k, label, type: "number", step: "0.1", min: 0 });
+  return `<div class="f"><span>Seed instruments</span><div class="nr-seeds">${O.seeds.map((s) => `<label><input type="checkbox" name="seed" value="${esc(s)}"${seeds.includes(s) ? " checked" : ""}> ${esc(s)}</label>`).join("")}</div>
+      <span class="hint">Each seed starts a lineage in the archive.</span></div>
+    <div class="nr-fields" style="margin-top:10px">
+      ${nrField({ k: "parents", label: "Instrument mutations per iteration", type: "number", int: true, min: 1, max: 10 })}
+      ${nrField({ k: "confirm", label: "Paintings before a champion changes", type: "number", int: true, min: 1, max: 10, hint: "Scores are the mean. 1 crowns on a single painting." })}
+      ${w("refine", "Weight: refine")}${w("invent", "Weight: invent")}${w("recombine", "Weight: recombine")}
+    </div>`;
+}
+
+function nrForm() {
+  return NR_SECTIONS.map((s) => `<div class="nr-sec${s.model ? " needs-model" : ""}"><h3>${esc(s.title)}</h3><div class="sub">${esc(s.sub)}</div>
+    ${s.custom === "models" ? nrModels() : s.custom === "evolution" ? nrEvolution() : `<div class="nr-fields">${s.fields.map(nrField).join("")}</div>`}</div>`).join("");
+}
+
+// The values that differ from the command line's defaults, as the API takes them.
+function nrCollect() {
+  const O = nr.opts, f = $("#nr-form"), out = {};
+  const put = (k, v) => { if (v == null || v === "" || v === O.defaults[k]) return; out[k] = v; };
+  for (const field of NR_SECTIONS.flatMap((s) => s.fields || [])) {
+    if (!field.k) continue;
+    const el = f.elements[field.k];
+    if (field.type === "check") put(field.k, el.checked);
+    else if (field.type === "number") put(field.k, el.value === "" ? null : (field.scale ? Number(el.value) / field.scale : Number(el.value)));
+    else put(field.k, el.value.trim());
+  }
+  for (const k of ["harness", "model", "effort", "provider", ...ROLES.flatMap((r) => [`${r}_harness`, `${r}_model`, `${r}_effort`])]) put(k, f.elements[k].value.trim());
+  const seeds = [...f.querySelectorAll("input[name=seed]:checked")].map((e) => e.value);
+  put("seeds", seeds.length ? seeds.join(",") === String(O.defaults.seeds) ? null : seeds : null);
+  if (f.elements.wait_on.checked) out.wait = Number(f.elements.wait_hours.value) || 6;
+  return out;
+}
+
+function nrCommand(v) {
+  const parts = Object.entries(v).map(([k, x]) => x === true ? `--${dash(k)}` : x === false ? `--no-${dash(k)}` : `--${dash(k)}=${quote(Array.isArray(x) ? x.join(",") : String(x))}`);
+  return ["conveyor run", ...parts].join(" ");
+}
+
+// What would stop the run from starting here: a harness that isn't installed, a missing key.
+function nrProblems(v) {
+  const O = nr.opts, H = O.harnesses, out = [], seen = new Set();
+  if (!$("#nr-form").querySelector("input[name=seed]:checked")) out.push("Pick at least one seed instrument.");
+  if (v.offline) return out;
+  const base = v.harness || O.defaults.harness;
+  const used = [base, ...ROLES.filter((r) => r !== "judge" || v.judge !== false).map((r) => v[`${r}_harness`]).filter(Boolean)];
+  for (const h of used) {
+    if (seen.has(h)) continue; seen.add(h);
+    if (!H[h].ok) out.push(`${h === "claude" ? "Claude Code" : "Pi"}: ${H[h].detail}.`);
+    else if (h === "pi") {
+      const prov = v.provider || O.defaults.provider;
+      if (!H.pi.keys[prov]) out.push(`No key for ${prov}. Set ${H.pi.env_vars[prov]} in the environment of \`conveyor serve\`, or in a .env file.`);
+    }
+  }
+  return out;
+}
+
+function nrRefresh() {
+  const O = nr.opts, f = $("#nr-form"), v = nrCollect();
+  const base = v.harness || O.defaults.harness, prov = v.provider || O.defaults.provider;
+  const suggest = (h) => (h === "pi" ? O.models.pi[prov] : O.models.claude) || [];
+  const fill = (id, h) => { $(id).innerHTML = suggest(h).map((m) => `<option value="${esc(m)}">`).join(""); };
+  fill("#nr-dl-model", base);
+  for (const r of ROLES) fill(`#nr-dl-${r}`, v[`${r}_harness`] || base);
+  f.elements.model.placeholder = suggest(base)[0] || "default";
+  const usesPi = base === "pi" || ROLES.some((r) => v[`${r}_harness`] === "pi");
+  $("#nr [data-pi]").style.display = usesPi ? "" : "none";
+  $("#nr").classList.toggle("offline", !!v.offline);
+  const H = O.harnesses;
+  $("#nr-harness-status").innerHTML = `<span class="${H.claude.ok ? "good" : "bad"}">Claude Code: ${esc(H.claude.detail)}</span>`
+    + `<span class="${H.pi.ok ? "good" : "warn"}">Pi: ${esc(H.pi.ok ? "ready" : H.pi.detail)}</span>`
+    + (H.pi.ok ? Object.entries(H.pi.keys).map(([k, ok]) => `<span class="${ok ? "good" : "faint"}">${esc(k)} key ${ok ? "found" : "not set"}</span>`).join("") : "");
+  const problems = nrProblems(v);
+  $("#nr-msg").className = ""; $("#nr-msg").textContent = problems.join(" ");
+  $("#nr-go").disabled = problems.length > 0;
+  $("#nr-cmd-text").textContent = nrCommand(v);
+}
+
+async function api(method, url, body) {
+  const r = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `${r.status} ${url}`);
+  return data;
+}
+
+async function openNewRun() {
+  const dlg = $("#nr");
+  try { nr.opts = await get("/api/options"); } catch (e) { alert(`Couldn't load the options: ${e.message}`); return; }
+  if (!nr.opts.launch) return;
+  if (!nr.built) { $("#nr-fields").innerHTML = nrForm(); nr.built = true; }  // built once, so a second run starts from the last one's values
+  if (!nr.watch) { $("#nr-form-view").hidden = false; $("#nr-progress").hidden = true; nrRefresh(); }  // else a launch is still starting: show its progress
+  if (!dlg.open) dlg.showModal();
+}
+
+async function startRun(e) {
+  e.preventDefault();
+  const v = nrCollect(), go = $("#nr-go");
+  go.disabled = true; $("#nr-msg").textContent = "";
+  try {
+    const l = await api("POST", "/api/launches", v);
+    watchLaunch(l.id);
+  } catch (err) {
+    $("#nr-msg").className = ""; $("#nr-msg").textContent = err.message; go.disabled = false;
+  }
+}
+
+// After Start: follow the child's output until it has made its run, then open that run.
+function watchLaunch(id) {
+  nr.watch = id;
+  $("#nr-form-view").hidden = true; $("#nr-progress").hidden = false;
+  const tick = async () => {
+    let l;
+    try { l = await get(`/api/launches/${id}`); } catch { nr.timer = setTimeout(tick, 1500); return; }
+    const failed = l.state === "failed" || l.state === "stopped";
+    $("#nr-progress-title").textContent = l.run_id ? "Run started" : failed ? "The run didn't start" : "Starting the run…";
+    $("#nr-progress-log").textContent = l.log.join("\n") || "Waiting for output…";
+    $("#nr-back").hidden = !(failed && !l.run_id);
+    if (l.run_id) { finishWatch(); $("#nr").close(); nr.launches = await get("/api/launches"); await loadRuns(l.run_id); return; }
+    if (failed) { nr.watch = null; return; }
+    nr.timer = setTimeout(tick, 700);
+  };
+  tick();
+}
+function finishWatch() { clearTimeout(nr.timer); nr.watch = null; }
+
+async function pollLaunches() {
+  try {
+    nr.launches = await get("/api/launches");
+    if (state.overview) pills(state.overview);
+  } catch { /* the server is busy or gone; try again */ }
+  setTimeout(pollLaunches, 3000);
+}
+
+async function initLaunch() {
+  try { nr.opts = await get("/api/options"); } catch { return; }
+  if (!nr.opts.launch) return;
+  for (const b of document.querySelectorAll("[data-new-run]")) b.hidden = false;
+  pollLaunches();
+}
+
+document.addEventListener("click", (e) => {
+  if (e.target.closest("[data-new-run]")) openNewRun();
+  const stop = e.target.closest("[data-stop]");
+  if (stop && confirm("Stop this run? Running sessions are cancelled and the run can't be resumed.")) {
+    stop.disabled = true;
+    api("POST", `/api/launches/${stop.dataset.stop}/stop`, {}).then(pollLaunchesOnce).catch((err) => alert(err.message));
+  }
+});
+async function pollLaunchesOnce() { nr.launches = await get("/api/launches"); if (state.overview) pills(state.overview); }
+$("#nr-form").addEventListener("input", nrRefresh);
+$("#nr-form").addEventListener("submit", startRun);
+$("#nr-close").onclick = $("#nr-cancel").onclick = () => $("#nr").close();
+$("#nr-back").onclick = () => { finishWatch(); openNewRun(); };
+$("#nr-hide").onclick = () => $("#nr").close();
+
 loadRuns().then(routeHash);
+initLaunch();
 </script>
 </body>
 </html>

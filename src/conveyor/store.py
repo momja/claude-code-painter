@@ -91,6 +91,19 @@ def connect(path: str | Path, readonly: bool = False) -> sqlite3.Connection:
     return conn
 
 
+def init_db(path: str | Path) -> None:
+    """Create the file and its tables if they're missing, so a dashboard can open a database no run has written yet."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect(path)
+    try:
+        _ensure_wal(conn)
+        conn.executescript(SCHEMA)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def new_id() -> str:
     return uuid.uuid4().hex[:12]
 

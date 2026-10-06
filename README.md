@@ -10,10 +10,18 @@ uv run conveyor run --offline --cycles 3          # no model: a greedy painter a
 uv run conveyor paint round --actions 40          # one real painting with the round-brush seed, about 1 minute
 uv run conveyor mutate round --operator invent -n 3 --lanes 3   # three inventions from the round brush, no painting
 uv run conveyor run --cycles 4 --budget 20        # the real co-evolution, dashboard at http://127.0.0.1:8765
-uv run conveyor serve                             # browse earlier runs
+uv run conveyor serve                             # browse earlier runs, or start new ones from the New run button
 uv run conveyor run --harness pi --cycles 4        # the same run on GLM through Pi (see Harnesses)
-uv run --group dev pytest                         # 47 tests, about 10 s, no model calls
+uv run --group dev pytest                         # 70 tests, about 25 s, no model calls
 ```
+
+### Starting runs from the dashboard
+
+`conveyor serve` opens the dashboard on `runs/conveyor.db` (`--db` picks another file, and it's created if it's missing). The **New run** button opens a form with every `conveyor run` option: models per role, the target and canvas, the evolution weights, spend and rate-limit caps, and `--wait`. Defaults and tooltips come from the command line's own parser, and the form shows the equivalent command. Offline mode is a checkbox, so a first look needs no model.
+
+Each run is a child process, `conveyor run --no-serve`, writing to the served database, so several can go at once and the dashboard follows them like any other run. **Stop run** in the header sends the process Ctrl+C. Stopping the server stops the runs it started. A run needs the API key in the environment `conveyor serve` was started from, so `OPENCODE_API_KEY=... uv run conveyor serve` or a `.env` file.
+
+Starting runs spends your money and your Claude usage, so it is only on when the server is bound to a loopback address (the default), and POSTs from other origins or hosts are refused. `--no-launch` turns it off.
 
 The Pi harness needs Node 20 or later and a one-time `(cd pi-agent && npm install)`.
 
@@ -21,7 +29,8 @@ You need Claude Code installed and logged in, so `claude --version` has to work.
 
 With `--wait`, a full window pauses the run instead of stopping it. New sessions wait until the window resets, plus a minute of grace, and the dashboard shows the run as waiting, with the time it resumes. A session the limit ends partway (two lanes can start at 84% and finish past 100%) doesn't count. Whatever it was painting or mutating runs again after the reset. `--wait` only waits for resets up to 6 hours away, which covers the five-hour window; the weekly window still stops the run. `--wait 200` waits for that one too. Raise `--budget` to match, since a run that waits can go on for many windows.
 
-Numbers from runs on this laptop:
+Numbers from runs on this laptop (at the 128 px canvas these runs used; the default is 512 now, which makes each
+call and each picture bigger, so expect somewhat higher figures):
 
 | What | Time | List price |
 |---|---|---|
@@ -34,6 +43,10 @@ Numbers from runs on this laptop:
 | Three cycles at 120 actions, two instrument mutations per cycle, stopped by `--budget 10` | about 70 min | $10.27 |
 
 By that rate a 200-action painting is around 7 minutes and $1.50. `--lanes` sets how many Claude sessions run at once. The default is 2, because they share one rate limit.
+
+**Sessions that die.** A provider can take a request and then say nothing until the connection drops. `--stall-timeout` (default 600 seconds, 0 turns it off) kills a session that prints nothing for that long, instead of holding a lane for the full 45 minutes. A session cut off this way, or by a crash or a timeout, is not scored as a bad painting. Its job runs again, twice at most. If it still fails, the evaluation is recorded as inconclusive: the organism keeps its viability and its standing, and a champion that fails a rescore stays champion. The Pi sidecar logs each request (`request_start` with the images and bytes it sent, `request_end` with the time to first event), so a stalled session shows what it was waiting on.
+
+**Long sessions.** `--compact-every-looks N` (Pi only) summarizes the conversation once N canvas views have piled up, keeping the task and the newest view. `--autocompact TOKENS` (Claude only) sets the window the CLI compacts against, 100000 to 1000000. Neither is on by default.
 
 ## Harnesses
 
@@ -66,7 +79,7 @@ claude -p --input-format stream-json --output-format stream-json --verbose
        --system-prompt <strategy + rules + the instrument's reference>
        --tools "" --setting-sources "" --strict-mcp-config
        --mcp-config <python -m conveyor.painting.paintserver SESSION_DIR>
-       --allowedTools mcp__canvas__<each tool>,mcp__canvas__look,mcp__canvas__finish
+       --allowedTools mcp__canvas__<each tool and viewing tool>,mcp__canvas__look,mcp__canvas__finish
        --no-session-persistence --disable-slash-commands --max-budget-usd 8
 ```
 
@@ -105,13 +118,25 @@ TOOLS = {
 
 EXAMPLES = [[["start", {"x": 12, "y": 30, "color": "#2b4c7e"}], ["move", {"dx": 20, "dy": -6}], ["stop", {}]]]
 
+VIEWS = {"detail": {"doc": "Look closely at (x, y): a window `span` px across.",
+                   "params": {"x": {"type": "number", "min": 0, "max": "width"},
+                              "y": {"type": "number", "min": 0, "max": "height"},
+                              "span": {"type": "number", "min": 8, "max": "width", "default": 64}}}}
+
 def start(args, pen, canvas, rng):
     pen.update(down=True, x=args["x"], y=args["y"], color=args["color"])
+
+def detail(args, pen, canvas, rng):
+    return canvas.view(args["x"], args["y"], args["span"])
 ```
 
-Parameter types are number, integer, boolean, color, choice, points and numbers. A points parameter is a path of up to 64 `[x, y]` pairs. Tools draw only through `canvas.dab`, `canvas.stamp` for any small mask, `canvas.smudge`, and `canvas.pick`, which reads the canvas and never the target. `painting/seeds.py` has two complete examples. `round` is one stateless straight stroke. `pen` is the start/move/stop plotter above, with a brush that runs out of paint as it travels.
+Parameter types are number, integer, boolean, color, choice, points and numbers. A points parameter is a path of up to 64 `[x, y]` pairs, and parameter bounds may be written against `width`, `height` and `radius` (the canvas's brush limit; `"-width"` and friends for deltas), so one instrument reads right at any canvas size. Tools draw only through `canvas.dab`, `canvas.stamp` for any small mask, `canvas.smudge`, and `canvas.pick`, which reads the canvas and never the target. `painting/seeds.py` has two complete examples. `round` is one stateless straight stroke. `pen` is the start/move/stop plotter above, with a brush that runs out of paint as it travels.
 
-The physics puts one limit on a call: it may touch at most 8% of the canvas, which is 1310 px at 128 x 128. That keeps a tool a brush rather than a printer. It says nothing about what a call takes or whether calls share state, so the interface stays free to evolve. Each call also runs under a one-second limit, in the paint server's process, never in the process that runs the evolution. The sandbox refuses imports, classes, try/except, print, underscored names and any attribute off an allowlist. It stops accidents. It is not a security boundary.
+Seeing is part of the interface, so the instrument owns it too. `VIEWS` declares up to four viewing tools, and `canvas.view(x, y, span, scale)` cuts a window out of the canvas and hands it back gridded and labelled in canvas pixels. Viewing is free — no action, no look — and cannot change the painting: the canvas and the pen are put back after every view call. The painter also keeps the harness's `look`, which shows the whole canvas and the pixel error per region from a small budget of looks, so a painter is never blind. That split is what makes a big canvas workable: the default is 512 px wide (four times the linear size of the 128 this started at), and at that size the whole-canvas picture is too coarse for fine work. The painter zooms through the instrument's views; evolution decides what views exist, and a mutation that gives its painter better eyes is competing on vision as well as on marks.
+
+With `--scope`, the painter can also paint in a window: the harness's `scope` tool sets a square scope and shows it labelled from its own corner, and later paint calls take local coordinates there until cleared. Only 0-based canvas positions shift into the window (deltas, sizes and angles are unchanged, by the same bound convention as above), and scoping is free like a view. Off by default, so runs with and without it compare cleanly — the experiment is whether painters do finer work when they stop converting zoomed pixels to canvas coordinates by hand.
+
+The physics puts one limit on a call: it may touch at most 8% of the canvas, which is about 21,000 px at 512 x 512. That keeps a tool a brush rather than a printer. It says nothing about what a call takes or whether calls share state, so the interface stays free to evolve. Each call also runs under a one-second limit, in the paint server's process, never in the process that runs the evolution. The sandbox refuses imports, classes, try/except, print, underscored names and any attribute off an allowlist. It stops accidents. It is not a security boundary.
 
 ## Why the old toolkit didn't vary, and what changed
 

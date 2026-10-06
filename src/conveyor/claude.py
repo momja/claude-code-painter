@@ -15,6 +15,8 @@ The flags that matter, and why:
   --thinking-display       thinking comes back empty in print mode unless asked for; with `summarized` the
                            transcript shows the model's reasoning (a hidden flag in the CLI, so it's dropped
                            and retried without if a CLI version refuses it)
+  --autocompact            optional: the token window the CLI compacts against (100k-1M), so a long painting
+                           compacts earlier than it would on its own. The CLI has no "after N tool calls" knob
   --task-budget            a token budget the model paces itself against (hidden too, handled the same way)
 
 The first user message goes in over stdin as stream-json, which is how it carries images (the target, the
@@ -30,6 +32,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 
+from conveyor.harness import DEFAULT_STALL_TIMEOUT
 from conveyor.harness import BudgetExhausted  # noqa: F401 - re-exported for callers of this module
 from conveyor.harness import Job
 from conveyor.harness import Meter
@@ -51,6 +54,8 @@ class Settings:
     effort: str = DEFAULT_EFFORT
     thinking_display: str | None = "summarized"
     timeout: float = 45 * 60  # seconds per session
+    stall_timeout: float | None = DEFAULT_STALL_TIMEOUT  # seconds of silence before a session is killed as stalled
+    autocompact: int | None = None  # tokens, 100_000 to 1_000_000; None leaves the CLI's own default
 
 
 class ClaudeCode(ProcessHarness):
@@ -60,7 +65,7 @@ class ClaudeCode(ProcessHarness):
                  lanes: int = 2) -> None:
         self.settings = settings or Settings()
         super().__init__(model=self.settings.model, effort=self.settings.effort, store=store, meter=meter,
-                         lanes=lanes, timeout=self.settings.timeout)
+                         lanes=lanes, timeout=self.settings.timeout, stall_timeout=self.settings.stall_timeout)
         self._thinking_flag_ok = True
         self._task_budget_ok = True
 
@@ -83,6 +88,8 @@ class ClaudeCode(ProcessHarness):
                 "--disable-slash-commands"]
         if s.effort:
             argv += ["--effort", s.effort]
+        if s.autocompact:
+            argv += ["--autocompact", str(s.autocompact)]
         if s.thinking_display and self._thinking_flag_ok:
             argv += ["--thinking-display", s.thinking_display]
         if job.mcp:

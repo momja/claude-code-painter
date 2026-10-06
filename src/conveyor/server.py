@@ -11,6 +11,14 @@ so it works the same during a run and after it, and from another process.
   GET /api/organisms/<id>            one organism: source, parent's source, evaluations, children, who wrote it
   GET /api/sessions/<id>             one model session: request, events, strokes, result
   GET /artifacts/<name>              images
+
+With a launcher (`conveyor serve` on a loopback address) it can also start runs:
+
+  GET  /api/options                  what the new-run form offers: defaults, help, models, seeds, targets, harnesses
+  GET  /api/launches                 runs started from here, newest first
+  GET  /api/launches/<id>            one launch: state, run id once it has one, the last lines of its output
+  POST /api/launches                 start a run from {option: value}; answers 201 with the launch
+  POST /api/launches/<id>/stop       stop it, as Ctrl+C would
 """
 
 from __future__ import annotations
@@ -29,7 +37,11 @@ from typing import Any
 from urllib.parse import parse_qs
 from urllib.parse import urlparse
 
+from conveyor.launch import LaunchError
 from conveyor.store import connect
+
+MAX_BODY = 64 * 1024
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
 
 DASHBOARD = Path(__file__).parent / "dashboard.html"
 ARTIFACT_RE = re.compile(r"^[0-9a-f]{24}\.(png|jpg)$")
@@ -310,7 +322,11 @@ class Views:
         return r[0] if r else None
 
 
-def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
+def _hostname(netloc: str) -> str:
+    return netloc.rsplit(":", 1)[0] if not netloc.endswith("]") else netloc
+
+
+def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launcher=None) -> ThreadingHTTPServer:
     views = Views(Path(db))
 
     class Handler(BaseHTTPRequestHandler):
@@ -328,6 +344,46 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765) -> Th
         def _json(self, value: Any, status: int = 200) -> None:
             self._send(status, json.dumps(value, default=str).encode(), "application/json")
 
+        def _guard_post(self) -> str | None:
+            """Why this POST can't start or stop a run, or None. A page on another site can make a browser send a
+            request to 127.0.0.1, so a POST must come from this server's own pages: a loopback Host (a rebound DNS
+            name fails here), no foreign Origin, and a JSON body (which a cross-site form can't send)."""
+            if _hostname(self.headers.get("Host", "")) not in LOCAL_HOSTS:
+                return "Host not allowed"
+            origin = self.headers.get("Origin")
+            if origin and urlparse(origin).netloc != self.headers.get("Host"):
+                return "Origin not allowed"
+            if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
+                return "Send application/json"
+            return None
+
+        def do_POST(self) -> None:  # noqa: N802
+            parts = [p for p in urlparse(self.path).path.split("/") if p]
+            try:
+                if launcher is None or parts[:2] != ["api", "launches"]:
+                    return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+                if (why := self._guard_post()) is not None:
+                    return self._json({"error": why}, HTTPStatus.FORBIDDEN)
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > MAX_BODY:
+                    return self._json({"error": "body too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                try:
+                    body = json.loads(self.rfile.read(length) or b"{}")
+                except json.JSONDecodeError:
+                    return self._json({"error": "body isn't JSON"}, HTTPStatus.BAD_REQUEST)
+                if len(parts) == 2:
+                    try:
+                        self._json(launcher.start(body), HTTPStatus.CREATED)
+                    except LaunchError as e:
+                        self._json({"error": str(e)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                elif len(parts) == 4 and parts[3] == "stop":
+                    launch = launcher.stop(parts[2])
+                    self._json(launch or {"error": "not found"}, HTTPStatus.OK if launch else HTTPStatus.NOT_FOUND)
+                else:
+                    self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
         def do_GET(self) -> None:  # noqa: N802
             url = urlparse(self.path)
             parts = [p for p in url.path.split("/") if p]
@@ -341,6 +397,13 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765) -> Th
                         self._send(404, b"not found", "text/plain")
                     else:
                         self._send(200, data, "image/png" if parts[1].endswith("png") else "image/jpeg", cache=True)
+                elif parts == ["api", "options"]:
+                    self._json(launcher.options() if launcher else {"launch": False})
+                elif parts[:2] == ["api", "launches"] and launcher is not None and len(parts) == 2:
+                    self._json(launcher.list())
+                elif parts[:2] == ["api", "launches"] and launcher is not None and len(parts) == 3:
+                    launch = launcher.get(parts[2])
+                    self._json(launch or {"error": "not found"}, HTTPStatus.OK if launch else HTTPStatus.NOT_FOUND)
                 elif parts[:2] == ["api", "runs"] and len(parts) == 2:
                     self._json(views.runs())
                 elif parts[:2] == ["api", "runs"] and len(parts) == 3:

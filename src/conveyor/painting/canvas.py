@@ -2,7 +2,8 @@
 Canvas physics, targets, and image helpers.
 
 Instruments draw only through `Canvas`: `dab` (a soft round mark), `stamp` (an arbitrary small mask), `smudge`
-(drag paint already on the canvas), and `pick` (read a colour off the canvas). Paint is translucent and layers;
+(drag paint already on the canvas), and `pick` (read a colour off the canvas). `view` is the read side: it cuts
+a window out of the canvas and returns it as a `View`, which the paint server renders as a labelled picture. Paint is translucent and layers;
 nothing is erased except by painting over it.
 
 The one physical limit that matters is per call: a single tool call may touch at most `area_cap` pixels. That
@@ -33,10 +34,40 @@ CALL_AREA_SHARE = 0.08
 MAX_DABS_PER_CALL = 3000
 # A footprint pixel counts as touched from this alpha up, so a faint halo doesn't eat the area budget.
 TOUCH_ALPHA = 0.02
+MAX_VIEW_SIDE = 1024  # image pixels a rendered view may reach on one side
+
+
+def brush_limit(width: int, height: int) -> float:
+    """The biggest radius one call can lay at this canvas size: the nominal scale, kept inside the area budget.
+    A dab at radius r with a feathered edge counts footprint out to about 1.24 r, so on a small canvas the area
+    binds first. The two limits have to agree: a radius the canvas advertised but every call refused would be a
+    brush the painter can't use."""
+    area_cap = int(CALL_AREA_SHARE * height * width)
+    return min(12.0 * max(1.0, width / BASE_WIDTH), math.sqrt(area_cap / math.pi) / 1.25)
 
 
 class CanvasError(ValueError):
     """An instrument asked the canvas for something it can't do (bad colour, bad mask)."""
+
+
+@dataclass
+class View:
+    """A window on the canvas: its rectangle in canvas pixels, the zoom it was asked for, and the pixels in it."""
+
+    x0: int
+    y0: int
+    x1: int
+    y1: int
+    scale: int  # image pixels per canvas pixel
+    img: np.ndarray
+
+    @property
+    def rect(self) -> tuple[int, int, int, int]:
+        return self.x0, self.y0, self.x1, self.y1
+
+    @property
+    def span(self) -> int:
+        return self.x1 - self.x0
 
 
 def parse_color(value) -> tuple[float, float, float]:
@@ -80,8 +111,8 @@ class Canvas:
         self.img = (np.broadcast_to(np.asarray(PAPER, dtype=np.float32), (height, width, 3)).copy()
                     if image is None else image.astype(np.float32).copy())
         self.scale = max(1.0, self.width / BASE_WIDTH)
-        self.max_radius = 12.0 * self.scale
         self.area_cap = int(CALL_AREA_SHARE * self.height * self.width)
+        self.max_radius = brush_limit(self.width, self.height)
         self._touched = np.zeros((height, width), dtype=bool)
         self.area_used = 0
         self.dabs_used = 0
@@ -209,6 +240,18 @@ class Canvas:
 
     # ---- state for undo (the greedy painter tries a move and takes it back) -------------------------------
 
+    def view(self, x, y, span, scale=4) -> View:
+        """
+        A square window `span` canvas pixels across, centred on (x, y) and kept inside the canvas, rendered at
+        `scale` image pixels per canvas pixel (1 to 8, so the picture never exceeds 1024 px a side). Returned by
+        a view tool for the painter to look at.
+        """
+        side = int(min(max(round(float(span)), 8), self.width, self.height))
+        x0 = int(min(max(round(float(x) - side / 2), 0), self.width - side))
+        y0 = int(min(max(round(float(y) - side / 2), 0), self.height - side))
+        zoom = int(min(max(round(float(scale)), 1), max(1, min(8, MAX_VIEW_SIDE // side))))
+        return View(x0, y0, x0 + side, y0 + side, zoom, self.img[y0 : y0 + side, x0 : x0 + side].copy())
+
     def snapshot(self) -> np.ndarray:
         return self.img.copy()
 
@@ -267,19 +310,39 @@ def region_errors(img: np.ndarray, target: Target) -> np.ndarray:
     return out
 
 
-def error_table(img: np.ndarray, target: Target) -> str:
-    """Per-region error as a table labelled with pixel ranges, so nobody has to count rows."""
-    errs = region_errors(img, target)
-    rows, cols = errs.shape
-    p = target.patch
-    row_labels = [f"y {r * p}-{(r + 1) * p}" for r in range(rows)]
-    col_labels = [f"x {c * p}-{(c + 1) * p}" for c in range(cols)]
+def error_table(img: np.ndarray, target: Target, rect: tuple[int, int, int, int] | None = None,
+                patch: int | None = None) -> str:
+    """
+    Per-region error as a table labelled with pixel ranges, so nobody has to count rows. `rect` (x0, y0, x1, y1)
+    restricts the table to a window, and `patch` overrides the cell size; a view asks for cells suited to its
+    window rather than the whole canvas.
+    """
+    p = int(patch or target.patch)
+    x0, y0, x1, y1 = (0, 0, target.width, target.height) if rect is None else tuple(int(v) for v in rect)
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(target.width, max(x1, x0 + 1)), min(target.height, max(y1, y0 + 1))
+    cols = [c for c in range(-(-target.width // p)) if c * p < x1 and (c + 1) * p > x0]
+    rows = [r for r in range(-(-target.height // p)) if r * p < y1 and (r + 1) * p > y0]
+
+    def cell(r: int, c: int) -> float:
+        ys = slice(r * p, min((r + 1) * p, target.height))
+        xs = slice(c * p, min((c + 1) * p, target.width))
+        return float(np.sqrt(((img[ys, xs] - target.image[ys, xs]) ** 2).mean()))
+
+    row_labels = [f"y {r * p}-{min((r + 1) * p, target.height)}" for r in rows]
+    col_labels = [f"x {c * p}-{min((c + 1) * p, target.width)}" for c in cols]
     label_w = max(len(s) for s in row_labels) + 1
     cell_w = max(6, max(len(s) for s in col_labels) + 1)
     head = " " * label_w + "".join(s.ljust(cell_w) for s in col_labels)
-    lines = [(row_labels[r].ljust(label_w) + "".join(f"{errs[r, c]:.2f}".ljust(cell_w) for c in range(cols))).rstrip()
-             for r in range(rows)]
-    return f"Error per {p} x {p} px region (0 is a perfect match):\n" + "\n".join([head.rstrip(), *lines])
+    lines = [(row_labels[i].ljust(label_w) + "".join(f"{cell(r, c):.2f}".ljust(cell_w) for c in cols)).rstrip()
+             for i, r in enumerate(rows)]
+    where = "" if rect is None else f" in x {x0}-{x1}, y {y0}-{y1}"
+    return f"Error per {p} x {p} px region{where} (0 is a perfect match):\n" + "\n".join([head.rstrip(), *lines])
+
+
+def view_patch(span: int) -> int:
+    """Cell size for a view's error table: about eight cells across the window, a power of two, at least 8 px."""
+    return max(8, 2 ** int(math.log2(max(int(span), 8) / 8)))
 
 
 def worst_regions(img: np.ndarray, target: Target, k: int = 4) -> list[dict]:
@@ -323,21 +386,33 @@ def grid_step(width: int) -> int:
     return max(8, 8 * round(width / 64))
 
 
-def gridded_png(img: np.ndarray, scale: int = 4) -> bytes:
+def gridded_png(img: np.ndarray, scale: int | None = None, x0: int = 0, y0: int = 0,
+                lx0: int | None = None, ly0: int | None = None) -> bytes:
     """
     An image as the model sees it: upscaled, a faint line every `grid_step` canvas pixels, and the lines
-    labelled in canvas pixels in a white margin, so labels never cover the picture.
+    labelled in canvas pixels in a white margin, so labels never cover the picture. `(x0, y0)` is where the
+    image sits on the canvas, so a window is labelled in the same coordinates as the whole thing. An omitted
+    scale picks one that keeps the picture near 512 px a side however big the canvas is. `(lx0, ly0)`
+    overrides the labels' origin: a scoped window keeps the canvas grid lines but numbers them from its own
+    corner, so the painter reads local coordinates straight off the picture.
     """
     h, w = img.shape[:2]
+    if scale is None:
+        scale = max(1, min(4, 512 // max(w, 1)))
+    ox, oy = x0 if lx0 is None else lx0, y0 if ly0 is None else ly0
     step = grid_step(w)
+    xs = list(range(-((-x0) // step) * step, x0 + w + 1, step))
+    ys = list(range(-((-y0) // step) * step, y0 + h + 1, step))
     arr = (np.clip(img, 0, 1) * 255).round().astype(np.uint8).repeat(scale, axis=0).repeat(scale, axis=1)
     pic = Image.fromarray(arr).convert("RGBA")
     lines = Image.new("RGBA", pic.size, (0, 0, 0, 0))
     d = ImageDraw.Draw(lines)
-    for v in range(step, w, step):
-        d.line([(v * scale, 0), (v * scale, h * scale - 1)], fill=(30, 70, 170, 110), width=1)
-    for v in range(step, h, step):
-        d.line([(0, v * scale), (w * scale - 1, v * scale)], fill=(30, 70, 170, 110), width=1)
+    for v in xs:
+        if x0 < v < x0 + w:
+            d.line([((v - x0) * scale, 0), ((v - x0) * scale, h * scale - 1)], fill=(30, 70, 170, 110), width=1)
+    for v in ys:
+        if y0 < v < y0 + h:
+            d.line([(0, (v - y0) * scale), (w * scale - 1, (v - y0) * scale)], fill=(30, 70, 170, 110), width=1)
     pic = Image.alpha_composite(pic, lines).convert("RGB")
     m = max(22, round(0.055 * pic.width))
     out = Image.new("RGB", (pic.width + 2 * m, pic.height + 2 * m), (255, 255, 255))
@@ -349,21 +424,29 @@ def gridded_png(img: np.ndarray, scale: int = 4) -> bytes:
         left, top, right, bottom = d.textbbox((0, 0), text, font=font)
         d.text((cx - (right - left) / 2 - left, cy - (bottom - top) / 2 - top), text, font=font, fill=(30, 40, 60))
 
-    for v in range(0, w + 1, step):
-        label(str(v), m + v * scale, m / 2)
-        label(str(v), m + v * scale, out.height - m / 2)
-    for v in range(0, h + 1, step):
-        label(str(v), m / 2, m + v * scale)
-        label(str(v), out.width - m / 2, m + v * scale)
+    for v in xs:
+        label(str(v - ox), m + (v - x0) * scale, m / 2)
+        label(str(v - ox), m + (v - x0) * scale, out.height - m / 2)
+    for v in ys:
+        label(str(v - oy), m / 2, m + (v - y0) * scale)
+        label(str(v - oy), out.width - m / 2, m + (v - y0) * scale)
     buf = io.BytesIO()
     out.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
 
 
-def labelled_sheet(cells: list[tuple[str, np.ndarray]], scale: int = 2, cols: int = 3) -> bytes:
-    """Images side by side, each with a caption above it. Used for an instrument's demo sheet."""
+def view_png(view: View) -> bytes:
+    """A view as the painter sees it: its window, gridded and labelled in canvas coordinates."""
+    return gridded_png(view.img, scale=view.scale, x0=view.x0, y0=view.y0)
+
+
+def labelled_sheet(cells: list[tuple[str, np.ndarray]], scale: int | None = None, cols: int = 3) -> bytes:
+    """Images side by side, each with a caption above it. Used for an instrument's demo sheet. An omitted scale
+    keeps the sheet about the same size however big the canvas is."""
     if not cells:
         cells = [("(nothing to show)", np.broadcast_to(np.asarray(PAPER, dtype=np.float32), (32, 32, 3)))]
+    if scale is None:
+        scale = max(1, min(2, 512 // max(c[1].shape[1] for c in cells)))
     h = max(c[1].shape[0] for c in cells) * scale
     w = max(c[1].shape[1] for c in cells) * scale
     cap, gap = 22, 8

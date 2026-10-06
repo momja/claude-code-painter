@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
 
 def _setup(args):
@@ -20,7 +23,15 @@ def _setup(args):
                  work_dir=db.parent / f"{db.stem}-sessions", parents=getattr(args, "parents", 2),
                  paint_budget_usd=getattr(args, "paint_cap", 8.0), mutate_budget_usd=getattr(args, "mutate_cap", 4.0),
                  operator_weights=weights, judge=getattr(args, "judge", False),
-                 judge_weight=getattr(args, "judge_weight", 0.5), confirm=max(1, getattr(args, "confirm", 3)))
+                 judge_weight=getattr(args, "judge_weight", 0.5), confirm=max(1, getattr(args, "confirm", 3)),
+                 scope_views=getattr(args, "scope", False))
+
+
+def _stall_timeout(args) -> float | None:
+    from conveyor.harness import DEFAULT_STALL_TIMEOUT
+
+    seconds = getattr(args, "stall_timeout", DEFAULT_STALL_TIMEOUT)
+    return seconds if seconds and seconds > 0 else None
 
 
 def _harness(kind: str, model: str | None, effort: str | None, args, store, meter, cache: dict):
@@ -36,7 +47,9 @@ def _harness(kind: str, model: str | None, effort: str | None, args, store, mete
 
         if available(args.claude) is None:
             sys.exit(f"Can't run `{args.claude} --version`. Install Claude Code, use --harness pi, or pass --offline.")
-        harness = ClaudeCode(Settings(binary=args.claude, model=model or DEFAULT_MODEL, effort=effort or "high"),
+        harness = ClaudeCode(Settings(binary=args.claude, model=model or DEFAULT_MODEL, effort=effort or "high",
+                                      autocompact=getattr(args, "autocompact", None),
+                                      stall_timeout=_stall_timeout(args)),
                              store, meter, lanes=args.lanes)
     else:
         from conveyor.pi import PiAgent
@@ -46,7 +59,8 @@ def _harness(kind: str, model: str | None, effort: str | None, args, store, mete
         if problem:
             sys.exit(f"The Pi harness can't run: {problem}.")
         harness = PiAgent(model, provider=args.provider, effort=effort or "high", store=store, meter=meter,
-                          lanes=args.lanes)
+                          lanes=args.lanes, compact_every_looks=getattr(args, "compact_every_looks", None),
+                          stall_timeout=_stall_timeout(args))
         if not harness.api_key:
             sys.exit(f"No {harness.provider.label} key. Set {harness.provider.env_var}, or put "
                      f"{harness.provider.env_var}=... in a .env file here or in a parent directory.")
@@ -118,6 +132,9 @@ def cmd_run(args) -> None:
     from conveyor.painting.problem import build
     from conveyor.store import Store
 
+    # A parent that ignores Ctrl+C (a background job, or the dashboard that started this run) passes that on to
+    # its children; the run needs the signal to stop its sessions cleanly.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     setup = _setup(args)
     offline = setup.mode == "offline"
     store = Store(args.db, run_name=args.name or ("offline" if offline else f"{args.harness} {args.model or 'default model'}"),
@@ -179,6 +196,7 @@ def cmd_paint(args) -> None:
     """One painting: an instrument (a seed name or a .py file) with the starting strategy, scored."""
     from conveyor.claude import Meter
     from conveyor.evolve import Organism
+    from conveyor.harness import SessionFailed
     from conveyor.painting import prompts
     from conveyor.painting.problem import Painter
     from conveyor.painting.problem import make_instrument
@@ -206,6 +224,8 @@ def cmd_paint(args) -> None:
     except KeyboardInterrupt:
         _stop_all(roles)
         raise
+    except SessionFailed as e:
+        sys.exit(f"The painting session failed: {e}")
     for org, partner in ((inst, prompt), (prompt, inst)):
         ev = painter.evaluation(p, org, partner, "paint")
         store.evaluation({"id": ev.id, "node": org.node, "organism_id": org.id, "partner_id": partner.id,
@@ -242,7 +262,7 @@ def cmd_mutate(args) -> None:
                   config=_config(args))
     meter = Meter(budget_usd=args.budget, max_usage=args.max_usage)
     claude = _roles(args, store, meter, paint=False, judge=False).mutate
-    height = load_target(setup.target, width=setup.width).height
+    height = load_target(setup.target, width=setup.width, patch=setup.n_patch).height
     parent = make_instrument(_instrument_source(args.instrument), f"start: {args.instrument}", setup, store, height)
     if not parent.viable:
         sys.exit(f"The instrument isn't valid: {parent.note}")
@@ -294,10 +314,12 @@ def cmd_mutate(args) -> None:
 def cmd_probe(args) -> None:
     from conveyor.painting.canvas import load_target
     from conveyor.painting.instrument import probe
+    from conveyor.painting.problem import Setup
     from conveyor.painting.workbench import describe
 
-    height = load_target(args.target, width=args.width).height
-    report = probe(_instrument_source(args.instrument), args.width, height)
+    setup = Setup(target=args.target, width=args.width)
+    height = load_target(setup.target, width=setup.width, patch=setup.n_patch).height
+    report = probe(_instrument_source(args.instrument), setup.width, height)
     sheet = report.pop("sheet")
     print(describe(report))
     if sheet and args.sheet:
@@ -306,22 +328,38 @@ def cmd_probe(args) -> None:
 
 
 def cmd_serve(args) -> None:
+    from conveyor.launch import Launcher
     from conveyor.server import make_server
+    from conveyor.store import init_db
 
-    server = make_server(Path(args.db), args.host, args.port)
-    print(f"Dashboard at http://{args.host}:{server.server_port}")
+    db = Path(args.db).resolve()
+    if not db.exists():  # an existing file is left alone: it may be an archive
+        init_db(db)
+    launcher = None
+    if args.no_launch:
+        pass
+    elif args.host in LOOPBACK:
+        launcher = Launcher(db, build_parser)
+    else:
+        print(f"Starting runs from the dashboard is off: it would let anyone who can reach {args.host} spend your "
+              "model budget. Serve on 127.0.0.1 to turn it on.")
+    server = make_server(db, args.host, args.port, launcher)
+    print(f"Dashboard at http://{args.host}:{server.server_port}"
+          + ("  (start runs from the New run button)" if launcher else ""))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        if launcher:
+            launcher.shutdown()
 
 
-def main() -> None:
-    sys.stdout.reconfigure(line_buffering=True)
+def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParser:
     from conveyor.claude import DEFAULT_EFFORT
     from conveyor.claude import DEFAULT_MODEL
 
-    parser = argparse.ArgumentParser(prog="conveyor", description="Co-evolve a painter's prompt and its instrument.")
+    parser = parser_class(prog="conveyor", description="Co-evolve a painter's prompt and its instrument.")
     sub = parser.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run", help="Run the co-evolution and serve the dashboard while it runs")
     paint = sub.add_parser("paint", help="One painting with one instrument, scored")
@@ -347,6 +385,15 @@ def main() -> None:
             p.add_argument(f"--{role}-model", default=None)
             p.add_argument(f"--{role}-effort", default=None, choices=efforts)
         p.add_argument("--claude", default="claude", help="Path to the Claude Code CLI")
+        p.add_argument("--stall-timeout", type=float, default=600.0, metavar="SECONDS",
+                       help="Kill a session that prints nothing for this long and run its job again. A provider "
+                            "can take a request and go silent until the connection drops. 0 turns it off.")
+        p.add_argument("--compact-every-looks", type=int, default=None, metavar="N",
+                       help="Pi only: summarize the conversation once N looks (canvas images) have piled up, "
+                            "keeping the task and the newest look. Default: never.")
+        p.add_argument("--autocompact", type=int, default=None, metavar="TOKENS",
+                       help="Claude only: compact the context once it passes this many tokens (100000 to 1000000). "
+                            "Default: the CLI's own threshold.")
         p.add_argument("--lanes", type=int, default=2, help="Sessions at once per harness. On a Claude "
                        "subscription they share one rate limit.")
         p.add_argument("--name", default=None)
@@ -356,9 +403,10 @@ def main() -> None:
                        "window (five-hour or weekly) is this full. The run shares those windows with everything else.")
     for p in (run, paint, mutate, probe):
         p.add_argument("--target", default="self_portrait")
-        p.add_argument("--width", type=int, default=128)
+        p.add_argument("--width", type=int, default=512)
         p.add_argument("--actions", type=int, default=200, help="Instrument calls per painting")
-        p.add_argument("--looks", type=int, default=None, help="Default: one per 25 actions, at least 4")
+        p.add_argument("--looks", type=int, default=None, help="Looks per painting. Default: one per 25 actions, "
+                       "at least 4. Negative (e.g. -1) means unlimited.")
     for p in (run, paint, mutate, serve):
         p.add_argument("--db", default="runs/conveyor.db")
     for p in (run, paint, serve):
@@ -368,6 +416,8 @@ def main() -> None:
         p.add_argument("--judge", action=argparse.BooleanOptionalAction, default=True,
                        help="A model judges each finished painting on likeness, colour and brushwork (default on)")
         p.add_argument("--judge-weight", type=float, default=0.5, help="Share of the score the judge carries")
+        p.add_argument("--scope", action=argparse.BooleanOptionalAction, default=False,
+                       help="The painter may set a scope and paint in it with local coordinates (default off)")
         p.add_argument("--no-serve", action="store_true", help="Don't serve the dashboard")
         p.add_argument("--offline", action="store_true", help="No model: the greedy painter and a scripted mutator")
     run.add_argument("--cycles", type=int, default=6)
@@ -392,9 +442,16 @@ def main() -> None:
     mutate.add_argument("--budget", type=float, default=15.0)
     probe.add_argument("instrument", help="A seed name or an instrument .py")
     probe.add_argument("--sheet", default=None, help="Write the demo sheet PNG here")
+    serve.add_argument("--no-launch", action="store_true", help="Don't offer to start runs from the dashboard")
     for p, fn in ((run, cmd_run), (paint, cmd_paint), (mutate, cmd_mutate), (probe, cmd_probe), (serve, cmd_serve)):
         p.set_defaults(func=fn)
-    args = parser.parse_args()
+    parser.commands = {"run": run, "paint": paint, "mutate": mutate, "probe": probe, "serve": serve}
+    return parser
+
+
+def main() -> None:
+    sys.stdout.reconfigure(line_buffering=True)
+    args = build_parser().parse_args()
     args.func(args)
 
 

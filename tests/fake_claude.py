@@ -8,6 +8,10 @@ It reads the first user message from stdin, launches the MCP server named in --m
   - FAKE_CLAUDE_CUT_OFF names a file: if it exists, the painter deletes it and hits the usage limit after its
     first call, the way the CLI reports it (a rejected rate_limit_event, then an error result), with the limit
     resetting FAKE_CLAUDE_RESETS_IN seconds later (default 1)
+  - FAKE_CLAUDE_STALL names a file: if it exists, the session deletes it, prints its init and then goes silent,
+    the way a provider that takes a request and never answers does
+  - FAKE_CLAUDE_DROP names a file: if it exists, the painter deletes it and dies after its first call with no
+    result, the way a dropped stream does
 Everything it does comes back on stdout as the CLI would print it, so the host's recording path is the real one.
 """
 
@@ -93,6 +97,10 @@ def call(server, i, name, arguments):
 server_name = None
 turns = 1
 emit({"type": "system", "subtype": "init", "model": opt("--model"), "tools": [], "mcp_servers": []})
+stall = os.environ.get("FAKE_CLAUDE_STALL")
+if stall and os.path.exists(stall):
+    os.remove(stall)
+    time.sleep(60)
 cfg = opt("--mcp-config")
 if cfg:
     server_name, spec = next(iter(json.loads(cfg)["mcpServers"].items()))
@@ -113,6 +121,12 @@ if cfg:
             for _ in range(int(os.environ.get("FAKE_CLAUDE_REPEAT", "2"))):
                 i += 1
                 call(server, i, t["name"], arguments)
+                drop = os.environ.get("FAKE_CLAUDE_DROP")
+                if drop and os.path.exists(drop):
+                    os.remove(drop)
+                    sys.stderr.write("terminated\n")
+                    server.close()
+                    sys.exit(1)
                 flag = os.environ.get("FAKE_CLAUDE_CUT_OFF")
                 if flag and os.path.exists(flag):
                     os.remove(flag)

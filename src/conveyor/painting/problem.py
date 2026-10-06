@@ -30,6 +30,7 @@ import numpy as np
 
 from conveyor.harness import Job
 from conveyor.harness import ProcessHarness
+from conveyor.harness import SessionFailed
 from conveyor.evolve import Context
 from conveyor.evolve import Evaluation
 from conveyor.evolve import Mutator
@@ -46,6 +47,7 @@ from conveyor.painting.canvas import to_png
 from conveyor.painting.canvas import worst_regions
 from conveyor.painting.critic import Critic
 from conveyor.painting.instrument import CALL_TIMEOUT
+from conveyor.painting.instrument import MAX_VIEWS
 from conveyor.painting.instrument import Instrument
 from conveyor.painting.instrument import InstrumentError
 from conveyor.painting.instrument import all_niches
@@ -66,9 +68,10 @@ _SHEETS: dict[str, bytes] = {}  # demo sheet PNGs by artifact name, so a paintin
 @dataclass
 class Setup:
     target: str = "self_portrait"
-    width: int = 128
+    width: int = 512
     actions: int = 200
-    looks: int | None = None  # default: one per 25 actions, at least 4
+    looks: int | None = None  # default: one per 25 actions, at least 4; negative means unlimited
+    patch: int | None = None  # region grid for the error tables; default scales with width
     mode: str = "model"  # "model" (a harness runs each role), or "offline" for the greedy painter and scripted mutators
     seeds: list[str] = field(default_factory=lambda: ["round"])
     work_dir: Path = Path("runs/sessions")
@@ -79,6 +82,7 @@ class Setup:
     paint_timeout: float = 40 * 60
     judge: bool = True  # a model judges each finished painting; off in offline mode
     judge_weight: float = 0.5  # share of the score the judge's verdict carries; the rest is the numeric critic
+    scope_views: bool = False  # the painter may set a scope and paint in it with local coordinates
     confirm: int = 3  # paintings a challenger and the champion each stand on before the champion changes
     parents: int = 2
     operator_weights: dict[str, float] = field(default_factory=lambda: {"refine": 0.4, "invent": 0.4, "recombine": 0.2})
@@ -86,6 +90,12 @@ class Setup:
     @property
     def n_looks(self) -> int:
         return self.looks if self.looks is not None else max(4, self.actions // 25)
+
+    @property
+    def n_patch(self) -> int:
+        """Region size for the error tables: 16 px at 128 wide, so the whole canvas stays about 8 x 10 regions
+        however big it gets. A view's own table is finer (see `view_patch`)."""
+        return self.patch if self.patch is not None else 16 * max(1, round(self.width / 128))
 
 
 # ---- instruments ----------------------------------------------------------------------------------------------
@@ -124,8 +134,8 @@ def make_instrument(source: str, summary: str, setup: Setup, store: Store | None
 
 
 def _judge_png(img: np.ndarray) -> bytes:
-    """An image as the judge sees it: 3x, nearest-neighbour, no grid. The same for the target and every painting."""
-    return to_png(img, scale=3)
+    """An image as the judge sees it: nearest-neighbour, no grid. The same for the target and every painting."""
+    return to_png(img, scale=max(1, min(3, 1024 // max(1, img.shape[1]))))
 
 
 def instrument_doc(source: str) -> str:
@@ -184,7 +194,7 @@ class Painter:
         roles = Roles.of(harness)
         self.claude = roles.paint  # the painting harness (the name predates Pi)
         self.critic = Critic()
-        self.target = load_target(setup.target, width=setup.width)
+        self.target = load_target(setup.target, width=setup.width, patch=setup.n_patch)
         self._cache: dict[tuple[str, str, int], Painting] = {}
         self._locks: dict[tuple[str, str, int], threading.Lock] = {}
         self._lock = threading.Lock()
@@ -219,10 +229,12 @@ class Painter:
         s = self.setup
         d = self._session_dir("paint")
         job = {"source": instrument.genome["source"], "target": s.target, "width": s.width, "actions": s.actions,
-               "looks": s.n_looks, "seed": random.randrange(1 << 30), "snapshot_every": 5}
+               "looks": s.n_looks, "patch": s.n_patch, "seed": random.randrange(1 << 30), "snapshot_every": 5,
+               "scope": bool(s.scope_views)}
         (d / "job.json").write_text(json.dumps(job))
         started = time.time()
         ingest = _Ingest(self.store, d)
+        interrupted = False
         if s.mode == "offline" or self.claude is None:
             sid = new_id()
             ingest.session_id = sid
@@ -239,17 +251,21 @@ class Painter:
             inst = Instrument(instrument.genome["source"])
             h, w = self.target.height, self.target.width
             system = (prompt.genome["prompt"].strip() + "\n\n" + prompts.PAINTER_RULES.format(
-                w=w, h=h, actions=s.actions, looks=s.n_looks, reference=inst.reference(w, h),
+                w=w, h=h, actions=s.actions, looks="unlimited" if s.n_looks < 0 else s.n_looks, reference=inst.reference(w, h),
                 area_cap=Canvas(h, w).area_cap, share=CALL_AREA_SHARE))
             if self.judge is not None:
                 system += "\n\n" + prompts.JUDGE_RULE
+            if s.scope_views:
+                system += "\n\n" + prompts.SCOPE_RULE
             sheet = self._sheet(instrument)
             first, second, third = prompts.PAINTER_FIRST_MESSAGE
             content = [{"type": "text", "text": first + ":"}, {"type": "png", "data": self.target_png}]
             if sheet:
                 content += [{"type": "text", "text": second + ":"}, {"type": "png", "data": sheet}]
             content.append({"type": "text", "text": third})
-            tools = [t.name for t in inst.spec.tools] + ["look", "finish"]
+            tools = [t.name for t in inst.spec.tools] + [v.name for v in inst.spec.views] + ["look", "finish"]
+            if s.scope_views:
+                tools.append("scope")
             outcome = self.claude.run(Job(
                 purpose="paint", system_prompt=system, content=content, cwd=d,
                 mcp={"name": "canvas", "command": sys.executable, "args": ["-m", "conveyor.painting.paintserver", str(d)]},
@@ -259,10 +275,15 @@ class Painter:
                 on_event=lambda msg: ingest.pull() if msg.get("type") == "user" else None))
             ingest.pull()
             session_error = outcome.error
+            interrupted = outcome.interrupted
         canvas = np.load(d / "canvas.npy") if (d / "canvas.npy").exists() else Canvas(self.target.height, self.target.width).img
         finish = json.loads((d / "finish.json").read_text()) if (d / "finish.json").exists() else {}
         calls = ingest.calls
         applied = [c for c in calls if c.get("status") == "applied" and c.get("tool") not in ("look", "finish")]
+        # A session cut off before the painter finished (a stalled or dropped stream, a crash) says nothing about
+        # the instrument or the prompt. Scoring its half-painted canvas, or caching it, would charge them for it.
+        if interrupted and not finish and len(applied) < s.actions:
+            raise SessionFailed(f"the painting session ended after {len(applied)} of {s.actions} actions: {session_error}")
         # A painting that never got going (the session crashed before a single mark) says nothing about either
         # organism, so it doesn't count as an evaluation of them.
         viable = bool(applied)
@@ -271,6 +292,7 @@ class Painter:
         rejected = [c for c in calls if c.get("status") == "rejected"]
         stats = {
             "actions_used": len(applied), "actions_budget": s.actions, "looks_used": sum(1 for c in calls if c.get("tool") == "look"),
+            "views_used": sum(1 for c in calls if c.get("status") == "view"),
             "tool_use": dict(usage.most_common()), "refused": len(rejected),
             "refusals": [c.get("error", "")[:160] for c in rejected[:5]],
             "ran_dry": sum(1 for c in applied if c.get("dry")), "finished": bool(finish),
@@ -302,12 +324,19 @@ class Painter:
                         details=details)
 
     def _verdict(self, canvas: np.ndarray, organism_id: str):
-        """The judge's verdict on a finished painting, retried once. Rate limits and budget stops propagate."""
-        for _ in range(2):
+        """The judge's verdict on a finished painting. An unusable reply is retried once; a session cut off partway
+        is retried twice. If the judge never gets through, the painting fails with it: a score from the critic alone
+        isn't comparable with one that includes the judge. Rate limits and budget stops propagate."""
+        unusable = cut_off = 0
+        while unusable < 2 and cut_off < 3:
             try:
                 return self.judge.judge(self.judge_target_png, _judge_png(canvas), organism_id=organism_id)
             except JudgeError:
-                continue
+                unusable += 1
+            except SessionFailed:
+                cut_off += 1
+        if cut_off >= 3:
+            raise SessionFailed("the judge's session was cut off three times")
         return None
 
     def _sheet(self, instrument: Organism) -> bytes | None:
@@ -442,7 +471,7 @@ class ClaudeInstrumentMutator(Mutator):
         return prompts.DESIGNER_SYSTEM.format(
             w=self.setup.width, h=self.height, contract=prompts.CONTRACT, area_cap=canvas.area_cap,
             share=CALL_AREA_SHARE, max_radius=canvas.max_radius, side=int(2 * canvas.max_radius + 1),
-            timeout=CALL_TIMEOUT)
+            timeout=CALL_TIMEOUT, max_views=MAX_VIEWS)
 
     def propose(self, ctx: Context) -> list[Organism]:
         s = self.setup
@@ -482,6 +511,8 @@ class ClaudeInstrumentMutator(Mutator):
             organism_id=ctx.parent.id, task_budget=s.mutate_task_budget))
         sub = d / "submitted.json"
         if not sub.exists():
+            if outcome.interrupted:
+                raise SessionFailed(f"the instrument session ended early: {outcome.error}")
             raise RuntimeError(f"no instrument was submitted ({outcome.error or 'the session ended without submitting'})")
         record = json.loads(sub.read_text())
         child = make_instrument(record["source"], record.get("summary", ""), s, self.store, self.height,
@@ -532,6 +563,8 @@ class ClaudePromptMutator(Mutator):
             content=content, cwd=d, json_schema=self.SCHEMA, max_budget_usd=self.setup.mutate_budget_usd,
             node="painter", organism_id=ctx.parent.id, task_budget=self.setup.mutate_task_budget))
         out = outcome.structured if isinstance(outcome.structured, dict) else _json_in(outcome.result)
+        if not out and outcome.interrupted:
+            raise SessionFailed(f"the strategy session ended early: {outcome.error}")
         if not out or not isinstance(out.get("edits"), list) or not out["edits"]:
             raise RuntimeError(f"no edits came back ({outcome.error or 'unparseable reply'})")
         text, missed = apply_edits(parent, out["edits"])
@@ -604,7 +637,7 @@ def _reference(instrument: Organism, setup: Setup) -> str:
         inst = Instrument(instrument.genome["source"])
     except InstrumentError:
         return "(the instrument doesn't compile)"
-    return inst.reference(setup.width, load_target(setup.target, width=setup.width).height)
+    return inst.reference(setup.width, load_target(setup.target, width=setup.width, patch=setup.n_patch).height)
 
 
 def _json_in(text: str) -> dict | None:

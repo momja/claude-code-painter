@@ -26,6 +26,7 @@ from pathlib import Path
 
 from conveyor.catalog import _catalog
 from conveyor.catalog import model_info
+from conveyor.harness import DEFAULT_STALL_TIMEOUT
 from conveyor.harness import Job
 from conveyor.harness import Meter
 from conveyor.harness import ProcessHarness
@@ -131,15 +132,18 @@ class PiAgent(ProcessHarness):
 
     def __init__(self, model: str | None = None, *, provider: str = DEFAULT_PROVIDER, effort: str | None = "high",
                  store: Store | None = None, meter: Meter | None = None, lanes: int = 2, api_key: str | None = None,
-                 max_tokens: int = 16_384, max_turns: int = 400, heap_mb: int = 384, timeout: float = 45 * 60,
+                 max_tokens: int = 16_384, max_turns: int = 400, heap_mb: int = 384,
+                 compact_every_looks: int | None = None, stall_timeout: float | None = DEFAULT_STALL_TIMEOUT, timeout: float = 45 * 60,
                  node: str | None = None, faux: list[dict] | None = None) -> None:
         self.provider = PROVIDERS[provider]
         model = model or self.provider.default_model
-        super().__init__(model=model, effort=effort, store=store, meter=meter, lanes=lanes, timeout=timeout)
+        super().__init__(model=model, effort=effort, store=store, meter=meter, lanes=lanes, timeout=timeout,
+                         stall_timeout=stall_timeout)
         self.node = node or shutil.which("node") or "node"
         self.api_key = api_key if api_key is not None else load_api_key(self.provider)
         self.max_tokens = max_tokens
         self.max_turns = max_turns
+        self.compact_every_looks = compact_every_looks  # summarize the history once this many looks pile up
         self.heap_mb = heap_mb
         self.faux = faux  # scripted replies for tests: the real agent loop and MCP plumbing, no network
         self.definition = model_def(self.provider, model) if faux is None else {"id": model, "input": ["text", "image"]}
@@ -165,7 +169,7 @@ class PiAgent(ProcessHarness):
             "maxImages": self.provider.max_images, "thinkingLevel": self.level, "maxTokens": self.max_tokens,
             "systemPrompt": job.system_prompt, "content": content, "mcp": job.mcp, "tools": job.tools,
             "stopTools": job.stop_tools, "jsonSchema": job.json_schema, "maxTurns": self.max_turns,
-            "maxBudgetUsd": job.max_budget_usd, "faux": self.faux,
+            "maxBudgetUsd": job.max_budget_usd, "compactEveryLooks": self.compact_every_looks, "faux": self.faux,
         }
         env = child_env()
         if self.api_key:

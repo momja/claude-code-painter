@@ -45,6 +45,27 @@ def rows(store, sql, *args):
 
 
 @needs_pi
+def test_pi_compacts_after_n_looks(env):
+    store, meter, setup = env
+    look = {"blocks": [stroke(10, 10), {"tool": "look", "args": {}}]}
+    faux = [look, look, {"blocks": [{"text": "SUMMARY: sky is done."}]},  # the third reply is the summarizer's
+            {"blocks": [{"tool": "finish", "args": {"note": "ok"}}]}, {"blocks": [{"text": "Done."}]}]
+    pi = PiAgent("faux-model", store=store, meter=meter, faux=faux, compact_every_looks=2)
+    painter = Painter(setup, store, pi)
+    inst = make_instrument(ROUND, "round", setup, store, painter.target.height)
+    p = painter.paint(inst, Organism(node="painter", genome={"prompt": prompts.INITIAL_STRATEGY}))
+    assert p.viable and p.details["note"] == "ok"
+    [(status, turns)] = rows(store, "SELECT status, num_turns FROM sessions")
+    assert status == "ok" and turns == 3  # look, look, finish; the summary is not a turn
+    events = [json.loads(d) for (d,) in rows(store, "SELECT data FROM session_events WHERE kind='other'")]
+    assert [e["subtype"] for e in events].count("compact_boundary") == 1
+    starts = [e for e in events if e["subtype"] == "request_start"]
+    assert len(starts) == 3 and all(e["images"] >= 1 for e in starts)  # each request logs what it sent
+    assert [e["messages"] for e in starts] == [1, 4, 5]  # the third goes out compacted: 7 messages became 5
+    assert sum(e["subtype"] == "request_end" for e in events) == 3
+
+
+@needs_pi
 def test_a_painting_on_pi(env):
     store, meter, setup = env
     faux = [
