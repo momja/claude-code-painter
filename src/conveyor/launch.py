@@ -269,6 +269,45 @@ class Launcher:
         threading.Thread(target=launch._read, name=f"launch-{launch.id}", daemon=True).start()
         return launch.view()
 
+    def start_painting(self, run: str, body: dict) -> dict:
+        from conveyor.studio import create_request
+        from conveyor.store import Store
+
+        request = create_request(self.db, run, body)
+        argv = ["studio", str(self.db), request["id"]]
+        try:
+            proc = subprocess.Popen([self.python, "-m", "conveyor.studio", str(self.db), request["id"]],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1, env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                                    start_new_session=True)
+        except OSError as error:
+            with_store = Store(self.db, run_id=run)
+            with_store.update_painting_request(request["id"], status="failed", ended=time.time(), error=str(error))
+            with_store.close()
+            raise LaunchError(f"Could not start painting: {error}") from error
+        launch = Launch(argv, "New painting", proc)
+        launch.run_id = run
+        with self._lock:
+            self._launches[launch.id] = launch
+        threading.Thread(target=self._read_painting, args=(launch, request["id"], run),
+                         name=f"painting-{launch.id}", daemon=True).start()
+        return {**launch.view(), "request_id": request["id"]}
+
+    def _read_painting(self, launch: Launch, request_id: str, run: str) -> None:
+        from conveyor.store import Store, connect
+
+        launch._read()
+        conn = connect(self.db, readonly=True)
+        try:
+            row = conn.execute("SELECT status FROM painting_requests WHERE id=?", (request_id,)).fetchone()
+        finally:
+            conn.close()
+        if row and row["status"] in ("queued", "running"):
+            store = Store(self.db, run_id=run)
+            store.update_painting_request(request_id, status="stopped" if launch.stop_requested else "failed",
+                                          ended=time.time(), error="Painting process ended before saving its result.")
+            store.close()
+
     def get(self, launch_id: str) -> dict | None:
         launch = self._launches.get(launch_id)
         return launch.view() if launch else None

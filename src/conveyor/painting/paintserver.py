@@ -44,14 +44,20 @@ MAX_BATCH_CALLS = 40
 MAX_PLAN_CHARS = 1200
 
 
+def _rounded(value: float | None, digits: int) -> float | None:
+    return round(value, digits) if value is not None else None
+
+
 class PaintSession:
     def __init__(self, session_dir: Path) -> None:
         self.dir = Path(session_dir)
         job = json.loads((self.dir / "job.json").read_text())
         self.job = job
-        self.target = load_target(job["target"], width=job.get("width", 128), patch=job.get("patch", 16))
+        self.target = (load_target(job["target"], width=job.get("width", 128), patch=job.get("patch", 16))
+                       if job.get("target") else None)
         self.inst = Instrument(job["source"])
-        self.canvas = Canvas(self.target.height, self.target.width)
+        self.canvas = Canvas(self.target.height if self.target else job.get("height", job.get("width", 128)),
+                             self.target.width if self.target else job.get("width", 128))
         self.pen = self.inst.new_state()
         self.rng = np.random.default_rng(job.get("seed", 0))
         self.actions_left = int(job.get("actions", 200))
@@ -70,17 +76,19 @@ class PaintSession:
         self._log = open(self.dir / "calls.jsonl", "a", buffering=1)
         self.critic = Critic()
         self.error = self.total_error()
-        self.scores = self.critic.score(self.canvas.img, self.target)
+        self.scores = self.critic.score(self.canvas.img, self.target) if self.target else {}
         self._save_canvas()
 
     @property
-    def score(self) -> float:
-        return self.scores["total"]
+    def score(self) -> float | None:
+        return self.scores.get("total")
 
     # ---- measuring ----------------------------------------------------------------------------------------
 
-    def total_error(self) -> float:
-        """Whole-canvas RMSE against the target, times 1000 so the numbers read easily."""
+    def total_error(self) -> float | None:
+        """Whole-canvas RMSE, or no metric when painting from text."""
+        if self.target is None:
+            return None
         return float(np.sqrt(((self.canvas.img - self.target.image) ** 2).mean()) * 1000.0)
 
     def _save_canvas(self) -> None:
@@ -90,6 +98,8 @@ class PaintSession:
 
     def _record(self, **entry) -> None:
         self.index += 1
+        if self.target is None:
+            entry = {k: v for k, v in entry.items() if not k.startswith(("score_", "error_"))}
         entry = {"i": self.index, "t": round(time.time(), 3), **entry}
         if self._batch_call is not None:
             entry["batch_call"] = self._batch_call
@@ -206,7 +216,7 @@ class PaintSession:
         # Keep metrics for diagnostics and final evaluation, but don't make each stroke a numeric reward.
         # Pixel-based feedback can discourage finishing shapes and brushwork that improve perceived likeness.
         old, self.error = self.error, self.total_error()
-        old_score, self.scores = self.score, self.critic.score(self.canvas.img, self.target)
+        old_score, self.scores = self.score, self.critic.score(self.canvas.img, self.target) if self.target else {}
         snap = None
         last = self.actions_left == 0
         if self.applied % self.snapshot_every == 0 or last:
@@ -214,8 +224,8 @@ class PaintSession:
             (self.dir / snap).write_bytes(to_png(self.canvas.img))
         self._save_canvas()
         self._record(tool=tool, tool_use_id=tool_use_id, args=args, status="applied", note=note,
-                     error_before=round(old, 2), error_after=round(self.error, 2), score_before=round(old_score, 4),
-                     score_after=round(self.score, 4), area=self.canvas.area_used,
+                     error_before=_rounded(old, 2), error_after=_rounded(self.error, 2), score_before=_rounded(old_score, 4),
+                     score_after=_rounded(self.score, 4), area=self.canvas.area_used,
                      dry=self.canvas.dry, actions_left=self.actions_left, pen=self._pen_text(), snapshot=snap,
                      scope=list(self.scope_rect) if self.scope_rect else None,
                      ms=round((time.perf_counter() - started) * 1000, 1))
@@ -244,7 +254,7 @@ class PaintSession:
         if self.looks_left > 0:
             self.looks_left -= 1
         self._record(tool="look", tool_use_id=tool_use_id, status="applied", looks_left=self.looks_left,
-                     error_after=round(self.error, 2), score_after=round(self.score, 4))
+                     error_after=_rounded(self.error, 2), score_after=_rounded(self.score, 4))
         return self.status(), gridded_png(self.canvas.img)
 
     def view(self, tool: str, args: dict, tool_use_id: str | None = None) -> tuple[str, list[bytes]]:
@@ -264,8 +274,8 @@ class PaintSession:
                 raise ToolFailure(f"{e}. Too many refused calls; the painting has been ended.")
             raise ToolFailure(f"{e}. No action was used.")
         self._record(tool=tool, tool_use_id=tool_use_id, args=args, status="view", note=note,
-                     views=[list(v.rect) for v in views], error_after=round(self.error, 2),
-                     score_after=round(self.score, 4), actions_left=self.actions_left,
+                     views=[list(v.rect) for v in views], error_after=_rounded(self.error, 2),
+                     score_after=_rounded(self.score, 4), actions_left=self.actions_left,
                      ms=round((time.perf_counter() - started) * 1000, 1))
         parts = []
         if note:
@@ -288,7 +298,7 @@ class PaintSession:
         if args.get("clear") in (True, "true", "1", 1):
             self.scope_rect = None
             self._record(tool="scope", tool_use_id=tool_use_id, args=args, status="scope", scope=None,
-                         error_after=round(self.error, 2), score_after=round(self.score, 4),
+                         error_after=_rounded(self.error, 2), score_after=_rounded(self.score, 4),
                          actions_left=self.actions_left, ms=ms())
             return (f"Scope cleared: coordinates are canvas pixels again. {self.actions_left} actions left.", [])
         try:
@@ -304,7 +314,7 @@ class PaintSession:
         x0, y0, x1, y1 = v.rect
         side = x1 - x0
         self._record(tool="scope", tool_use_id=tool_use_id, args=args, status="scope", scope=list(v.rect),
-                     error_after=round(self.error, 2), score_after=round(self.score, 4),
+                     error_after=_rounded(self.error, 2), score_after=_rounded(self.score, 4),
                      actions_left=self.actions_left, ms=ms())
         png = gridded_png(v.img, scale=v.scale, x0=x0, y0=y0, lx0=x0, ly0=y0)
         return (f"Scope is x {x0}-{x1}, y {y0}-{y1}: until cleared, paint calls take local coordinates 0-{side}, "
@@ -317,7 +327,9 @@ class PaintSession:
             return "Already finished."
         self.finished = True
         record = {"note": str(note)[:4000], "actions_used": self.applied, "actions_left": self.actions_left,
-                  "error": round(self.error, 2), "score": round(self.score, 4), "at": time.time()}
+                  "at": time.time()}
+        if self.target is not None:
+            record.update(error=round(self.error, 2), score=round(self.score, 4))
         (self.dir / "finish.json").write_text(json.dumps(record))
         self._record(tool="finish", tool_use_id=tool_use_id, status="applied", note=record["note"][:500])
         self._save_canvas()

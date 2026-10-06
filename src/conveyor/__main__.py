@@ -73,7 +73,8 @@ def _harness(kind: str, model: str | None, effort: str | None, args, store, mete
     return harness
 
 
-def _roles(args, store, meter, *, paint: bool = True, mutate: bool = True, judge: bool = True):
+def _roles(args, store, meter, *, paint: bool = True, mutate: bool = True, judge: bool = True,
+           record: bool = True):
     """
     The harness for each role. `--harness`, `--model` and `--effort` set every role; `--paint-*`, `--mutate-*`
     and `--judge-*` override one. A role on a different harness from the global one doesn't inherit `--model`:
@@ -94,6 +95,13 @@ def _roles(args, store, meter, *, paint: bool = True, mutate: bool = True, judge
     for name, h in (("paint", roles.paint), ("mutate", roles.mutate), ("judge", roles.judge)):
         if h is not None:
             print(f"  {name:7s} {h.describe()}")
+            settings = {"harness": h.name, "model": h.model, "effort": h.effort}
+            if h.name == "pi":
+                settings.update(provider=h.provider.key, definition=h.definition, max_tokens=h.max_tokens,
+                                max_turns=h.max_turns, heap_mb=h.heap_mb,
+                                compact_every_looks=h.compact_every_looks, paint_context_turns=h.paint_context_turns)
+            if record:
+                store.emit("role_settings", node=name, **settings)
     print(f"  {args.lanes} sessions at a time per harness.")
     return roles
 

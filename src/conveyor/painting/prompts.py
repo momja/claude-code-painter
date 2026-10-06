@@ -44,6 +44,18 @@ region, the mark you wanted, and what the tool did instead.
 The instrument:
 {reference}"""
 
+# Keep the same canvas/tool contract for free-form requests, but remove instructions that need a target.
+TEXT_PAINTER_RULES = (PAINTER_RULES
+    .replace("painting a copy of the target picture", "painting an original image from the user's text brief")
+    .replace("Numeric quality metrics are kept for diagnostics and final evaluation, not shown while you work. "
+             "Compare the canvas visually with the target:",
+             "There is no target image, RMSE, numeric score or likeness judge. Review your canvas visually:")
+    .replace("review the canvas against the target", "review the canvas against the user's brief")
+    .replace("what the target needed", "what the requested painting needed"))
+TEXT_PAINTER_RULES = ("Use the strategy above and the same instrument, but adapt any instructions about copying "
+                      "or matching target colours to the user's brief. Invent the composition and colours.\n\n"
+                      + TEXT_PAINTER_RULES)
+
 BATCH_RULE = """\
 Prefer `paint_batch` to individual paint calls. Put 10 to 40 calls in a batch, with shared arguments in \
 `defaults`. Set `tool` once and make `calls` a list of argument objects, or omit `tool` and use \

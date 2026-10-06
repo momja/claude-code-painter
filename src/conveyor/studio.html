@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Painter studio · Conveyor</title>
+<style>
+:root{--bg:#f4efe6;--surface:#fbf8f2;--line:#ddd4c4;--ink:#1f2328;--muted:#6a6e75;--accent:#2f4b8f;--painter:#b3401a;--good:#2f7d4f;--code:#efe8db;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--bg:#15171b;--surface:#1d2025;--line:#30343b;--ink:#e7e4dd;--muted:#a0a3a8;--accent:#8fa9e8;--painter:#ec8a64;--good:#6cc08f;--code:#23262c;color-scheme:dark}}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--bg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:14px 22px;background:var(--surface);border-bottom:1px solid var(--line)}h1{font-size:17px;margin:0}h2{font-size:16px;margin:0 0 10px}h3{font-size:13px;margin:20px 0 8px}a{color:var(--accent)}button,input,select,textarea{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:7px 9px}button{cursor:pointer}button:disabled{cursor:default;opacity:.55}button:hover:not(:disabled){border-color:var(--accent)}button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}select{max-width:100%}.primary{background:var(--accent);color:var(--surface);border-color:var(--accent)}.muted{color:var(--muted)}.bad{color:var(--painter)}.spacer{flex:1}.tag{font-size:12px;border:1px solid var(--line);border-radius:12px;padding:2px 8px}
+main{display:grid;grid-template-columns:minmax(0,1fr) 365px;height:calc(100dvh - 70px);min-height:500px}.graph-area{display:flex;flex-direction:column;min-width:0;min-height:0}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:14px 20px;border-bottom:1px solid var(--line)}#search{min-width:120px;flex:1}.legend{display:flex;gap:16px;font-size:12px;padding:0 20px 12px}.legend span:before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--accent)}.legend .prompt:before{background:var(--painter)}.legend .painting:before{background:var(--good)}#viewport{overflow:auto;flex:1;position:relative;background-image:radial-gradient(var(--line) 1px,transparent 1px);background-size:18px 18px;cursor:grab}#viewport.dragging{cursor:grabbing;user-select:none}#canvas{position:relative}#graph{transform-origin:0 0;display:block}.edge{fill:none;stroke:var(--line);stroke-width:1.6}.edge.related{stroke:var(--accent);stroke-width:2.5}.edge.parent{stroke-dasharray:4 4}.card{width:100%;height:100%;padding:11px;text-align:left;display:flex;flex-direction:column;gap:7px;border-radius:10px;border-left:3px solid var(--accent);background:var(--surface);overflow:hidden;box-shadow:0 2px 6px #0000000a;cursor:pointer}.card.prompt{border-left-color:var(--painter)}.card.painting{border-left-color:var(--good)}.card.selected{outline:3px solid var(--accent);outline-offset:-3px}.card.match{background:var(--code)}.card small{color:var(--muted);font-size:11px}.card strong{font-size:13px;font-weight:600}.card p{font-size:12px;margin:0;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.card img{height:112px;width:100%;object-fit:contain;background:var(--bg);border-radius:4px}.card .tools{font-size:11px;color:var(--accent);overflow:hidden;line-height:1.5}.column{fill:var(--muted);font-size:12px;font-family:inherit}.empty{padding:36px;max-width:650px;color:var(--muted)}aside{overflow:auto;background:var(--surface);border-left:1px solid var(--line);padding:22px}aside p{margin:8px 0 16px}label{display:grid;gap:5px;margin-bottom:13px;font-size:12px;font-weight:600}label select,label textarea,label input{font-weight:400;font-size:14px;width:100%}textarea{resize:vertical;min-height:100px}pre{font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--code);padding:12px;border-radius:6px;max-height:350px;overflow:auto}details summary{cursor:pointer}.preview{display:block;width:100%;max-height:280px;object-fit:contain;background:var(--bg);border-radius:6px;margin:10px 0}#upload-preview{max-height:150px}#message,#page-error{white-space:pre-wrap}#message{margin-top:12px;font-size:13px}#settings{font-size:12px;line-height:1.7;background:var(--bg);padding:10px;border-radius:6px;margin:12px 0}.action-row{display:flex;gap:8px;align-items:center}.action-row button{flex:1}[hidden]{display:none!important}
+@media(max-width:850px){main{grid-template-columns:1fr;height:auto}.graph-area{height:65dvh;min-height:420px}aside{border-left:0;border-top:1px solid var(--line)}header{padding:10px 14px}#run{max-width:55vw}}
+</style>
+</head>
+<body>
+<header><a id="dashboard" href="/">Conveyor</a><h1>Painter studio</h1><select id="run" aria-label="Run"></select><span class="spacer"></span><span id="counts" class="tag"></span></header>
+<main><section class="graph-area" aria-label="Run graph">
+<div class="toolbar"><input id="search" type="search" placeholder="Find an ID, tool or prompt" aria-label="Highlight matching nodes"><button id="zoom-out" aria-label="Zoom out">−</button><span id="zoom-label" class="muted">100%</span><button id="zoom-in" aria-label="Zoom in">+</button><button id="fit">Fit all</button><button id="reset">100%</button></div>
+<div class="legend"><span class="prompt">Painter prompts</span><span>Instruments and their tools</span><span class="painting">Every painting</span></div>
+<div id="page-error" class="bad" role="alert"></div><div id="viewport" tabindex="0" aria-label="Scrollable graph. Drag the background to pan."><div id="canvas"><svg id="graph" xmlns="http://www.w3.org/2000/svg" aria-label="Painters, instruments and paintings"></svg></div><div id="empty" class="empty">Loading the run graph…</div></div>
+</section>
+<aside aria-label="Selected painter and new painting">
+<h2 id="selection-title">Select a painter</h2><p id="selection-help" class="muted">Click a painting to reuse its exact prompt and instrument. Or select a prompt or an instrument, then choose its partner.</p>
+<div id="selection-preview"></div><details id="source-details" hidden><summary id="source-title">Saved source</summary><pre id="source"></pre></details>
+<form id="request-form"><h3>New painting</h3>
+<label>Painter prompt<select id="prompt" required><option value="">Choose a prompt</option></select></label>
+<label>Instrument<select id="instrument" required><option value="">Choose an instrument</option></select></label>
+<div id="settings">Settings are inherited from the run. No model overrides.</div>
+<label>Text brief<textarea id="brief" maxlength="12000" placeholder="What should this painter paint?"></textarea></label>
+<label>Reference image, optional<input id="image" type="file" accept="image/png,image/jpeg,image/webp"></label>
+<img id="upload-preview" class="preview" alt="Uploaded reference" hidden><button id="remove-image" type="button" hidden>Remove image</button>
+<p id="scoring-note" class="muted" style="font-size:12px">Text only: no target image, RMSE or likeness score. New requests do not change the run's evolutionary rankings.</p>
+<label id="token-field" hidden>Launch token<input id="token" type="password" autocomplete="off" placeholder="Required by this server"></label>
+<div class="action-row"><button id="submit" class="primary" type="submit" disabled>Request painting</button><button id="stop" type="button" hidden>Stop</button></div>
+<div id="message" role="status" aria-live="polite"></div>
+</form>
+</aside></main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const short = id => String(id || "").slice(0, 6);
+const token = {get(){try{return localStorage.getItem("conveyor-launch-token") || "";}catch{return "";}},set(value){try{localStorage.setItem("conveyor-launch-token", value);}catch{}}};
+async function api(path, method="GET", body){
+  const headers = token.get() ? {"X-Conveyor-Token":token.get()} : {};
+  if(body !== undefined) headers["Content-Type"] = "application/json";
+  const response = await fetch(path, {method,headers,body:body === undefined ? undefined : JSON.stringify(body)});
+  const result = await response.json();
+  if(!response.ok) throw new Error(result.error || `Request failed (${response.status})`);
+  return result;
+}
+let data=null, run=null, selected=null, scale=1, graphWidth=1050, graphHeight=600, imageData=null, launch=null, requestId=null, timer=null, canLaunch=false, nodes=[];
+function settingText(){
+  const c=data.run.config, s=data.settings.paint || {}, kind=s.harness || c.paint_harness || c.harness || "claude";
+  const model=s.model || c.paint_model || (kind === c.harness ? c.model : null) || "recorded run default";
+  const effort=s.effort || c.paint_effort || c.effort || "high";
+  $("settings").textContent = `${c.offline ? "Offline greedy painter" : `${kind} · ${model} · ${effort}`}${kind === "pi" ? ` · ${s.provider || c.provider}` : ""}\n${c.width || 512}px wide · ${c.actions ?? 200} actions · ${c.looks == null ? "automatic look budget" : `${c.looks} looks`} · ${c.paint_batch === false ? "no batches" : "paint batches"}${c.scope ? " · scoped painting" : ""}. Per-painting cap: $${c.paint_cap ?? 8}.`;
+}
+function fillPairs(){
+  for(const [id,node] of [["prompt","painter"],["instrument","instrument"]]){
+    const current=$(id).value;
+    $(id).innerHTML=`<option value="">Choose ${node === "painter" ? "a prompt" : "an instrument"}</option>`+data.organisms.filter(o=>o.node===node && o.viable !== 0).map(o=>`<option value="${esc(o.id)}">${short(o.id)} · ${esc(o.summary || o.niche || (node === "painter" ? "strategy prompt" : "instrument"))}</option>`).join("");
+    $(id).value=current;
+  }
+}
+function toolsOf(org){
+  return (org.tools || []).map(t => typeof t === "string" ? t : t.name).filter(Boolean);
+}
+function draw(){
+  const prompts=data.organisms.filter(o=>o.node==="painter"), instruments=data.organisms.filter(o=>o.node==="instrument");
+  const columns=[prompts,instruments,data.paintings];
+  nodes=[]; const positions=new Map();
+  columns.forEach((items,column)=>items.forEach((item,index)=>{
+    const type=column===0 ? "prompt" : column===1 ? "instrument" : "painting";
+    const node={...item,type,key:`${type}:${item.id}`,x:28+column*340,y:52+index*218};
+    nodes.push(node);positions.set(node.key,node);
+  }));
+  graphHeight=Math.max(550,Math.max(...columns.map(c=>c.length))*218+70);
+  const paths=[];
+  function edge(a,b,parent=false){if(!a||!b)return;const active=selected===a.key||selected===b.key;const x=a.x+230,y=a.y+95,tx=b.x,ty=b.y+95;
+    const d=parent ? `M${a.x+12},${y} C${a.x-20},${y} ${b.x-20},${ty} ${b.x+12},${ty}` : `M${x},${y} C${x+75},${y} ${tx-75},${ty} ${tx},${ty}`;
+    paths.push(`<path class="edge${active ? " related" : ""}${parent ? " parent" : ""}" d="${d}"/>`);
+  }
+  for(const node of nodes){
+    if(node.type==="painting"){
+      edge(positions.get(`prompt:${node.prompt_id}`),node);edge(positions.get(`instrument:${node.instrument_id}`),node);
+    } else {
+      for(const parent of [node.parent_id,node.parent2_id]) edge(positions.get(`${node.type}:${parent}`),node,true);
+    }
+  }
+  const find=$("search").value.trim().toLowerCase();
+  const cards=nodes.map(node=>{
+    const match=find && JSON.stringify(node).toLowerCase().includes(find);
+    const artifact=node.type==="painting" ? node.artifacts?.painting : node.sheet;
+    const title=node.type==="prompt" ? "Painter prompt" : node.type==="instrument" ? "Instrument" : node.request ? "Requested painting" : "Painting";
+    const names=toolsOf(node);
+    return `<foreignObject x="${node.x}" y="${node.y}" width="230" height="200"><button xmlns="http://www.w3.org/1999/xhtml" class="card ${node.type}${selected===node.key ? " selected" : ""}${match ? " match" : ""}" data-key="${esc(node.key)}" aria-label="${title} ${esc(node.id)}" aria-pressed="${selected===node.key}"><small>${title} · ${short(node.id)}</small>${artifact ? `<img src="/artifacts/${esc(artifact)}" alt="${title}" loading="lazy"/>` : `<strong>${esc(node.summary || node.niche || node.status || "Strategy")}</strong>`}${node.type==="painting" ? `<p>${esc(node.status)}${node.score != null ? ` · score ${Number(node.score).toFixed(3)}` : " · no score"}${node.brief ? ` · ${esc(node.brief)}` : ""}</p>` : `<p>${esc(node.summary || (node.type === "prompt" ? node.genome?.prompt : node.niche) || "")}</p>${names.length ? `<div class="tools">${esc(names.join(" · "))}</div>` : ""}${node.viable===0 ? `<small class="bad">Not viable</small>` : ""}`}</button></foreignObject>`;
+  });
+  $("graph").setAttribute("width",graphWidth);$("graph").setAttribute("height",graphHeight);
+  $("graph").innerHTML=`<text class="column" x="28" y="28">PAINTER PROMPTS · ${prompts.length}</text><text class="column" x="368" y="28">INSTRUMENTS · ${instruments.length}</text><text class="column" x="708" y="28">PAINTINGS · ${data.paintings.length}</text>${paths.join("")}${cards.join("")}`;
+  $("graph").querySelectorAll("[data-key]").forEach(button=>button.onclick=()=>selectNode(button.dataset.key));
+  $("counts").textContent=`${prompts.length} prompts · ${instruments.length} instruments · ${data.paintings.length} paintings`;
+  $("empty").hidden=nodes.length>0;$("empty").textContent="No painters, instruments or paintings have been saved in this run yet.";
+  applyZoom();
+}
+function showSelection(){
+  const node=nodes.find(n=>n.key===selected);if(!node)return;
+  $("selection-title").textContent=`${node.type === "painting" ? "Painting" : node.type === "prompt" ? "Painter prompt" : "Instrument"} ${short(node.id)}`;
+  $("selection-help").textContent=node.type==="painting" ? "Reuse this painting's exact prompt and instrument for a new request." : "Reuse this saved version. Choose its partner below.";
+  const artifact=node.artifacts?.painting || node.sheet;
+  const sessionLink=node.session_id ? `<a href="/?run=${encodeURIComponent(run)}#session=${encodeURIComponent(node.session_id)}" target="_blank" rel="noopener">Open session and tool calls</a>` : "";
+  $("selection-preview").innerHTML=`${artifact ? `<a href="/artifacts/${esc(artifact)}" target="_blank" rel="noopener"><img class="preview" src="/artifacts/${esc(artifact)}" alt="Selected ${esc(node.type)}"></a>` : ""}${node.type === "painting" ? `<p class="muted">${esc(node.status)}${node.score==null ? " · no score" : ` · score ${Number(node.score).toFixed(4)}`}</p>${node.error ? `<p class="bad">${esc(node.error)}</p>` : ""}${node.details?.note ? `<p>${esc(node.details.note)}</p>` : ""}${sessionLink}` : ""}`;
+  $("source-details").hidden=node.type === "painting";$("source-title").textContent=node.type==="prompt" ? "Saved strategy prompt" : "Instrument source and tools";
+  $("source").textContent=node.genome?.prompt || node.genome?.source || "";
+}
+function selectNode(key){
+  selected=key;
+  const node=nodes.find(n=>n.key===key);if(!node)return;
+  if(node.type==="painting"){$("instrument").value=node.instrument_id || "";$("prompt").value=node.prompt_id || "";}
+  else {
+    const pairs=[...data.paintings].reverse();
+    if(node.type==="prompt"){$("prompt").value=node.id;const p=pairs.find(p=>p.prompt_id===node.id);if(p)$("instrument").value=p.instrument_id || "";}
+    else {$("instrument").value=node.id;const p=pairs.find(p=>p.instrument_id===node.id);if(p)$("prompt").value=p.prompt_id || "";}
+  }
+  draw();showSelection();updateSubmit();
+}
+function applyZoom(){
+  $("graph").style.transform=`scale(${scale})`;$("canvas").style.width=`${graphWidth*scale}px`;$("canvas").style.height=`${graphHeight*scale}px`;$("zoom-label").textContent=`${Math.round(scale*100)}%`;
+}
+function zoom(value){const old=scale;scale=Math.max(.02,Math.min(2,value));applyZoom();$("viewport").scrollLeft*=scale/old;$("viewport").scrollTop*=scale/old;}
+$("zoom-in").onclick=()=>zoom(scale*1.25);$("zoom-out").onclick=()=>zoom(scale/1.25);$("reset").onclick=()=>zoom(1);
+$("fit").onclick=()=>{zoom(Math.min(($("viewport").clientWidth-20)/graphWidth,($("viewport").clientHeight-20)/graphHeight));$("viewport").scrollTo(0,0);};
+$("search").oninput=()=>{draw();const query=$("search").value.trim().toLowerCase();const hit=query && nodes.find(n=>JSON.stringify(n).toLowerCase().includes(query));if(hit)$("viewport").scrollTo({left:hit.x*scale,top:Math.max(0,hit.y*scale-30),behavior:"smooth"});};
+let drag=null;
+$("viewport").onpointerdown=e=>{if(e.target.closest("button") || e.button!==0)return;drag={x:e.clientX,y:e.clientY,left:$("viewport").scrollLeft,top:$("viewport").scrollTop};$("viewport").setPointerCapture(e.pointerId);$("viewport").classList.add("dragging");};
+$("viewport").onpointermove=e=>{if(drag){$("viewport").scrollLeft=drag.left-e.clientX+drag.x;$("viewport").scrollTop=drag.top-e.clientY+drag.y;}};
+$("viewport").onpointerup=$("viewport").onpointercancel=()=>{drag=null;$("viewport").classList.remove("dragging");};
+function updateSubmit(){
+  $("submit").disabled=!canLaunch || Boolean(launch) || !$("prompt").value || !$("instrument").value;
+  $("stop").hidden=!launch;$("run").disabled=Boolean(launch);
+  $("scoring-note").textContent=imageData ? "Image input: the uploaded image is the new target. RMSE, critic and judge settings match the run. Requests do not change evolutionary rankings." : "Text only: no target image, RMSE or likeness score. Requests do not change evolutionary rankings.";
+}
+$("prompt").onchange=$("instrument").onchange=updateSubmit;
+function removeImage(){imageData=null;$("image").value="";$("upload-preview").hidden=true;$("remove-image").hidden=true;updateSubmit();}
+$("remove-image").onclick=removeImage;
+$("image").onchange=async()=>{
+  const file=$("image").files[0];if(!file){removeImage();return;}
+  if(file.size>6*1024*1024){removeImage();$("message").textContent="Image must be at most 6 MB.";return;}
+  try{imageData=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(file);});$("upload-preview").src=imageData;$("upload-preview").hidden=false;$("remove-image").hidden=false;updateSubmit();}catch{removeImage();$("message").textContent="Couldn't read the image.";}
+};
+$("request-form").onsubmit=async e=>{
+  e.preventDefault();if(!data || launch)return;
+  if(!$("brief").value.trim() && !imageData){$("message").textContent="Enter a text brief or upload an image.";return;}
+  if($("token").value)token.set($("token").value);
+  $("submit").disabled=true;$("message").textContent="Starting painting…";
+  try{
+    launch=await api(`/api/runs/${run}/paintings`,"POST",{instrument_id:$("instrument").value,prompt_id:$("prompt").value,text:$("brief").value,image:imageData});
+    requestId=launch.request_id;selected=`painting:${requestId}`;$("message").textContent="Painting started. Its canvas and tool calls will appear in the graph.";await refresh();
+  }catch(error){$("message").textContent=error.message;}
+  updateSubmit();
+};
+$("stop").onclick=async()=>{if(!launch)return;try{await api(`/api/launches/${launch.id}/stop`,"POST",{});$("message").textContent="Stopping painting…";}catch(e){$("message").textContent=e.message;}};
+async function refresh(){
+  clearTimeout(timer);const requestedRun=run;
+  try{
+    const result=await api(`/api/runs/${requestedRun}/studio`);if(requestedRun!==run)return;data=result;
+    fillPairs();settingText();draw();showSelection();$("page-error").textContent="";
+    if(launch){
+      const current=await api(`/api/launches/${launch.id}`);
+      if(!["running","stopping"].includes(current.state)){
+        const painting=data.paintings.find(p=>p.id===requestId);
+        $("message").textContent=painting?.error || (current.state==="finished" ? "Painting finished. Select it to inspect the result." : `Painting ${current.state}.\n${current.log.slice(-5).join("\n")}`);launch=null;
+      }
+    }
+    updateSubmit();
+  }catch(e){$("page-error").textContent=`Couldn't refresh: ${e.message}`;}
+  if(requestedRun===run)timer=setTimeout(refresh,3000);
+}
+async function chooseRun(id){
+  clearTimeout(timer);run=id;selected=null;data=null;$("prompt").value="";$("instrument").value="";
+  $("selection-title").textContent="Select a painter";$("selection-preview").innerHTML="";$("source-details").hidden=true;
+  history.replaceState(null,"",`/studio?run=${encodeURIComponent(run)}`);$("dashboard").href=`/?run=${encodeURIComponent(run)}`;
+  await refresh();zoom(Math.min(1,($("viewport").clientWidth-24)/graphWidth));$("viewport").scrollTo(0,0);
+}
+async function init(){
+  try{
+    const [runs,options]=await Promise.all([api("/api/runs"),api("/api/options")]);
+    canLaunch=options.launch;$("token-field").hidden=!options.locked;
+    if(!options.launch)$("message").textContent="This server is read-only. Use conveyor serve without --no-launch to request paintings.";
+    $("run").innerHTML=runs.map(r=>`<option value="${esc(r.id)}">${esc(r.name)}</option>`).join("");
+    if(!runs.length){$("empty").textContent="No runs in this database. Start a run from the dashboard first.";return;}
+    const wanted=new URLSearchParams(location.search).get("run");$("run").value=runs.find(r=>r.id===wanted)?.id || runs[0].id;
+    $("run").onchange=()=>chooseRun($("run").value);await chooseRun($("run").value);
+  }catch(e){$("page-error").textContent=e.message;}
+}
+init();
+</script>
+</body></html>

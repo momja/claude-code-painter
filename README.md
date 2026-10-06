@@ -259,6 +259,20 @@ The mutators see the parent's source or prompt, the target beside the painting, 
 - A drawer for any organism: source with a diff against its parent, demo sheet, every painting with the painter's note, and the session that wrote it.
 - A drawer for any Claude session: system prompt, first message with its images, the full transcript with thinking summaries, each tool call with its result, its error change and the pen's state after it, and a replay slider over the canvas snapshots.
 
+### Painter studio
+
+Open **Painter studio** in the dashboard header, or `/studio?run=<run-id>`. This separate page graphs every saved painter prompt, every instrument and its tool names, and every painting session. Repeat evaluations of the same painting appear once. Unused and failed instruments remain visible. Lines connect paintings to their prompt and instrument, and dotted lines connect organism parents. Drag the background to pan, use the zoom buttons or **Fit all**, and search to highlight nodes without hiding the rest.
+
+Click a painting to reuse its exact instrument and strategy prompt. Clicking a prompt or instrument selects that version and its most recent painting partner, which you can change using the two dropdowns. Enter a text brief, upload a reference image, or provide both, then choose **Request painting**. Uploads accept PNG, JPEG and WebP, up to 6 MB and 16 million pixels. Images become new targets at the original run's canvas width. Text-only paintings keep the original canvas dimensions.
+
+Requests inherit the run's harness, provider, resolved model, thinking effort, context controls, action/look budgets, batching, scope and per-painting spend cap. New runs save resolved role settings, including Pi's model definition, so later catalog/default changes do not change them. Older runs recover the model and effort from recorded sessions when available and use their saved run configuration for the rest. No model overrides are accepted by the request API.
+
+Image requests use the usual critic and the run's judge settings. Text-only requests reuse the strategy and painting tools, adapting copying instructions to the brief. They have no RMSE, critic score, heatmap or likeness judge. The offline greedy painter only supports image requests.
+
+Requests, sessions, strokes and resulting paintings are stored under the original run, but requests never become evolutionary evaluations or affect champion rankings. They can be made after a run finishes. The graph refreshes while painting, and **Open session and tool calls** opens the existing transcript/replay drawer. **Stop** interrupts a request, and shutting down the server stops its child processes. Results remain in the database after restart.
+
+Starting paintings requires `conveyor serve` with launching enabled. A dashboard served by `conveyor run`, or by `conveyor serve --no-launch`, can browse the graph but cannot submit requests. Requests use the same launch token, same-origin and JSON guards as starting runs. Each request has its own inherited per-painting cap, rather than continuing the original evolution's total-budget countdown.
+
 ## Layout
 
 ```
@@ -270,8 +284,10 @@ src/conveyor/
   mcp.py           a minimal stdio MCP server: initialize, tools/list, tools/call
   evolve.py        organisms, populations, the niche archive, the conductor
   store.py         the SQLite run log, written by one thread
-  server.py        the dashboard's read-only HTTP API, standard library only
+  server.py        dashboard/studio reads and guarded launch endpoints, standard library HTTP server
   dashboard.html   the dashboard, no build step
+  studio.html      the complete run graph and new-painting form
+  studio.py        request validation, inherited settings and one-off painting worker
   painting/
     canvas.py      physics (dab, stamp, smudge, pick, the per-call area limit), targets, images
     instrument.py  the instrument contract, sandbox, runtime, niche traits, the probe

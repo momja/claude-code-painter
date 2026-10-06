@@ -8,6 +8,8 @@ so it works the same during a run and after it, and from another process.
   GET /api/runs/<run>/history        every evaluation's score over time, and champion changes
   GET /api/runs/<run>/organisms      every organism, newest first (?node=)
   GET /api/runs/<run>/mutators       per node and mutator: tries, children, viable, beat parent, niche hits, cost
+  GET /studio                       painter studio graph and request page
+  GET /api/runs/<run>/studio         all prompts, instruments/tools, and unique painting sessions
   GET /api/organisms/<id>            one organism: source, parent's source, evaluations, children, who wrote it
   GET /api/sessions/<id>             one model session: request, events, strokes, result
   GET /artifacts/<name>              images
@@ -19,6 +21,7 @@ With a launcher (`conveyor serve` on a loopback address) it can also start runs:
   GET  /api/launches/<id>            one launch: state, run id once it has one, the last lines of its output
   POST /api/launches                 start a run from {option: value}; answers 201 with the launch
   POST /api/launches/<id>/stop       stop it, as Ctrl+C would
+  POST /api/runs/<run>/paintings      paint with saved instrument_id/prompt_id, text and optional base64 image
 
 On a loopback address launching needs nothing more. Served to a network, it needs a token: the launcher is given
 one, and then these endpoints answer only to a request carrying it in X-Conveyor-Token. The dashboard's reads stay
@@ -27,6 +30,7 @@ open. Without the token /api/options says `{"launch": true, "locked": true}` and
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import sqlite3
@@ -45,9 +49,11 @@ from conveyor.launch import LaunchError
 from conveyor.store import connect
 
 MAX_BODY = 64 * 1024
+MAX_PAINTING_BODY = 9 * 1024 * 1024
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
 
 DASHBOARD = Path(__file__).parent / "dashboard.html"
+STUDIO = Path(__file__).parent / "studio.html"
 ARTIFACT_RE = re.compile(r"^[0-9a-f]{24}\.(png|jpg)$")
 JSON_COLS = {"data", "config", "genome", "traits", "details", "artifacts", "usage", "request"}
 STALL_ITERATIONS = 4
@@ -318,10 +324,85 @@ class Views:
         events = self.rows("SELECT idx, ts, kind, data FROM session_events WHERE session_id=? ORDER BY idx", sid)
         strokes = self.rows("SELECT idx, ts, data, snapshot FROM strokes WHERE session_id=? ORDER BY idx", sid)
         organism = self.one("SELECT id, node, niche FROM organisms WHERE id=?", s["organism_id"]) if s["organism_id"] else None
+        has_requests = self.one("SELECT name FROM sqlite_master WHERE type='table' AND name='painting_requests'")
+        is_request = has_requests and self.one("SELECT id FROM painting_requests WHERE session_id=?", sid)
         if s["status"] == "running" and (time.time() - (s["last_ts"] or s["started"]) > STALE_SECONDS
-                                         or self.last(s["run_id"], "run_finished") is not None):
+                                         or (not is_request and self.last(s["run_id"], "run_finished") is not None)):
             s["status"] = "interrupted"
         return {**s, "events": events, "strokes": strokes, "organism": organism, "now": time.time()}
+
+    def studio(self, run: str) -> dict:
+        meta = self.one("SELECT * FROM runs WHERE id=?", run)
+        if meta is None:
+            raise KeyError(run)
+        organisms = self.rows("SELECT * FROM organisms WHERE run_id=? ORDER BY created", run)
+        for org in organisms:
+            org["tools"], org["views"] = [], []
+            if org["node"] == "instrument":
+                # Inspect source without executing an evolved instrument in the HTTP server.
+                try:
+                    tree = ast.parse(org["genome"].get("source", ""))
+                    for statement in tree.body:
+                        if isinstance(statement, ast.Assign) and isinstance(statement.value, ast.Dict):
+                            for target in statement.targets:
+                                if isinstance(target, ast.Name) and target.id in ("TOOLS", "VIEWS"):
+                                    key = "tools" if target.id == "TOOLS" else "views"
+                                    org[key] = [k.value for k in statement.value.keys
+                                                if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+                except (SyntaxError, ValueError):
+                    pass
+        by_id = {o["id"]: o for o in organisms}
+        paintings = {}
+        for ev in self.rows("SELECT * FROM evaluations WHERE run_id=? ORDER BY ended", run):
+            details = ev.get("details") or {}
+            instrument = details.get("instrument_id")
+            prompt = details.get("prompt_id")
+            if not instrument:
+                org = by_id.get(ev["organism_id"], {})
+                instrument = ev["organism_id"] if org.get("node") == "instrument" else ev["partner_id"]
+                prompt = ev["partner_id"] if org.get("node") == "instrument" else ev["organism_id"]
+            # The same session is evaluated for both organisms, and again on rescore. Show its painting once.
+            key = ev["session_id"] or (instrument, prompt, (ev.get("artifacts") or {}).get("painting"),
+                                       details.get("sample", ev["id"]))
+            paintings[key] = {"id": ev["session_id"] or ev["id"], "session_id": ev["session_id"],
+                              "instrument_id": instrument, "prompt_id": prompt, "created": ev["started"],
+                              "status": "finished" if ev["viable"] else "failed", "score": ev["score"],
+                              "artifacts": ev.get("artifacts") or {}, "details": details, "error": ev["error"]}
+        has_requests = self.one("SELECT name FROM sqlite_master WHERE type='table' AND name='painting_requests'")
+        requests = self.rows("SELECT * FROM painting_requests WHERE run_id=? ORDER BY created", run) if has_requests else []
+        request_sessions = {r["session_id"] for r in requests}
+        starts = {r["data"]["session_id"]: r["data"] for r in self.rows(
+            "SELECT data FROM events WHERE run_id=? AND kind='painting_started'", run)}
+        for session in self.rows("SELECT id, organism_id, started, status, last_ts, error FROM sessions "
+                                 "WHERE run_id=? AND purpose LIKE 'paint%' ORDER BY started", run):
+            sid = session["id"]
+            if sid not in paintings:
+                pair = starts.get(sid, {})
+                status = session["status"]
+                if status == "running" and (time.time() - (session["last_ts"] or session["started"]) > STALE_SECONDS
+                                             or (sid not in request_sessions and self.last(run, "run_finished") is not None)):
+                    status = "interrupted"
+                paintings[sid] = {"id": sid, "session_id": sid, "created": session["started"], "status": status,
+                                  "instrument_id": pair.get("instrument_id") or session["organism_id"],
+                                  "prompt_id": pair.get("prompt_id"), "score": None, "artifacts": {},
+                                  "details": {}, "error": session["error"]}
+            snapshot = self.one("SELECT snapshot FROM strokes WHERE session_id=? AND snapshot IS NOT NULL "
+                                "ORDER BY idx DESC LIMIT 1", sid)
+            if snapshot and not paintings[sid]["artifacts"].get("painting"):
+                paintings[sid]["artifacts"]["painting"] = snapshot["snapshot"]
+        for request in requests:
+            prior = paintings.pop(request["session_id"], {})
+            artifacts = request.get("artifacts") or prior.get("artifacts") or {}
+            details = request.get("details") or {}
+            status = request["status"]
+            if status == "running" and prior.get("status") == "interrupted":
+                status = "interrupted"
+            paintings[request["id"]] = {**request, "status": status, "artifacts": artifacts, "details": details,
+                                        "score": details.get("score"), "request": True}
+        settings = {r["node"]: r["data"] for r in self.rows(
+            "SELECT node, data FROM events WHERE run_id=? AND kind='role_settings' ORDER BY seq", run)}
+        return {"run": meta, "organisms": organisms,
+                "paintings": sorted(paintings.values(), key=lambda p: p.get("created") or 0), "settings": settings}
 
     def artifact(self, name: str) -> bytes | None:
         r = self.conn.execute("SELECT data FROM artifacts WHERE name=?", (name,)).fetchone()
@@ -370,22 +451,29 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
         def do_POST(self) -> None:  # noqa: N802
             parts = [p for p in urlparse(self.path).path.split("/") if p]
             try:
-                if launcher is None or parts[:2] != ["api", "launches"]:
+                painting_post = len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "paintings"
+                if launcher is None or (parts[:2] != ["api", "launches"] and not painting_post):
                     return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 if (why := self._guard_post()) is not None:
                     return self._json({"error": why}, HTTPStatus.FORBIDDEN)
                 if not self._authorized():
                     return self._json({"error": "launch token needed"}, HTTPStatus.UNAUTHORIZED)
-                length = int(self.headers.get("Content-Length") or 0)
-                if length > MAX_BODY:
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    return self._json({"error": "invalid content length"}, HTTPStatus.BAD_REQUEST)
+                if length < 0:
+                    return self._json({"error": "invalid content length"}, HTTPStatus.BAD_REQUEST)
+                if length > (MAX_PAINTING_BODY if painting_post else MAX_BODY):
                     return self._json({"error": "body too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
                 try:
                     body = json.loads(self.rfile.read(length) or b"{}")
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     return self._json({"error": "body isn't JSON"}, HTTPStatus.BAD_REQUEST)
-                if len(parts) == 2:
+                if painting_post or len(parts) == 2:
                     try:
-                        self._json(launcher.start(body), HTTPStatus.CREATED)
+                        self._json(launcher.start_painting(parts[2], body) if painting_post else launcher.start(body),
+                                   HTTPStatus.CREATED)
                     except LaunchError as e:
                         self._json({"error": str(e)}, HTTPStatus.UNPROCESSABLE_ENTITY)
                 elif len(parts) == 4 and parts[3] == "stop":
@@ -403,6 +491,8 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
             try:
                 if not parts:
                     self._send(200, DASHBOARD.read_bytes(), "text/html; charset=utf-8")
+                elif parts == ["studio"]:
+                    self._send(200, STUDIO.read_bytes(), "text/html; charset=utf-8")
                 elif parts[0] == "artifacts" and len(parts) == 2 and ARTIFACT_RE.match(parts[1]):
                     data = views.artifact(parts[1])
                     if data is None:
@@ -425,6 +515,8 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                     self._json(views.runs())
                 elif parts[:2] == ["api", "runs"] and len(parts) == 3:
                     self._json(views.overview(parts[2]))
+                elif parts[:2] == ["api", "runs"] and len(parts) == 4 and parts[3] == "studio":
+                    self._json(views.studio(parts[2]))
                 elif parts[:2] == ["api", "runs"] and len(parts) == 4 and parts[3] == "history":
                     self._json(views.history(parts[2]))
                 elif parts[:2] == ["api", "runs"] and len(parts) == 4 and parts[3] == "organisms":

@@ -67,7 +67,7 @@ _SHEETS: dict[str, bytes] = {}  # demo sheet PNGs by artifact name, so a paintin
 
 @dataclass
 class Setup:
-    target: str = "self_portrait"
+    target: str | None = "self_portrait"
     width: int = 512
     actions: int = 200
     looks: int | None = None  # default: one per 25 actions, at least 4; negative means unlimited
@@ -87,6 +87,8 @@ class Setup:
     confirm: int = 3  # paintings a challenger and the champion each stand on before the champion changes
     parents: int = 2
     operator_weights: dict[str, float] = field(default_factory=lambda: {"refine": 0.4, "invent": 0.4, "recombine": 0.2})
+    height: int | None = None  # text-only canvas; image targets keep their aspect ratio
+    brief: str = ""
 
     @property
     def n_looks(self) -> int:
@@ -153,7 +155,7 @@ def instrument_doc(source: str) -> str:
 class Painting:
     instrument_id: str
     prompt_id: str
-    score: float
+    score: float | None
     viable: bool
     critic: dict
     artifacts: dict
@@ -195,16 +197,18 @@ class Painter:
         roles = Roles.of(harness)
         self.claude = roles.paint  # the painting harness (the name predates Pi)
         self.critic = Critic()
-        self.target = load_target(setup.target, width=setup.width, patch=setup.n_patch)
+        self.target = load_target(setup.target, width=setup.width, patch=setup.n_patch) if setup.target else None
+        self.width = self.target.width if self.target else setup.width
+        self.height = self.target.height if self.target else (setup.height or setup.width)
         self._cache: dict[tuple[str, str, int], Painting] = {}
         self._locks: dict[tuple[str, str, int], threading.Lock] = {}
         self._lock = threading.Lock()
-        self.target_png = gridded_png(self.target.image)
+        self.target_png = gridded_png(self.target.image) if self.target else None
         self.sheets: dict[str, bytes] = {}  # instrument id -> demo sheet png, for the painter's first message
         self.judge: ClaudeJudge | None = None
-        if setup.judge and setup.mode != "offline" and roles.judge is not None:
+        if self.target is not None and setup.judge and setup.mode != "offline" and roles.judge is not None:
             self.judge = ClaudeJudge(roles.judge, setup.work_dir / store.run_id)
-        self.judge_target_png = _judge_png(self.target.image)
+        self.judge_target_png = _judge_png(self.target.image) if self.target else None
 
     def paint(self, instrument: Organism, prompt: Organism, sample: int = 0) -> Painting:
         """The pair's painting number `sample`, made now if there isn't one yet."""
@@ -229,16 +233,19 @@ class Painter:
     def _paint(self, instrument: Organism, prompt: Organism) -> Painting:
         s = self.setup
         d = self._session_dir("paint")
-        job = {"source": instrument.genome["source"], "target": s.target, "width": s.width, "actions": s.actions,
+        job = {"source": instrument.genome["source"], "target": s.target, "width": self.width,
+               "height": self.height, "actions": s.actions,
                "looks": s.n_looks, "patch": s.n_patch, "seed": random.randrange(1 << 30), "snapshot_every": 5,
                "scope": bool(s.scope_views), "paint_batch": bool(s.paint_batch)}
         (d / "job.json").write_text(json.dumps(job))
         started = time.time()
-        ingest = _Ingest(self.store, d)
+        ingest = _Ingest(self.store, d, instrument.id, prompt.id)
         interrupted = False
         if s.mode == "offline" or self.claude is None:
+            if self.target is None:
+                raise ValueError("Text-only painting needs a model. The offline painter requires an image target.")
             sid = new_id()
-            ingest.session_id = sid
+            ingest.start(sid)
             self.store.start_session(sid, node=None, organism_id=instrument.id, purpose="paint (greedy)",
                                      model="greedy", effort=None, request={"job": {**job, "source": "(instrument)"}},
                                      dir=str(d))
@@ -250,8 +257,9 @@ class Painter:
             session_error = error
         else:
             inst = Instrument(instrument.genome["source"])
-            h, w = self.target.height, self.target.width
-            system = (prompt.genome["prompt"].strip() + "\n\n" + prompts.PAINTER_RULES.format(
+            h, w = self.height, self.width
+            rules = prompts.PAINTER_RULES if self.target else prompts.TEXT_PAINTER_RULES
+            system = (prompt.genome["prompt"].strip() + "\n\n" + rules.format(
                 w=w, h=h, actions=s.actions, looks="unlimited" if s.n_looks < 0 else s.n_looks, reference=inst.reference(w, h),
                 area_cap=Canvas(h, w).area_cap, share=CALL_AREA_SHARE))
             if s.paint_batch:
@@ -259,10 +267,18 @@ class Painter:
             if self.judge is not None:
                 system += "\n\n" + prompts.JUDGE_RULE
             if s.scope_views:
-                system += "\n\n" + prompts.SCOPE_RULE
+                scope_rule = prompts.SCOPE_RULE
+                if self.target is None:
+                    scope_rule = scope_rule.replace("Compare the window visually with the same region of the target.",
+                                                    "Review the window visually against your composition and the user's brief.")
+                system += "\n\n" + scope_rule
             sheet = self._sheet(instrument)
             first, second, third = prompts.PAINTER_FIRST_MESSAGE
-            content = [{"type": "text", "text": first + ":"}, {"type": "png", "data": self.target_png}]
+            content = ([{"type": "text", "text": first + ":"}, {"type": "png", "data": self.target_png}]
+                       if self.target else [{"type": "text", "text": "Paint an original painting from this brief. "
+                                            "There is no target image or likeness score."}])
+            if s.brief:
+                content.append({"type": "text", "text": "Painting request:\n" + s.brief})
             if sheet:
                 content += [{"type": "text", "text": second + ":"}, {"type": "png", "data": sheet}]
             content.append({"type": "text", "text": third})
@@ -281,7 +297,7 @@ class Painter:
             ingest.pull()
             session_error = outcome.error
             interrupted = outcome.interrupted
-        canvas = np.load(d / "canvas.npy") if (d / "canvas.npy").exists() else Canvas(self.target.height, self.target.width).img
+        canvas = np.load(d / "canvas.npy") if (d / "canvas.npy").exists() else Canvas(self.height, self.width).img
         finish = json.loads((d / "finish.json").read_text()) if (d / "finish.json").exists() else {}
         calls = ingest.calls
         applied = [c for c in calls if c.get("status") == "applied" and c.get("tool") not in ("look", "finish")]
@@ -292,7 +308,7 @@ class Painter:
         # A painting that never got going (the session crashed before a single mark) says nothing about either
         # organism, so it doesn't count as an evaluation of them.
         viable = bool(applied)
-        critic = self.critic.score(canvas, self.target)
+        critic = self.critic.score(canvas, self.target) if self.target else {}
         usage = Counter(c.get("tool") for c in applied)
         rejected = [c for c in calls if c.get("status") == "rejected"]
         stats = {
@@ -303,14 +319,17 @@ class Painter:
             "ran_dry": sum(1 for c in applied if c.get("dry")), "finished": bool(finish),
         }
         painting_png = to_png(canvas)
-        artifacts = {"painting": self.store.artifact(painting_png),
-                     "heat": self.store.artifact(heatmap_png(self.critic.pixel_error(canvas, self.target))),
-                     "pair": self.store.artifact(side_by_side(self.target.image, canvas, scale=2))}
-        feedback = {"pair_png": side_by_side(self.target.image, canvas, scale=2), "note": finish.get("note", ""),
-                    "stats": stats, "worst": worst_regions(canvas, self.target), "critic": critic}
+        artifacts = {"painting": self.store.artifact(painting_png)}
+        feedback = {"note": finish.get("note", ""), "stats": stats, "critic": critic}
+        if self.target is not None:
+            artifacts.update(heat=self.store.artifact(heatmap_png(self.critic.pixel_error(canvas, self.target))),
+                             pair=self.store.artifact(side_by_side(self.target.image, canvas, scale=2)))
+            feedback.update(pair_png=side_by_side(self.target.image, canvas, scale=2),
+                            worst=worst_regions(canvas, self.target))
         details = {"critic": critic, "note": finish.get("note", ""), "stats": stats, "instrument_id": instrument.id,
-                   "prompt_id": prompt.id, "seconds": round(time.time() - started, 1), "session_error": session_error}
-        score = critic["total"]
+                   "prompt_id": prompt.id, "seconds": round(time.time() - started, 1), "session_error": session_error,
+                   "canvas": {"width": self.width, "height": self.height}}
+        score = critic.get("total")
         if viable and self.judge is not None:
             verdict = self._verdict(canvas, instrument.id)
             if verdict is not None:
@@ -322,8 +341,9 @@ class Painter:
                 feedback["judge"] = judged
             else:
                 details["judge"] = {"error": "the judge gave no usable verdict twice; scored by the critic alone"}
-        details["score"] = round(score, 5)
-        return Painting(instrument_id=instrument.id, prompt_id=prompt.id, score=score if viable else 0.0,
+        details["score"] = round(score, 5) if score is not None else None
+        return Painting(instrument_id=instrument.id, prompt_id=prompt.id,
+                        score=(score if viable else 0.0) if self.target else None,
                         viable=viable, critic=critic, artifacts=artifacts, feedback=feedback,
                         session_id=ingest.session_id, error=None if viable else (session_error or "no marks were made"),
                         details=details)
@@ -348,7 +368,7 @@ class Painter:
         if instrument.sheet and instrument.sheet in _SHEETS:
             return _SHEETS[instrument.sheet]
         if instrument.id not in self.sheets:
-            _, sheet = probe_source(instrument.genome["source"], self.setup.width, self.target.height, self.setup.work_dir)
+            _, sheet = probe_source(instrument.genome["source"], self.width, self.height, self.setup.work_dir)
             if sheet:
                 self.sheets[instrument.id] = sheet
         return self.sheets.get(instrument.id)
@@ -363,9 +383,11 @@ class Painter:
 class _Ingest:
     """Copies a painting's calls.jsonl into the store as strokes, snapshots as artifacts, as the painting runs."""
 
-    def __init__(self, store: Store, session_dir: Path) -> None:
+    def __init__(self, store: Store, session_dir: Path, instrument_id: str | None = None,
+                 prompt_id: str | None = None) -> None:
         self.store = store
         self.dir = session_dir
+        self.instrument_id, self.prompt_id = instrument_id, prompt_id
         self.session_id: str | None = None
         self.calls: list[dict] = []
         self._offset = 0
@@ -373,6 +395,8 @@ class _Ingest:
 
     def start(self, session_id: str) -> None:
         self.session_id = session_id
+        self.store.emit("painting_started", node="painting", session_id=session_id,
+                        instrument_id=self.instrument_id, prompt_id=self.prompt_id)
 
     def pull(self) -> None:
         path = self.dir / "calls.jsonl"

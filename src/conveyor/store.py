@@ -65,6 +65,12 @@ CREATE TABLE IF NOT EXISTS strokes (
     PRIMARY KEY (session_id, idx)
 );
 CREATE TABLE IF NOT EXISTS artifacts (name TEXT PRIMARY KEY, data BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS painting_requests (
+    id TEXT PRIMARY KEY, run_id TEXT NOT NULL, instrument_id TEXT NOT NULL, prompt_id TEXT NOT NULL,
+    created REAL NOT NULL, ended REAL, status TEXT NOT NULL, brief TEXT NOT NULL, target TEXT,
+    config TEXT NOT NULL, session_id TEXT, artifacts TEXT, details TEXT, error TEXT
+);
+CREATE INDEX IF NOT EXISTS painting_requests_run ON painting_requests(run_id, created);
 """
 
 SESSION_FIELDS = {"status", "ended", "cost", "usage", "num_turns", "result", "error", "request", "model", "last_ts"}
@@ -109,15 +115,20 @@ def new_id() -> str:
 
 
 class Store:
-    def __init__(self, path: str | Path, run_name: str | None = None, config: dict | None = None) -> None:
+    def __init__(self, path: str | Path, run_name: str | None = None, config: dict | None = None,
+                 *, run_id: str | None = None) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.run_id = new_id()
+        self.run_id = run_id or new_id()
         conn = connect(self.path)
         _ensure_wal(conn)
         conn.executescript(SCHEMA)
-        conn.execute("INSERT INTO runs (id, name, started, config) VALUES (?, ?, ?, ?)",
-                     (self.run_id, run_name or self.run_id, time.time(), dumps(config or {})))
+        if run_id is None:
+            conn.execute("INSERT INTO runs (id, name, started, config) VALUES (?, ?, ?, ?)",
+                         (self.run_id, run_name or self.run_id, time.time(), dumps(config or {})))
+        elif conn.execute("SELECT id FROM runs WHERE id=?", (run_id,)).fetchone() is None:
+            conn.close()
+            raise ValueError(f"Unknown run: {run_id}")
         conn.commit()
         conn.close()
         self._known: set[str] = set()
@@ -193,6 +204,15 @@ class Store:
     def stroke(self, session_id: str, idx: int, data: dict, snapshot: str | None) -> None:
         self._put("INSERT OR REPLACE INTO strokes (session_id, idx, ts, data, snapshot) VALUES (?, ?, ?, ?, ?)",
                   (session_id, idx, data.get("t", time.time()), dumps(data), snapshot))
+
+    def update_painting_request(self, request_id: str, **fields: Any) -> None:
+        allowed = {"status", "ended", "session_id", "artifacts", "details", "error"}
+        if set(fields) - allowed:
+            raise ValueError("unknown painting request fields")
+        cols = ", ".join(f"{k}=?" for k in fields)
+        values = [dumps(v) if k in JSON_FIELDS else v for k, v in fields.items()]
+        self._put(f"UPDATE painting_requests SET {cols} WHERE id=? AND run_id=?",
+                  (*values, request_id, self.run_id))
 
     # ---- lifecycle ----------------------------------------------------------------------------------------
 

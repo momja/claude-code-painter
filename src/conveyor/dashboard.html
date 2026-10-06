@@ -211,6 +211,7 @@ dialog#nr::backdrop { background: rgba(20, 18, 14, .5); }
 <header>
   <h1>conveyor</h1>
   <select id="run"></select>
+  <a id="studio-link" href="/studio">Painter studio</a>
   <span id="pills" style="display:flex;flex-wrap:wrap;gap:8px"></span>
   <button id="new-run" class="primary" data-new-run hidden>New run</button>
 </header>
@@ -293,6 +294,7 @@ async function refresh() {
       get(`/api/runs/${state.run}/mutators`), get(`/api/runs/${state.run}/organisms`),
     ]);
     state.overview = ov;
+    $("#studio-link").href = `/studio?run=${encodeURIComponent(state.run)}`;
     render(ov, hist, muts, orgs);
     if (!ov.finished) state.timer = setTimeout(refresh, 3000);
   } catch (e) {
@@ -919,7 +921,8 @@ function bindReplay(s) {
     $("#replay-img").src = `/artifacts/${st.snapshot}`;
     const d = st.data;
     $("#replay-caption").textContent = `call ${d.i}: ${d.tool} ${compactArgs(d.args, 160)} → ` +
-      (d.score_after != null ? `score ${fmt(d.score_after, 4)}` : `error ${fmt(d.error_after, 1)}`);
+      (d.score_after != null ? `score ${fmt(d.score_after, 4)}` : d.error_after != null ? `error ${fmt(d.error_after, 1)}` :
+        `${d.status || "painted"}${d.actions_left != null ? ` · ${d.actions_left} actions left` : ""}`);
     state.replayIndex = { ...(state.replayIndex || {}), [s.id]: +range.value };
   };
   range.oninput = show; show();
