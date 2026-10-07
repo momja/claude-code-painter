@@ -122,8 +122,9 @@ dialog::backdrop{background:#0006}
   <h2>New canvas</h2>
   <label>Name<input id="canvas-name" maxlength="60" value="Commons" required></label>
   <div class="row"><label>Viewport, px<input id="canvas-viewport" type="number" min="128" max="1024" step="1" value="512"></label><label>Calls per agent<input id="canvas-calls" type="number" min="1" max="1000" value="100"></label></div>
+  <div class="row"><label>Frame width, px<input id="canvas-frame-w" type="number" min="64" step="1" placeholder="no frame"></label><label>Frame height, px<input id="canvas-frame-h" type="number" min="64" step="1" placeholder="no frame"></label></div>
   <label>Task, optional<textarea id="canvas-task" rows="3" maxlength="2000" placeholder="One image every agent works on together. Leave it empty for no goal."></textarea></label>
-  <p class="muted" style="font-size:12px">Every agent on this canvas sees a square viewport this size, gets this many tool calls, and is given the task word for word, with no other instructions about it. It can't be changed later.</p>
+  <p class="muted" style="font-size:12px">Every agent on this canvas sees a square viewport this size, gets this many tool calls, and is given the task word for word, with no other instructions about it. A frame bounds the canvas to x 0 to its width and y 0 to its height; leave it empty for a canvas with no edges. None of this can be changed later.</p>
   <div id="canvas-error" class="bad"></div>
   <div style="display:flex;gap:8px;justify-content:flex-end"><button value="cancel" formnovalidate>Cancel</button><button id="canvas-create" class="primary" value="ok">Create</button></div>
 </form></dialog>
@@ -212,6 +213,14 @@ function draw(){
     for(let gy = Math.ceil(y0 / step) * step; gy <= y1; gy += step){ const [, sy] = toScreen(0, gy); ctx.moveTo(0, Math.round(sy) + .5); ctx.lineTo(w, Math.round(sy) + .5); }
     ctx.stroke();
   }
+  const frm = S.canvas?.config?.frame;
+  if(frm){  // nothing exists outside the frame: dim it and draw the edge
+    const [fx0, fy0] = toScreen(frm[0], frm[1]), [fx1, fy1] = toScreen(frm[2], frm[3]);
+    ctx.fillStyle = "rgba(20,20,26,.28)";
+    ctx.fillRect(0, 0, w, Math.max(0, fy0)); ctx.fillRect(0, fy1, w, Math.max(0, h - fy1));
+    ctx.fillRect(0, fy0, Math.max(0, fx0), fy1 - fy0); ctx.fillRect(fx1, fy0, Math.max(0, w - fx1), fy1 - fy0);
+    ctx.strokeStyle = "rgba(31,35,40,.7)"; ctx.lineWidth = 2; ctx.strokeRect(fx0, fy0, fx1 - fx0, fy1 - fy0); ctx.lineWidth = 1;
+  }
   const [ox, oy] = toScreen(0, 0); ctx.strokeStyle = "rgba(47,75,143,.35)"; ctx.beginPath(); ctx.moveTo(ox - 8, oy); ctx.lineTo(ox + 8, oy); ctx.moveTo(ox, oy - 8); ctx.lineTo(ox, oy + 8); ctx.stroke();
   if($("show-text").checked) drawText();
   if($("show-agents").checked) for(const a of viewports()) frame(a.x, a.y, color(a.id, a.active ? .95 : .35), a.label, !a.active, a.size);
@@ -266,7 +275,8 @@ function setZoom(z, sx, sy){
 }
 function centerOn(x, y, z){ const r = $("wrap").getBoundingClientRect(); if(z) S.cam.z = z; S.cam.x = x - r.width / 2 / S.cam.z; S.cam.y = y - r.height / 2 / S.cam.z; setZoom(S.cam.z); }
 function fit(){
-  const tiles = [...S.heads.keys()].map(k => k.split(",").map(Number));
+  const tiles = [...S.heads.keys()].map(k => k.split(",").map(Number)), frm = S.canvas?.config?.frame;
+  if(frm) tiles.push([frm[0] / TILE, frm[1] / TILE], [frm[2] / TILE - 1, frm[3] / TILE - 1]);
   const pts = tiles.flatMap(([tx, ty]) => [[tx * TILE, ty * TILE], [(tx + 1) * TILE, (ty + 1) * TILE]]).concat(S.agents.flatMap(a => [[a.x, a.y], [a.x + sizeOf(a), a.y + sizeOf(a)]]));
   if(!pts.length) return centerOn(S.size / 2, S.size / 2, 1);
   const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]), r = $("wrap").getBoundingClientRect();
@@ -307,7 +317,7 @@ async function poll(){
     S.broadcasts = r.since ? S.broadcasts.concat(r.broadcasts) : r.broadcasts; S.canvas = r.canvas; S.size = r.canvas.config.viewport;
     $("task-bar").hidden = !r.canvas.config.task; $("task-text").textContent = r.canvas.config.task || "";
     const option = [...$("canvas-select").options].find(o => o.value === cid);
-    if(option) option.textContent = `${r.canvas.name} · ${S.size}px · ${S.agents.length} agents`;
+    if(option) option.textContent = `${r.canvas.name} · ${S.size}px${r.canvas.config.frame ? ` · ${r.canvas.config.frame[2]}×${r.canvas.config.frame[3]} frame` : ""} · ${S.agents.length} agents`;
     renderAgents(); renderMessages(); counts(); emptyState(); draw();
   }catch(e){ $("message").textContent = `Couldn't refresh: ${e.message}`; }
   if(cid === S.cid) S.timer = setTimeout(poll, S.mode === "live" ? 2000 : 6000);
@@ -429,7 +439,7 @@ $("spawn").onsubmit = async e => {
 // ---- canvases -------------------------------------------------------------------------------------------
 async function loadCanvases(want){
   const list = await api("/api/canvases");
-  $("canvas-select").innerHTML = list.map(c => `<option value="${esc(c.id)}">${esc(c.name)} · ${c.config.viewport}px · ${c.agents} agents</option>`).join("");
+  $("canvas-select").innerHTML = list.map(c => `<option value="${esc(c.id)}">${esc(c.name)} · ${c.config.viewport}px${c.config.frame ? ` · ${c.config.frame[2]}×${c.config.frame[3]} frame` : ""} · ${c.agents} agents</option>`).join("");
   $("canvas-select").hidden = !list.length; $("counts").hidden = !list.length;
   if(!list.length){ S.cid = null; $("empty").hidden = false; $("empty").textContent = S.canLaunch ? "No canvas yet. Create one with New canvas." : "No canvas yet, and this server is read-only."; updateSubmit(); draw(); return; }
   const id = list.find(c => c.id === (want || new URLSearchParams(location.search).get("canvas")))?.id || list[0].id;
@@ -447,7 +457,8 @@ $("new-canvas").onclick = () => { $("canvas-error").textContent = ""; $("canvas-
 $("canvas-form").onsubmit = async e => {
   if(e.submitter?.value !== "ok") return;
   e.preventDefault();
-  try{ const c = await api("/api/canvases", "POST", {name:$("canvas-name").value.trim(), viewport:Number($("canvas-viewport").value), max_calls:Number($("canvas-calls").value), task:$("canvas-task").value.trim() || null});
+  try{ const c = await api("/api/canvases", "POST", {name:$("canvas-name").value.trim(), viewport:Number($("canvas-viewport").value), max_calls:Number($("canvas-calls").value), task:$("canvas-task").value.trim() || null,
+    frame:$("canvas-frame-w").value || $("canvas-frame-h").value ? {width:Number($("canvas-frame-w").value) || null, height:Number($("canvas-frame-h").value) || null} : null});
     $("canvas-dialog").close(); await loadCanvases(c.id); }
   catch(err){ $("canvas-error").textContent = err.message; }
 };

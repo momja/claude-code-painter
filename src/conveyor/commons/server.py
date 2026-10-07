@@ -45,6 +45,7 @@ from conveyor.commons.overview import region
 from conveyor.commons.tiles import DEFAULT_INK
 from conveyor.commons.tiles import MOVE_SHARE
 from conveyor.commons.tiles import SharedCanvas
+from conveyor.commons.tiles import clamp_to_frame
 from conveyor.commons.tiles import encode_tile
 from conveyor.commons.tiles import to_uint8
 from conveyor.mcp import StdioServer
@@ -64,6 +65,7 @@ from conveyor.painting.paintserver import batch_calls
 MAX_BROADCAST = 280  # characters in one broadcast
 BROADCASTS_SHOWN = 5  # the most broadcasts one result carries; the newest are kept
 SUCCESSOR_WINDOW = 10  # spawn_successor works only in an agent's last this-many calls, so a session stays put
+OUTSIDE = (38, 38, 46)  # how the overview shows what lies outside a canvas's frame
 HARNESS_TOOLS = ("look", "overview", "move_viewport", "write_message", "broadcast", "paint_batch", "spawn_successor")
 
 
@@ -75,7 +77,8 @@ class AgentSession:
         self.agent_id = job["agent_id"]
         self.size = int(job.get("viewport") or self.canvas.config["viewport"])  # the agent's own, or the canvas's
         self.max_calls = int(job.get("max_calls") or self.canvas.config["max_calls"])
-        self.x, self.y = int(job["x"]), int(job["y"])
+        self.frame = self.canvas.config.get("frame")  # (x0, y0, x1, y1), or None for a canvas with no edges
+        self.x, self.y = clamp_to_frame(self.frame, int(job["x"]), int(job["y"]), self.size)
         self.inst = Instrument(job["source"])
         taken = {t.name for t in [*self.inst.spec.tools, *self.inst.spec.views]} & set(HARNESS_TOOLS)
         if taken:
@@ -208,10 +211,18 @@ class AgentSession:
         x0, y0, x1, y1 = window
         img = self.canvas.shrunk(window, scale).astype(np.float32) / 255.0
         img = to_uint8(draw_messages(img, x0, y0, self.canvas.messages(x0, y0, x1, y1), scale))
+        if self.frame:  # nothing exists outside the frame: shade it so the edge is plain
+            fx0, fy0, fx1, fy1 = ((c - o) * scale for c, o in zip(self.frame, (x0, y0, x0, y0)))
+            rows, cols = np.arange(img.shape[0])[:, None] + 0.5, np.arange(img.shape[1])[None, :] + 0.5
+            outside = (cols < fx0) | (cols > fx1) | (rows < fy0) | (rows > fy1)
+            img[outside] = OUTSIDE
         self._op("overview", "view", {}, f"x {x0} to {x1}, y {y0} to {y1}", tool_use_id=tool_use_id)
         extent = self.canvas.extent()
         reach = (f"Paint on the whole canvas reaches from x {extent[0]} to {extent[2]} and y {extent[1]} to {extent[3]}."
                  if extent else "Nothing is painted anywhere yet.")
+        if self.frame:
+            reach += (f" The frame runs x {self.frame[0]} to {self.frame[2]} and y {self.frame[1]} to {self.frame[3]}; "
+                      "the dark area is outside it.")
         moves = (REGION - 1) / 2 / MOVE_SHARE
         return [text(f"The canvas around you, x {x0} to {x1} and y {y0} to {y1}: {REGION} viewports across, with "
                      f"yours, the magenta box, in the middle, shrunk so one picture pixel is {1 / scale:g} canvas "
@@ -231,12 +242,16 @@ class AgentSession:
             raise ToolFailure("move_viewport needs `angle` in degrees and `distance` in pixels. You didn't move.")
         distance = min(max(distance, 0.0), limit)
         dx, dy = round(distance * math.cos(math.radians(angle))), round(distance * math.sin(math.radians(angle)))
-        self.x, self.y = self.x + dx, self.y + dy
+        x, y = clamp_to_frame(self.frame, self.x + dx, self.y + dy, self.size)
+        stopped = (x, y) != (self.x + dx, self.y + dy)
+        dx, dy = x - self.x, y - self.y
+        self.x, self.y = x, y
         img = self._seen()
-        self._op("move_viewport", "moved", {"angle": angle, "distance": round(distance, 1)}, f"moved by ({dx}, {dy})",
-                 snapshot=img, tool_use_id=tool_use_id)
-        return [text(f"Moved {distance:.0f} px toward {angle:g} degrees: by {dx} in x and {dy} in y. "
-                     "Your new viewport, labelled in viewport pixels:"), image(gridded_png(img))]
+        self._op("move_viewport", "moved", {"angle": angle, "distance": round(distance, 1)}, f"moved by ({dx}, {dy})"
+                 + (", stopped by the frame" if stopped else ""), snapshot=img, tool_use_id=tool_use_id)
+        edge = " The frame's edge stopped you there." if stopped else ""
+        return [text(f"Asked to move {distance:.0f} px toward {angle:g} degrees; moved by {dx} in x and {dy} in y."
+                     f"{edge} Your new viewport, labelled in viewport pixels:"), image(gridded_png(img))]
 
     def view(self, tool: str, args: dict, tool_use_id: str | None = None) -> list[dict]:
         try:

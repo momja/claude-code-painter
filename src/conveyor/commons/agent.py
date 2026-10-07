@@ -40,6 +40,7 @@ from conveyor.commons.server import MAX_BROADCAST
 from conveyor.commons.server import SUCCESSOR_WINDOW
 from conveyor.commons.tiles import MOVE_SHARE
 from conveyor.commons.tiles import VIEWPORT_RANGE
+from conveyor.commons.tiles import clamp_to_frame
 from conveyor.commons.tiles import SharedCanvas
 from conveyor.launch import LaunchError
 from conveyor.store import Store
@@ -137,6 +138,12 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued") -
                 or not VIEWPORT_RANGE[0] <= viewport <= VIEWPORT_RANGE[1]:
             raise LaunchError(f"viewport must be a whole number of pixels from {VIEWPORT_RANGE[0]} to {VIEWPORT_RANGE[1]}.")
         config["viewport"] = int(viewport)
+        frame = canvas_config.get("frame")
+        if frame and (viewport > frame[2] - frame[0] or viewport > frame[3] - frame[1]):
+            raise LaunchError(f"A {viewport} px viewport doesn't fit in this canvas's {frame[2] - frame[0]} x "
+                              f"{frame[3] - frame[1]} frame.")
+        x, y = clamp_to_frame(frame, x, y, int(viewport))  # a start outside the frame moves to its nearest edge
+        config["start"] = [x, y]
         conn.execute("INSERT INTO canvas_agents (id, canvas_id, name, created, status, config, x, y, calls_used, "
                      "max_calls) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
                      (agent_id, canvas_id, name, time.time(), status, dumps(config), x, y, max_calls))
@@ -202,18 +209,23 @@ def _args(config: dict, db: Path) -> argparse.Namespace:
     return args
 
 
-def system_prompt(config: dict, size: int, x: int, y: int, max_calls: int, task: str | None = None) -> str:
+def system_prompt(config: dict, size: int, x: int, y: int, max_calls: int, task: str | None = None,
+                  frame: list[int] | None = None) -> str:
     from conveyor.commons.overview import OVERVIEW_SIDE, REGION
     from conveyor.painting.canvas import CALL_AREA_SHARE, Canvas
     from conveyor.painting.instrument import Instrument
 
     inst = Instrument(config["source"])
     own = (config.get("agent_task") or "").strip()
-    purpose = (prompts.TASK.format(task=task.strip()) if task else prompts.NO_SHARED_TASK if own else prompts.NO_TASK)
+    w, h = (frame[2] - frame[0], frame[3] - frame[1]) if frame else (0, 0)
+    span = prompts.SPAN_FRAMED.format(w=w, h=h) if frame else prompts.SPAN_OPEN
+    purpose = (prompts.TASK.format(task=task.strip(), span=span) if task else prompts.NO_SHARED_TASK if own
+               else prompts.NO_TASK)
     if own:
         purpose += "\n\n" + prompts.AGENT_TASK.format(agent_task=own)
     rules = prompts.AGENT_RULES.format(
-        purpose=purpose, overview_side=OVERVIEW_SIDE, region=REGION, max_broadcast=MAX_BROADCAST, s=size, x=x, y=y,
+        purpose=purpose, extent=f", {w} x {h} pixels inside a frame" if frame else " with no edges",
+        frame_rule=prompts.FRAME_RULE.format(w=w, h=h) if frame else "", overview_side=OVERVIEW_SIDE, region=REGION, max_broadcast=MAX_BROADCAST, s=size, x=x, y=y,
         area_cap=Canvas(size, size).area_cap, share=CALL_AREA_SHARE, max_move=int(MOVE_SHARE * size),
         max_calls=max_calls, batch=prompts.BATCH_RULE.format(max_calls=max_calls) if config.get("paint_batch", True) else "",
         views=prompts.VIEWS_RULE if inst.spec.views else "", reference=inst.reference(size, size),
@@ -287,7 +299,7 @@ def run_agent(db: Path, agent_id: str) -> None:
                 if tool_uses[0] > max_calls + GRACE_CALLS:  # it kept calling after being told it was out
                     harness.stop_all()
 
-        prompt = system_prompt(config, size, x, y, max_calls, canvas.config.get("task"))
+        prompt = system_prompt(config, size, x, y, max_calls, canvas.config.get("task"), canvas.config.get("frame"))
         job = Job(purpose="canvas agent", system_prompt=prompt, content=content,
                   cwd=d, mcp={"name": "commons", "command": sys.executable, "args": ["-m", "conveyor.commons.server", str(d)]},
                   tools=tools, max_budget_usd=config["cap"], timeout=SESSION_TIMEOUT, node="canvas",

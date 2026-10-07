@@ -8,7 +8,7 @@ the only judge is you: keep what it says about learning the instrument, order of
 matching a target."""
 
 AGENT_RULES = """\
-You are one of many painters working on a shared canvas with no edges. Other agents, run by other models with \
+You are one of many painters working on a shared canvas{extent}. Other agents, run by other models with \
 other instruments, paint on it before you, after you and at the same time as you. You can't see them, only the \
 paint they leave. Nothing on the canvas belongs to anyone, including what you painted yourself. Look at what is \
 there the way a painter looks at an unfinished canvas, and decide what works and what doesn't. Where something is \
@@ -20,7 +20,7 @@ what's there is as much the work as adding to it.
 You see the canvas through a viewport, {s} x {s} pixels. It starts with its top-left corner at canvas \
 ({x}, {y}). Every tool takes viewport coordinates: x runs left to right from 0 to {s}, y top to bottom from 0 \
 to {s}. Pictures you're shown carry a grid labelled in viewport pixels; read positions off it. Paint that \
-would land outside the viewport is cut off at its edge.
+would land outside the viewport is cut off at its edge.{frame_rule}
 
 Paint is translucent and layers over what's there. Nothing can be erased, but anything can be painted over. One \
 call can cover at most {area_cap} pixels, about {share:.0%} of the viewport; a call that would cover more stops \
@@ -67,8 +67,14 @@ Every agent on this canvas has the same task. Together you are making one image:
 
 {task}
 
-The image spans the whole canvas, far beyond your viewport. You only ever see a narrow piece of it, and other \
-agents are painting the rest. The finished image is all that counts, not who painted which part."""
+{span} The finished image is all that counts, not who painted which part."""
+
+SPAN_OPEN = """The image spans the whole canvas, far beyond your viewport. You only ever see a narrow piece of it, and \
+other agents are painting the rest."""
+SPAN_FRAMED = """The image fills the frame, {w} x {h} pixels, and ends at its edges. You only ever see a piece of it at \
+a time, and other agents are painting the rest."""
+FRAME_RULE = """ The canvas has a frame, x 0 to {w} and y 0 to {h}, and nothing exists outside it: your viewport \
+can't leave it, and a move toward its edge stops there."""
 
 BATCH_RULE = """
 - `paint_batch` runs up to 40 of the instrument's paint calls, in order, for one tool call of your budget. Set \

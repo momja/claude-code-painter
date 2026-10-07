@@ -325,6 +325,40 @@ def test_an_agent_can_have_a_viewport_of_its_own_size(canvas, tmp_path):
     assert big.s.size == 256 and 'from around canvas (120, 72): "detail work here"' in text_of(tool(big, "look"))
 
 
+def test_a_frame_keeps_every_viewport_and_so_all_paint_inside_it(tmp_path):
+    db = tmp_path / "c.db"
+    row = create_canvas(db, "Framed", viewport=256, max_calls=20, frame=(512, 384))
+    assert row["config"]["frame"] == [0, 0, 512, 384]
+    outside = agent(db, row, tmp_path, x=-500, y=900, name="out")  # a start outside is pulled to the nearest edge
+    assert (outside.s.x, outside.s.y) == (0, 128)
+    server = agent(db, row, tmp_path, x=100, y=50, name="in")
+    moved = text_of(tool(server, "move_viewport", {"angle": 0, "distance": 192}))
+    assert (server.s.x, server.s.y) == (256, 50) and "moved by 156 in x" in moved and "frame's edge" in moved
+    tool(server, "move_viewport", {"angle": 270, "distance": 192})
+    assert (server.s.x, server.s.y) == (256, 0)
+    assert "frame's edge" not in text_of(tool(server, "move_viewport", {"angle": 90, "distance": 100}))
+    said = text_of(tool(outside, "overview"))
+    assert "The frame runs x 0 to 512 and y 0 to 384" in said
+    with Image.open(io.BytesIO(base64.b64decode(tool(outside, "overview")["content"][1]["data"]))) as pic:
+        arr = np.asarray(pic.convert("RGB")).astype(int)
+    dark = (np.abs(arr - np.array([38, 38, 46])).sum(axis=-1) < 6)
+    assert dark.sum() > 20_000  # the region reaches past the frame on every side; that part is shaded
+    framed = system_prompt({"source": ROUND, "prompt": "Paint big."}, 256, 0, 0, 20, "A farmer.", [0, 0, 512, 384])
+    assert "512 x 384 pixels inside a frame" in framed and "fills the frame" in framed and "can't leave it" in framed
+    assert "far beyond" not in framed and "no edges" not in framed
+    open_ = system_prompt({"source": ROUND, "prompt": "Paint big."}, 256, 0, 0, 20, "A farmer.")
+    assert "far beyond" in open_ and "no edges" in open_ and "frame" not in open_
+
+
+def test_spawning_on_a_framed_canvas_starts_inside_and_fits_the_frame(tmp_path):
+    db = seeded_db(tmp_path)
+    row = create_canvas(db, "Framed", viewport=256, frame=(512, 384))
+    spawned = create_agent(db, row["id"], {"pair_id": PAIR, "x": 9000, "y": -40})
+    assert (spawned["x"], spawned["y"]) == (256, 0)
+    with pytest.raises(LaunchError, match="doesn't fit"):
+        create_agent(db, row["id"], {"pair_id": PAIR, "viewport": 400})
+
+
 def test_the_pen_keeps_its_state_across_calls(canvas, tmp_path):
     db, row = canvas
     server = agent(db, row, tmp_path, source=PEN)
@@ -626,6 +660,10 @@ def test_the_page_and_its_reads(served, tmp_path):
     assert status == 201 and made["config"]["viewport"] == 256
     assert http(base, "POST", "/api/canvases", {"viewport": 9000})[0] == 422
     assert http(base, "POST", "/api/canvases", {"task": "x" * 2001})[0] == 422
+    assert http(base, "POST", "/api/canvases", {"viewport": 256, "frame": {"width": 128, "height": 600}})[0] == 422
+    assert http(base, "POST", "/api/canvases", {"frame": {"width": 2048}})[0] == 422
+    status, framed = http(base, "POST", "/api/canvases", {"frame": {"width": 2048, "height": 1536}})
+    assert status == 201 and framed["config"]["frame"] == [0, 0, 2048, 1536]
     status, tasked = http(base, "POST", "/api/canvases", {"name": "Harbour", "task": "  A harbour at dusk.\n"})
     assert status == 201 and tasked["config"]["task"] == "A harbour at dusk."
     assert "task" not in made["config"]

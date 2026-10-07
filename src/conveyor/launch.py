@@ -313,10 +313,11 @@ class Launcher:
     # ---- the shared canvas --------------------------------------------------------------------------------
 
     def create_canvas(self, body: dict) -> dict:
-        from conveyor.commons.tiles import DEFAULT_MAX_CALLS, DEFAULT_VIEWPORT, MAX_TASK, VIEWPORT_RANGE, create_canvas
+        from conveyor.commons.tiles import DEFAULT_MAX_CALLS, DEFAULT_VIEWPORT, MAX_FRAME, MAX_TASK, VIEWPORT_RANGE
+        from conveyor.commons.tiles import create_canvas
 
-        if not isinstance(body, dict) or set(body) - {"name", "viewport", "max_calls", "task"}:
-            raise LaunchError("Expected name, viewport, max_calls and task.")
+        if not isinstance(body, dict) or set(body) - {"name", "viewport", "max_calls", "task", "frame"}:
+            raise LaunchError("Expected name, viewport, max_calls, task and frame.")
         task = body.get("task") or None
         if task is not None and (not isinstance(task, str) or len(task) > MAX_TASK):
             raise LaunchError(f"task must be text, at most {MAX_TASK} characters.")
@@ -329,7 +330,14 @@ class Launcher:
         max_calls = self._number("max_calls", body.get("max_calls", DEFAULT_MAX_CALLS), int)
         if not 1 <= max_calls <= 1000:
             raise LaunchError("max_calls must be between 1 and 1000.")
-        return create_canvas(self.db, name.strip(), viewport, max_calls, (task or "").strip() or None)
+        frame = body.get("frame") or None
+        if frame is not None:
+            if not isinstance(frame, dict) or set(frame) != {"width", "height"}:
+                raise LaunchError("frame must be {width, height} in pixels, or left out for a canvas with no edges.")
+            frame = tuple(self._number(f"frame {k}", frame[k], int) for k in ("width", "height"))
+            if not all(viewport <= side <= MAX_FRAME for side in frame):
+                raise LaunchError(f"The frame's width and height must be from the viewport's {viewport} to {MAX_FRAME:,} pixels.")
+        return create_canvas(self.db, name.strip(), viewport, max_calls, (task or "").strip() or None, frame)
 
     def start_agent(self, canvas_id: str, body: dict) -> dict:
         from conveyor.commons.agent import create_agent

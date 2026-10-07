@@ -48,6 +48,7 @@ DEFAULT_VIEWPORT = 512
 DEFAULT_MAX_CALLS = 100
 VIEWPORT_RANGE = (64, 1024)  # a canvas's default viewport, and any one agent's
 MAX_TASK = 2000  # characters in a canvas's task
+MAX_FRAME = 1_000_000  # pixels on a side of a canvas's frame
 DEFAULT_INK = "#1d2a3a"
 MOVE_SHARE = 0.75  # the farthest one move goes, as a share of the viewport side; consecutive views always overlap
 
@@ -85,14 +86,27 @@ def message(seq: int, vx: int, vy: int, args: dict, viewport: int) -> dict:
             "h": min(height, len(lines) * LINE_H * scale)}
 
 
+def clamp_to_frame(frame: list[int] | None, x: int, y: int, size: int) -> tuple[int, int]:
+    """The viewport corner nearest (x, y) that keeps a `size` px viewport inside the frame (x0, y0, x1, y1). An
+    unframed canvas has no edges, so anything goes."""
+    if not frame:
+        return x, y
+    fx0, fy0, fx1, fy1 = frame
+    return min(max(x, fx0), fx1 - size), min(max(y, fy0), fy1 - size)
+
+
 def create_canvas(db: str | Path, name: str, viewport: int = DEFAULT_VIEWPORT,
-                  max_calls: int = DEFAULT_MAX_CALLS, task: str | None = None) -> dict:
-    """A new canvas. `task`, when given, is the one image every agent on it is told to make together."""
+                  max_calls: int = DEFAULT_MAX_CALLS, task: str | None = None,
+                  frame: tuple[int, int] | None = None) -> dict:
+    """A new canvas. `task`, when given, is the one image every agent on it is told to make together. `frame`,
+    (width, height), bounds the canvas to x 0 to width and y 0 to height: viewports stay inside it, so paint does."""
     init_db(db)
     row = {"id": new_id(), "name": name, "created": time.time(),
            "config": {"viewport": int(viewport), "max_calls": int(max_calls), "tile": TILE}}
     if task:
         row["config"]["task"] = task
+    if frame:
+        row["config"]["frame"] = [0, 0, int(frame[0]), int(frame[1])]
     conn = sqlite3.connect(db, timeout=BUSY_TIMEOUT)
     try:
         conn.execute("INSERT INTO canvases (id, name, created, config) VALUES (?, ?, ?, ?)",
