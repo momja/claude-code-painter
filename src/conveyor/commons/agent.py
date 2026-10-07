@@ -50,6 +50,7 @@ from conveyor.store import new_id
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 MAX_COORD = 10_000_000
 SESSION_TIMEOUT = 3 * 3600.0  # seconds; a hundred calls at high effort can outlast the 45 minutes a painting gets
+MAX_AGENT_TASK = 1000  # characters in the task a human gives one agent
 RANDOM = "random"  # a spawn request's pair_id that asks for a painter drawn from the whole catalog
 GRACE_CALLS = 5  # calls past the budget a model may make, refused, before its session is killed
 
@@ -73,7 +74,7 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued") -
     from conveyor.pi import PROVIDERS
 
     allowed = {"pair_id", "harness", "model", "effort", "provider", "x", "y", "name", "cap",
-               "paint_batch", "successors"}
+               "paint_batch", "successors", "task"}
     if not isinstance(body, dict) or set(body) - allowed:
         raise LaunchError("Expected " + ", ".join(sorted(allowed)) + ".")
     harness = body.get("harness") or "claude"
@@ -87,6 +88,10 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued") -
     if provider not in PROVIDERS:
         raise LaunchError(f"provider must be one of {', '.join(PROVIDERS)}.")
     name = _text(body, "name", 60)
+    agent_task = body.get("task") or None
+    if agent_task is not None and (not isinstance(agent_task, str) or len(agent_task) > MAX_AGENT_TASK):
+        raise LaunchError(f"task must be text, at most {MAX_AGENT_TASK} characters.")
+    agent_task = (agent_task or "").strip() or None
     model = model or default_model(harness, provider)  # saved resolved, so the agent list names the real model
     try:
         x, y = int(body.get("x", 0)), int(body.get("y", 0))
@@ -118,7 +123,7 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued") -
             raise LaunchError(f"That painter's instrument has a tool named {', '.join(sorted(clash))}, which the canvas uses.")
         config = {**painter(pair, drawn), "harness": harness, "model": model, "effort": effort,
                   "provider": provider if harness == "pi" else None, "cap": cap, "paint_batch": paint_batch,
-                  "successors": successors, "start": [x, y], "generation": 1}
+                  "successors": successors, "agent_task": agent_task, "start": [x, y], "generation": 1}
         agent_id = new_id()
         name = name or f"{re.sub(r'^claude-', '', model.split('/')[-1])} {agent_id[:4]}"
         config.update(lineage=agent_id, base_name=name)
@@ -193,8 +198,13 @@ def system_prompt(config: dict, size: int, x: int, y: int, max_calls: int, task:
     from conveyor.painting.instrument import Instrument
 
     inst = Instrument(config["source"])
+    own = (config.get("agent_task") or "").strip()
+    purpose = (prompts.TASK.format(task=task.strip()) if task else prompts.NO_SHARED_TASK if own else prompts.NO_TASK)
+    if own:
+        purpose += "\n\n" + prompts.AGENT_TASK.format(agent_task=own)
     rules = prompts.AGENT_RULES.format(
-        purpose=prompts.TASK.format(task=task.strip()) if task else prompts.NO_TASK, overview_side=OVERVIEW_SIDE, region=REGION, max_broadcast=MAX_BROADCAST, s=size, x=x, y=y, area_cap=Canvas(size, size).area_cap, share=CALL_AREA_SHARE, max_move=int(MOVE_SHARE * size),
+        purpose=purpose, overview_side=OVERVIEW_SIDE, region=REGION, max_broadcast=MAX_BROADCAST, s=size, x=x, y=y,
+        area_cap=Canvas(size, size).area_cap, share=CALL_AREA_SHARE, max_move=int(MOVE_SHARE * size),
         max_calls=max_calls, batch=prompts.BATCH_RULE.format(max_calls=max_calls) if config.get("paint_batch", True) else "",
         views=prompts.VIEWS_RULE if inst.spec.views else "", reference=inst.reference(size, size),
         successor=prompts.SUCCESSOR_RULE.format(max_calls=max_calls, window=SUCCESSOR_WINDOW) if config.get("successors") else "")

@@ -106,6 +106,7 @@ dialog::backdrop{background:#0006}
       <label>Model<input id="model" list="models" placeholder="Harness default" autocomplete="off"><datalist id="models"></datalist></label>
       <div class="row3"><label>Start x<input id="x" type="number" step="1" value="0"></label><label>Start y<input id="y" type="number" step="1" value="0"></label><label>Cap, $<input id="cap" type="number" step="any" min="0.01" max="100" value="5"></label></div>
       <label>Name<input id="name" maxlength="60" placeholder="Model name"></label>
+      <label>Task for this agent, optional<textarea id="agent-task" rows="3" maxlength="1000" placeholder="Its own part of the work. Only this agent reads it; its successors carry it on."></textarea></label>
       <label class="check"><input id="batch" type="checkbox" checked> Offer paint_batch (40 strokes for one call)</label>
       <label class="check"><input id="successors" type="checkbox" checked> May spawn a successor to keep working</label>
       <label id="token-field" hidden>Launch token<input id="token" type="password" autocomplete="off"></label>
@@ -326,6 +327,7 @@ function renderAgents(){
     return `<div class="agent" style="--c:${color(a.id)}"><div class="top"><b title="${esc(a.name)}">${esc(a.name)}</b><span class="status ${live ? "running" : ""}">${esc(a.status.replace("_", " "))}</span></div>
       <div class="meta">${esc(model)}${c.generation > 1 ? ` · session ${c.generation}, from ${esc(agentName(c.parent_id))}` : ""}${c.successors === false ? " · no successors" : ""}${c.random ? " · painter drawn at random" : ""}</div>
       ${a.status === "handed_off" ? `<div class="meta">Handed off to ${esc(S.agents.filter(x => x.config?.parent_id === a.id).map(x => x.name).join(", ") || "a successor")}</div>` : ""}
+      ${c.agent_task ? `<div class="meta clamp" title="${esc(c.agent_task)}"><b>Task:</b> ${esc(c.agent_task)}</div>` : ""}
       <div class="meta clamp" title="${esc(c.instrument_label)}">Instrument: ${esc(c.instrument_label)}</div>
       <div class="meta clamp" title="${esc(c.prompt_label)}">Prompt: ${esc(c.prompt_label)}</div>
       <div class="bar" title="${a.calls_used} of ${a.max_calls} tool calls"><i style="width:${pct}%"></i></div>
@@ -414,7 +416,7 @@ $("spawn").onsubmit = async e => {
   $("submit").disabled = true; $("message").textContent = "Spawning…";
   const body = {pair_id:$("random").checked ? "random" : $("painter").value, harness:$("harness").value, effort:$("effort").value,
     model:$("model").value.trim() || null, x:Math.round(Number($("x").value) || 0), y:Math.round(Number($("y").value) || 0),
-    cap:Number($("cap").value) || 5, name:$("name").value.trim() || null, paint_batch:$("batch").checked,
+    cap:Number($("cap").value) || 5, name:$("name").value.trim() || null, task:$("agent-task").value.trim() || null, paint_batch:$("batch").checked,
     successors:$("successors").checked};
   if(body.harness === "pi") body.provider = $("provider").value;
   try{ const a = await api(`/api/canvases/${encodeURIComponent(S.cid)}/agents`, "POST", body); $("message").textContent = `Spawned ${a.name || a.id} at (${a.x}, ${a.y})${a.painter.random ? ", drawn at random" : ""}: ${a.painter.instrument} / ${a.painter.prompt}.`; S.spawn = null; await poll(); }

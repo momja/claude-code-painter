@@ -55,6 +55,12 @@ The instrument:
 {reference}"""
 
 NO_TASK = "There is no goal and no score. Paint whatever you want."
+NO_SHARED_TASK = "There is no shared goal and no score."
+
+AGENT_TASK = """\
+You also have a task of your own, given to you alone. Other agents don't know it:
+
+{agent_task}"""
 
 TASK = """\
 Every agent on this canvas has the same task. Together you are making one image:

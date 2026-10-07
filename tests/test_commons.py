@@ -20,6 +20,7 @@ from conveyor.commons import lettering
 from conveyor.commons import prompts
 from conveyor.commons import views
 from conveyor.commons.agent import create_agent
+from conveyor.commons.agent import queue_successor
 from conveyor.commons.agent import run_agent
 from conveyor.commons.agent import session_scope
 from conveyor.commons.agent import system_prompt
@@ -281,6 +282,31 @@ def test_a_canvas_task_reaches_every_agent_word_for_word(tmp_path):
     assert "not who painted which part" in with_task and "not who painted" not in without
 
 
+def test_an_agent_task_goes_to_that_agent_alone_and_its_successors(tmp_path):
+    db = seeded_db(tmp_path)
+    row = create_canvas(db, "C", task="A harbour at dusk.")
+    plain = create_canvas(db, "Plain")
+    told = create_agent(db, row["id"], {"pair_id": PAIR, "task": "  Paint the lighthouse on the far headland.\n"})
+    other = create_agent(db, row["id"], {"pair_id": PAIR})
+    conn = connect(db, readonly=True)
+    configs = {a["id"]: a["config"] for a in views.canvas(conn, row["id"])["agents"]}
+    assert configs[told["id"]]["agent_task"] == "Paint the lighthouse on the far headland."
+    assert configs[other["id"]]["agent_task"] is None
+    mine = system_prompt(configs[told["id"]] | {"source": ROUND, "prompt": "Paint big."}, 256, 0, 0, 20, "A harbour at dusk.")
+    assert "A harbour at dusk." in mine and "task of your own" in mine and "the far headland." in mine
+    theirs = system_prompt(configs[other["id"]] | {"source": ROUND, "prompt": "Paint big."}, 256, 0, 0, 20, "A harbour at dusk.")
+    assert "task of your own" not in theirs and "headland" not in theirs
+    alone = create_agent(db, plain["id"], {"pair_id": PAIR, "task": "Paint a red door."})
+    config = views.canvas(conn, plain["id"])["agents"][0]["config"] | {"source": ROUND, "prompt": "Paint big."}
+    solo = system_prompt(config, 256, 0, 0, 20)
+    assert "Paint a red door." in solo and prompts.NO_SHARED_TASK in solo and prompts.NO_TASK not in solo
+    shared = SharedCanvas(db, plain["id"])
+    raw = dict(shared.conn.execute("SELECT * FROM canvas_agents WHERE id=?", (alone["id"],)).fetchone())
+    child = queue_successor(shared, raw, json.loads(raw["config"]), 0, 0)
+    stored = json.loads(shared.conn.execute("SELECT config FROM canvas_agents WHERE id=?", (child["id"],)).fetchone()[0])
+    assert stored["agent_task"] == "Paint a red door."
+
+
 def test_the_pen_keeps_its_state_across_calls(canvas, tmp_path):
     db, row = canvas
     server = agent(db, row, tmp_path, source=PEN)
@@ -380,7 +406,7 @@ def test_a_database_without_scores_offers_the_seed_pairs(tmp_path):
     ({"harness": "gpt"}, "harness"), ({"effort": "huge"}, "effort"), ({"pair_id": "c-nope"}, "painter"),
     ({"instrument_id": "i-x"}, "Expected"), ({"x": "left"}, "whole numbers"),
     ({"x": 10**9}, "within"), ({"cap": 0}, "cap"), ({"model": "--dangerous"}, "dash"), ({"color": "red"}, "Expected"),
-    ({"successors": "yes"}, "on or off"),
+    ({"successors": "yes"}, "on or off"), ({"task": "x" * 1001}, "task"), ({"task": 7}, "task"),
 ])
 def test_spawning_checks_its_request(tmp_path, change, match):
     db = seeded_db(tmp_path)

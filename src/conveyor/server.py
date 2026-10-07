@@ -31,7 +31,7 @@ With a launcher (`conveyor serve` on a loopback address) it can also start runs:
   POST /api/runs/<run>/paintings      paint with saved instrument_id/prompt_id, text and optional base64 image
   POST /api/canvases                 create a shared canvas from {name, viewport, max_calls, task}
   POST /api/canvases/<id>/agents     spawn an agent: catalog pair_id (or "random"), harness, model, effort,
-                                     provider, start x and y, name, cap, paint_batch, successors
+                                     provider, start x and y, name, cap, paint_batch, successors, task
   POST /api/canvases/<id>/agents/<agent>/stop   stop it, as Ctrl+C would
 
 On a loopback address launching needs nothing more. Served to a network, it needs a token: the launcher is given
