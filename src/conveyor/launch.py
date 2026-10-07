@@ -437,6 +437,40 @@ class Launcher:
             canvas.close()
         return {"seq": seq, "erased": found}
 
+    def set_painters(self, canvas_id: str, body: dict) -> dict | None:
+        """Choose the painters a canvas draws from: `pair_ids`, a list from the catalog, or null for all of them.
+        Random spawns and successors draw from the choice; agents already painting keep theirs. None for an
+        unknown canvas."""
+        import json
+
+        from conveyor.commons import catalog
+        from conveyor.store import connect, dumps
+
+        ids = body.get("pair_ids") if isinstance(body, dict) and set(body) == {"pair_ids"} else "bad"
+        if ids is not None and (not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids)):
+            raise LaunchError("pair_ids must be a list of painters from the catalog, at least one, or null for all.")
+        conn = connect(self.db)
+        try:
+            row = conn.execute("SELECT config FROM canvases WHERE id=?", (canvas_id,)).fetchone() if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvases'").fetchone() else None
+            if row is None:
+                return None
+            if ids is not None:
+                ids = list(dict.fromkeys(ids))
+                unknown = set(ids) - {p["id"] for p in catalog.catalog(conn)["pairs"]}
+                if unknown:
+                    raise LaunchError(f"Not in the catalog: {', '.join(sorted(unknown))}.")
+            config = json.loads(row["config"])
+            if ids is None:
+                config.pop("pairs", None)
+            else:
+                config["pairs"] = ids
+            conn.execute("UPDATE canvases SET config=? WHERE id=?", (dumps(config), canvas_id))
+            conn.commit()
+        finally:
+            conn.close()
+        return {"id": canvas_id, "pairs": ids}
+
     def start_agent(self, canvas_id: str, body: dict) -> dict:
         from conveyor.commons.agent import create_agent
 

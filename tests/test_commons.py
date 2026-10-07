@@ -541,6 +541,49 @@ def test_a_random_painter_is_drawn_from_every_pair_the_canvas_can_run(tmp_path, 
                                  "best_score": 0.7}
 
 
+def test_a_canvas_draws_only_from_the_painters_chosen_for_it(tmp_path, monkeypatch):
+    db = seeded_db(tmp_path)
+    store = Store(db, run_name="run three", config={})
+    store.organism({"id": "pen", "node": "instrument", "created": time.time(), "genome": {"source": PEN},
+                    "summary": "seed: pen", "viable": 1})
+    store.organism({"id": "small", "node": "painter", "created": time.time(), "genome": {"prompt": "Paint small."},
+                    "viable": 1})
+    for org, partner in (("pen", "small"), ("small", "pen")):
+        store.evaluation({"id": f"{org}-ev", "node": "x", "organism_id": org, "partner_id": partner, "score": 0.5,
+                          "viable": 1, "ended": time.time(), "session_id": "three", "artifacts": {"painting": "p.png"}})
+    store.close()
+    other = catalog.pair_key(PEN, "Paint small.")
+    row = create_canvas(db, "C")
+    launcher = Launcher(db, build_parser)
+    offered = []
+
+    def choice(pairs):
+        offered[:] = [p["id"] for p in pairs]
+        return pairs[0]
+
+    monkeypatch.setattr("conveyor.commons.agent.random.choice", choice)
+    first = create_agent(db, row["id"], {"pair_id": "random"})
+    assert set(offered) == {PAIR, other}  # every painter the canvas can run
+    assert launcher.set_painters(row["id"], {"pair_ids": [other, other]}) == {"id": row["id"], "pairs": [other]}
+    create_agent(db, row["id"], {"pair_id": "random"})
+    assert offered == [other]
+    shared = SharedCanvas(db, row["id"])  # a successor draws from the choice as it is when it's queued
+    raw = dict(shared.conn.execute("SELECT * FROM canvas_agents WHERE id=?", (first["id"],)).fetchone())
+    offered.clear()
+    queue_successor(shared, raw, json.loads(raw["config"]), 0, 0)
+    assert offered == [other]
+    assert create_agent(db, row["id"], {"pair_id": PAIR})["painter"]["id"] == PAIR  # a painter picked by hand still goes
+    for body in ({"pair_ids": []}, {"pair_ids": ["c-nope"]}, {"pairs": None}, {"pair_ids": "all"}, {"pair_ids": [7]}):
+        with pytest.raises(LaunchError):
+            launcher.set_painters(row["id"], body)
+    assert launcher.set_painters("nope", {"pair_ids": None}) is None
+    launcher.set_painters(row["id"], {"pair_ids": [catalog.pair_key(CLASH, "Paint big.")]})  # only one it can't run
+    with pytest.raises(LaunchError, match="Choose its painters again"):
+        create_agent(db, row["id"], {"pair_id": "random"})
+    assert launcher.set_painters(row["id"], {"pair_ids": None}) == {"id": row["id"], "pairs": None}
+    assert "pairs" not in views.canvas(connect(db, readonly=True), row["id"])["canvas"]["config"]
+
+
 def test_spawning_refuses_an_instrument_whose_tools_clash(tmp_path):
     db = seeded_db(tmp_path)
     row = create_canvas(db, "C")
@@ -857,4 +900,7 @@ def test_spawn_and_stop_over_http(served, monkeypatch):
     assert status == 200
     wait_for(lambda: connect(db).execute("SELECT status FROM canvas_agents WHERE id=?",
                                          (spawned["id"],)).fetchone()[0] == "stopped")
+    assert http(base, "POST", f"/api/canvases/{made['id']}/painters", {"pair_ids": [PAIR]}) == (200, {"id": made["id"], "pairs": [PAIR]})
+    assert http(base, "POST", f"/api/canvases/{made['id']}/painters", {"pair_ids": []})[0] == 422
+    assert http(base, "POST", "/api/canvases/nope/painters", {"pair_ids": None})[0] == 404
     assert http(base, "POST", "/api/canvases", {"name": "x"}, headers={"Origin": "http://evil.example"})[0] == 403

@@ -58,7 +58,7 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 MAX_COORD = 10_000_000
 SESSION_TIMEOUT = 3 * 3600.0  # seconds; a hundred calls at high effort can outlast the 45 minutes a painting gets
 MAX_AGENT_TASK = 1000  # characters in the task a human gives one agent
-RANDOM = "random"  # a spawn request's pair_id that asks for a painter drawn from the whole catalog
+RANDOM = "random"  # a spawn request's pair_id that asks for a painter drawn from the canvas's chosen painters
 GRACE_CALLS = 5  # calls past the budget a model may make, refused, before its session is killed
 KINDS = ("painter", "judge")
 JUDGE_VIEWPORT = 512
@@ -131,10 +131,14 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued", e
         if canvas is None:
             raise LaunchError("Canvas not found.")
         drawn, pair = body.get("pair_id") == RANDOM, None
+        chosen = json.loads(canvas["config"]).get("pairs")  # the painters picked for this canvas, or None for all
         if judge:
             drawn = False
         elif drawn:
-            pair = draw_pair(conn)
+            pair = draw_pair(conn, chosen)
+            if pair is None and chosen:
+                raise LaunchError("None of the painters chosen for this canvas is in the catalog any more. "
+                                  "Choose its painters again.")
         else:
             pair = catalog_module.entry(conn, body["pair_id"]) if isinstance(body.get("pair_id"), str) else None
         if pair is None and not judge:
@@ -255,9 +259,10 @@ def judge_prompt(config: dict, size: int, x: int, y: int, max_calls: int, task: 
         area_cap=Canvas(size, size).area_cap)
 
 
-def draw_pair(conn) -> dict | None:
-    """A painter drawn at random: every pair in the catalog the canvas can run is equally likely, scored or not."""
-    usable = [p for p in catalog_module.catalog(conn)["pairs"] if not _clash(p)]
+def draw_pair(conn, chosen: list[str] | None = None) -> dict | None:
+    """A painter drawn at random: every pair in the catalog the canvas can run is equally likely, scored or not.
+    `chosen`, the painters picked for a canvas, narrows the draw to those."""
+    usable = [p for p in catalog_module.catalog(conn)["pairs"] if not _clash(p) and (chosen is None or p["id"] in chosen)]
     return random.choice(usable) if usable else None
 
 
@@ -271,10 +276,12 @@ def painter(pair: dict, drawn: bool) -> dict:
 
 def queue_successor(canvas: SharedCanvas, row: dict, config: dict, x: int, y: int) -> dict:
     """The agent that carries on from `row`: its settings with a newly drawn painter, one generation on, starting
-    where it stopped. With nothing in the catalog to draw, it keeps its predecessor's painter."""
+    where it stopped. It draws from the painters chosen for the canvas as they are now, which may have changed
+    since its predecessor started. With nothing to draw, it keeps its predecessor's painter."""
     generation = int(config.get("generation", 1)) + 1
     base = config.get("base_name") or row["name"]
-    pair = draw_pair(canvas.conn)
+    current = canvas.conn.execute("SELECT config FROM canvases WHERE id=?", (row["canvas_id"],)).fetchone()
+    pair = draw_pair(canvas.conn, json.loads(current[0]).get("pairs"))
     child = {**config, **(painter(pair, True) if pair else {}), "generation": generation, "parent_id": row["id"], "lineage": config.get("lineage") or row["id"],
              "base_name": base, "start": [x, y]}
     agent_id, name = new_id(), f"{base} #{generation}"
