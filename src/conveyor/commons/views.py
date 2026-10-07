@@ -56,11 +56,13 @@ def canvas(conn: sqlite3.Connection, canvas_id: str, since: int = 0) -> dict:
         m = message(r["seq"], r["x"], r["y"], json.loads(r["args"]), int(meta["config"]["viewport"]))
         messages.append({**m, "agent_id": r["agent_id"], "ts": r["ts"],
                          "color": "#%02x%02x%02x" % tuple(round(c * 255) for c in m["color"])})
-    half = int(meta["config"]["viewport"]) // 2  # a broadcast is placed at the middle of its sender's viewport
-    broadcasts = [{"seq": r["seq"], "agent_id": r["agent_id"], "ts": r["ts"], "text": r["note"], "x": r["x"] + half,
-                   "y": r["y"] + half} for r in conn.execute(
-        "SELECT seq, agent_id, ts, x, y, note FROM canvas_ops WHERE canvas_id=? AND seq>? AND tool='broadcast' "
-        "AND status='sent' ORDER BY seq", (canvas_id, since))]
+    broadcasts = []
+    for r in conn.execute("SELECT seq, agent_id, ts, x, y, note, args FROM canvas_ops WHERE canvas_id=? AND seq>? "
+                          "AND tool='broadcast' AND status='sent' ORDER BY seq", (canvas_id, since)):
+        # placed at the middle of its sender's viewport
+        half = int(json.loads(r["args"] or "{}").get("viewport") or meta["config"]["viewport"]) // 2
+        broadcasts.append({"seq": r["seq"], "agent_id": r["agent_id"], "ts": r["ts"], "text": r["note"],
+                           "x": r["x"] + half, "y": r["y"] + half})
     return {"canvas": meta, "agents": agents, "heads": heads, "seq": seq, "since": since, "messages": messages,
             "broadcasts": broadcasts,
             "now": time.time()}

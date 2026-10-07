@@ -39,6 +39,7 @@ from conveyor.commons.server import HARNESS_TOOLS
 from conveyor.commons.server import MAX_BROADCAST
 from conveyor.commons.server import SUCCESSOR_WINDOW
 from conveyor.commons.tiles import MOVE_SHARE
+from conveyor.commons.tiles import VIEWPORT_RANGE
 from conveyor.commons.tiles import SharedCanvas
 from conveyor.launch import LaunchError
 from conveyor.store import Store
@@ -74,7 +75,7 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued") -
     from conveyor.pi import PROVIDERS
 
     allowed = {"pair_id", "harness", "model", "effort", "provider", "x", "y", "name", "cap",
-               "paint_batch", "successors", "task"}
+               "paint_batch", "successors", "task", "viewport"}
     if not isinstance(body, dict) or set(body) - allowed:
         raise LaunchError("Expected " + ", ".join(sorted(allowed)) + ".")
     harness = body.get("harness") or "claude"
@@ -127,12 +128,21 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued") -
         agent_id = new_id()
         name = name or f"{re.sub(r'^claude-', '', model.split('/')[-1])} {agent_id[:4]}"
         config.update(lineage=agent_id, base_name=name)
-        max_calls = int(json.loads(canvas["config"]).get("max_calls", 100))
+        canvas_config = json.loads(canvas["config"])
+        max_calls = int(canvas_config.get("max_calls", 100))
+        viewport = body.get("viewport")
+        if viewport in (None, ""):
+            viewport = int(canvas_config["viewport"])
+        elif isinstance(viewport, bool) or not isinstance(viewport, (int, float)) or viewport != int(viewport) \
+                or not VIEWPORT_RANGE[0] <= viewport <= VIEWPORT_RANGE[1]:
+            raise LaunchError(f"viewport must be a whole number of pixels from {VIEWPORT_RANGE[0]} to {VIEWPORT_RANGE[1]}.")
+        config["viewport"] = int(viewport)
         conn.execute("INSERT INTO canvas_agents (id, canvas_id, name, created, status, config, x, y, calls_used, "
                      "max_calls) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
                      (agent_id, canvas_id, name, time.time(), status, dumps(config), x, y, max_calls))
         conn.commit()
         return {"id": agent_id, "canvas_id": canvas_id, "name": name, "x": x, "y": y, "max_calls": max_calls,
+                "viewport": config["viewport"],
                 "painter": {"id": pair["id"], "random": drawn, "instrument": config["instrument_label"],
                             "prompt": config["prompt_label"], "best_score": pair["best_score"]}}
     finally:
@@ -239,14 +249,14 @@ def run_agent(db: Path, agent_id: str) -> None:
         args = _args(config, db)
         harness = _harness(config["harness"], config["model"], config["effort"], args, store,
                            Meter(max_usage=args.max_usage), {})
-        size, max_calls = int(canvas.config["viewport"]), int(row["max_calls"])
+        size, max_calls = int(config.get("viewport") or canvas.config["viewport"]), int(row["max_calls"])
         x, y = int(row["x"]), int(row["y"])
         work = db.parent / f"{db.stem}-sessions"
         d = work / session_scope(row["canvas_id"]) / f"agent-{agent_id}"
         d.mkdir(parents=True, exist_ok=True)
         (d / "job.json").write_text(json.dumps({
             "db": str(db), "canvas_id": row["canvas_id"], "agent_id": agent_id, "source": config["source"],
-            "x": x, "y": y, "max_calls": max_calls, "paint_batch": config.get("paint_batch", True),
+            "x": x, "y": y, "viewport": size, "max_calls": max_calls, "paint_batch": config.get("paint_batch", True),
             "successors": bool(config.get("successors")), "seed": random.randrange(1 << 30)}))
         sheet = sheet_row[0] if sheet_row else probe_source(config["source"], size, size, work)[1]
         view = gridded_png(draw_messages(canvas.read(x, y, size, size).image(), x, y,

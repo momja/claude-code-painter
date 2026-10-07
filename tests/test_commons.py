@@ -53,7 +53,7 @@ def canvas(tmp_path):
 
 
 def agent(db: Path, canvas_row: dict, tmp: Path, *, x=0, y=0, source=ROUND, max_calls=None, name="a",
-          successors=False) -> CommonsServer:
+          successors=False, viewport=None) -> CommonsServer:
     conn = connect(db)
     conn.execute("INSERT INTO canvas_agents (id, canvas_id, created, status, config, x, y, max_calls) "
                  "VALUES (?, ?, ?, 'running', '{}', ?, ?, ?)",
@@ -64,7 +64,7 @@ def agent(db: Path, canvas_row: dict, tmp: Path, *, x=0, y=0, source=ROUND, max_
     d.mkdir()
     (d / "job.json").write_text(json.dumps({"db": str(db), "canvas_id": canvas_row["id"], "agent_id": name,
                                             "source": source, "x": x, "y": y, "max_calls": max_calls,
-                                            "successors": successors}))
+                                            "successors": successors, "viewport": viewport}))
     return CommonsServer(AgentSession(d))
 
 
@@ -296,6 +296,7 @@ def test_an_agent_task_goes_to_that_agent_alone_and_its_successors(tmp_path):
     assert "A harbour at dusk." in mine and "task of your own" in mine and "the far headland." in mine
     theirs = system_prompt(configs[other["id"]] | {"source": ROUND, "prompt": "Paint big."}, 256, 0, 0, 20, "A harbour at dusk.")
     assert "task of your own" not in theirs and "headland" not in theirs
+    assert told["viewport"] == 512 and create_agent(db, row["id"], {"pair_id": PAIR, "viewport": 128})["viewport"] == 128
     alone = create_agent(db, plain["id"], {"pair_id": PAIR, "task": "Paint a red door."})
     config = views.canvas(conn, plain["id"])["agents"][0]["config"] | {"source": ROUND, "prompt": "Paint big."}
     solo = system_prompt(config, 256, 0, 0, 20)
@@ -305,6 +306,23 @@ def test_an_agent_task_goes_to_that_agent_alone_and_its_successors(tmp_path):
     child = queue_successor(shared, raw, json.loads(raw["config"]), 0, 0)
     stored = json.loads(shared.conn.execute("SELECT config FROM canvas_agents WHERE id=?", (child["id"],)).fetchone()[0])
     assert stored["agent_task"] == "Paint a red door."
+
+
+def test_an_agent_can_have_a_viewport_of_its_own_size(canvas, tmp_path):
+    db, row = canvas  # the canvas's viewport is 256
+    small = agent(db, row, tmp_path, x=40, y=40, viewport=64, name="small")
+    assert small.s.size == 64 and small.s.area_cap == int(0.08 * 64 * 64)
+    shown = tool(small, "look")
+    assert "x 40 to 104, y 40 to 104" in text_of(shown)
+    tool(small, "move_viewport", {"angle": 0, "distance": 500})
+    assert small.s.x == 40 + 48  # three quarters of its own viewport
+    tool(small, "write_message", {"text": "a long note that wraps at this small viewport", "x": 0, "y": 0, "scale": 1})
+    tool(small, "broadcast", {"text": "detail work here"})
+    state = views.canvas(connect(db, readonly=True), row["id"])
+    assert state["messages"][0]["width"] == 64 and len(state["messages"][0]["lines"]) > 1  # wrapped at 64, not 256
+    assert (state["broadcasts"][0]["x"], state["broadcasts"][0]["y"]) == (88 + 32, 40 + 32)
+    big = agent(db, row, tmp_path, name="big")  # the canvas's size, told where the small one is
+    assert big.s.size == 256 and 'from around canvas (120, 72): "detail work here"' in text_of(tool(big, "look"))
 
 
 def test_the_pen_keeps_its_state_across_calls(canvas, tmp_path):
@@ -406,7 +424,8 @@ def test_a_database_without_scores_offers_the_seed_pairs(tmp_path):
     ({"harness": "gpt"}, "harness"), ({"effort": "huge"}, "effort"), ({"pair_id": "c-nope"}, "painter"),
     ({"instrument_id": "i-x"}, "Expected"), ({"x": "left"}, "whole numbers"),
     ({"x": 10**9}, "within"), ({"cap": 0}, "cap"), ({"model": "--dangerous"}, "dash"), ({"color": "red"}, "Expected"),
-    ({"successors": "yes"}, "on or off"), ({"task": "x" * 1001}, "task"), ({"task": 7}, "task"),
+    ({"successors": "yes"}, "on or off"), ({"task": "x" * 1001}, "task"), ({"task": 7}, "task"), ({"viewport": 32}, "viewport"),
+    ({"viewport": 100.5}, "viewport"), ({"viewport": "big"}, "viewport"),
 ])
 def test_spawning_checks_its_request(tmp_path, change, match):
     db = seeded_db(tmp_path)

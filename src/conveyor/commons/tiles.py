@@ -46,7 +46,7 @@ TILE = 128
 PAPER_RGB = np.asarray([round(c * 255) for c in PAPER], dtype=np.uint8)
 DEFAULT_VIEWPORT = 512
 DEFAULT_MAX_CALLS = 100
-VIEWPORT_RANGE = (128, 1024)
+VIEWPORT_RANGE = (64, 1024)  # a canvas's default viewport, and any one agent's
 MAX_TASK = 2000  # characters in a canvas's task
 DEFAULT_INK = "#1d2a3a"
 MOVE_SHARE = 0.75  # the farthest one move goes, as a share of the viewport side; consecutive views always overlap
@@ -73,7 +73,9 @@ def blank_tile() -> np.ndarray:
 
 def message(seq: int, vx: int, vy: int, args: dict, viewport: int) -> dict:
     """A `write_message` op as the text layer draws it, in canvas pixels. (vx, vy) is the writer's viewport corner;
-    the text was wrapped at the viewport's right edge and cut at its bottom, and stays that way."""
+    the text was wrapped at the viewport's right edge and cut at its bottom, and stays that way. Agents can have
+    viewports of their own size, so the op records the writer's; older ops use the canvas's, passed as `viewport`."""
+    viewport = int(args.get("viewport") or viewport)
     ax, ay, scale = int(round(float(args.get("x", 0)))), int(round(float(args.get("y", 0)))), int(args.get("scale", 2))
     width, height = viewport - ax, viewport - ay
     lines = wrap(args["text"], width, scale)

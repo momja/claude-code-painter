@@ -73,7 +73,7 @@ class AgentSession:
         job = json.loads((self.dir / "job.json").read_text())
         self.canvas = SharedCanvas(job["db"], job["canvas_id"])
         self.agent_id = job["agent_id"]
-        self.size = int(self.canvas.config["viewport"])
+        self.size = int(job.get("viewport") or self.canvas.config["viewport"])  # the agent's own, or the canvas's
         self.max_calls = int(job.get("max_calls") or self.canvas.config["max_calls"])
         self.x, self.y = int(job["x"]), int(job["y"])
         self.inst = Instrument(job["source"])
@@ -161,7 +161,7 @@ class AgentSession:
         """Broadcasts from other agents that this one hasn't been given yet, the newest few, with where each
         sender's viewport was. An agent's first call brings the newest ones sent before it started."""
         rows = self.canvas.conn.execute(
-            "SELECT seq, x, y, note FROM canvas_ops WHERE canvas_id=? AND tool='broadcast' AND status='sent' "
+            "SELECT seq, x, y, note, args FROM canvas_ops WHERE canvas_id=? AND tool='broadcast' AND status='sent' "
             "AND seq>? AND agent_id IS NOT ? ORDER BY seq", (self.canvas.canvas_id, self.heard, self.agent_id)).fetchall()
         if not rows:
             return ""
@@ -169,8 +169,10 @@ class AgentSession:
         shown = rows[-BROADCASTS_SHOWN:]
         head = "The newest broadcasts on this canvas" if first else "Broadcasts since your last call"
         more = f" ({len(rows) - len(shown)} older ones not shown)" if len(rows) > len(shown) else ""
-        half = self.size // 2
-        lines = [f'- from around canvas ({r["x"] + half}, {r["y"] + half}): "{r["note"]}"' for r in shown]
+        lines = []
+        for r in shown:  # placed at the middle of the sender's viewport, whatever its size
+            half = int(json.loads(r["args"] or "{}").get("viewport") or self.canvas.config["viewport"]) // 2
+            lines.append(f'- from around canvas ({r["x"] + half}, {r["y"] + half}): "{r["note"]}"')
         return f"{head}, oldest first{more}:\n" + "\n".join(lines)
 
     def _dispatch(self, name: str, args: dict, tool_use_id: str | None) -> list[dict]:
@@ -316,7 +318,7 @@ class AgentSession:
             self._op("broadcast", "rejected", args, "bad text", tool_use_id=tool_use_id)
             raise ToolFailure(f"text must be 1 to {MAX_BROADCAST} characters. Nothing was sent.")
         message = message.strip()
-        self._op("broadcast", "sent", {"text": message}, message, tool_use_id=tool_use_id)
+        self._op("broadcast", "sent", {"text": message, "viewport": self.size}, message, tool_use_id=tool_use_id)
         return ("Sent to every other agent on the canvas, with where your viewport is now. Each gets it with its next "
                 "tool result, and agents that start later get it among the newest broadcasts.")
 
@@ -341,13 +343,17 @@ class AgentSession:
             raise ToolFailure(f"{e} Nothing was written.") from None
         mask = text_mask(message, self.size - x, scale)[: self.size - y, : self.size - x]
         h, w = mask.shape
+        # Letters are held to the area limit of the canvas's own viewport, not the agent's: an agent with a small
+        # viewport paints finer, but should still be able to say something. Wrapping keeps the text inside its view.
+        limit = max(self.area_cap, Canvas(*(2 * [int(self.canvas.config["viewport"])])).area_cap)
         covered = int(mask.sum())
-        if covered > self.area_cap:
+        if covered > limit:
             self._op("write_message", "rejected", args, "over the area limit", tool_use_id=tool_use_id)
             raise ToolFailure(f"That message's letters would cover {covered} pixels, past the area limit of "
-                              f"{self.area_cap} one call may cover. Write less or use a smaller scale. Nothing was written.")
+                              f"{limit} a message may cover. Write less or use a smaller scale. Nothing was written.")
         # The message is the op itself: the text layer reads it back from the log, and no tile changes.
-        self._op("write_message", "written", {"text": message, "x": x, "y": y, "scale": scale, "color": color},
+        self._op("write_message", "written", {"text": message, "x": x, "y": y, "scale": scale, "color": color,
+                                              "viewport": self.size},
                  message, tool_use_id=tool_use_id)
         lines = len(wrap(message, self.size - x, scale))
         return (f"Wrote {len(message)} characters in {lines} line{'s' if lines != 1 else ''}, {w} x {h} px from "

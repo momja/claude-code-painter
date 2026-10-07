@@ -105,7 +105,7 @@ dialog::backdrop{background:#0006}
       <label id="provider-field" hidden>Provider<select id="provider"></select></label>
       <label>Model<input id="model" list="models" placeholder="Harness default" autocomplete="off"><datalist id="models"></datalist></label>
       <div class="row3"><label>Start x<input id="x" type="number" step="1" value="0"></label><label>Start y<input id="y" type="number" step="1" value="0"></label><label>Cap, $<input id="cap" type="number" step="any" min="0.01" max="100" value="5"></label></div>
-      <label>Name<input id="name" maxlength="60" placeholder="Model name"></label>
+      <div class="row"><label>Name<input id="name" maxlength="60" placeholder="Model name"></label><label>Viewport, px<input id="viewport" type="number" min="64" max="1024" step="1" placeholder="canvas default"></label></div>
       <label>Task for this agent, optional<textarea id="agent-task" rows="3" maxlength="1000" placeholder="Its own part of the work. Only this agent reads it; its successors carry it on."></textarea></label>
       <label class="check"><input id="batch" type="checkbox" checked> Offer paint_batch (40 strokes for one call)</label>
       <label class="check"><input id="successors" type="checkbox" checked> May spawn a successor to keep working</label>
@@ -214,8 +214,8 @@ function draw(){
   }
   const [ox, oy] = toScreen(0, 0); ctx.strokeStyle = "rgba(47,75,143,.35)"; ctx.beginPath(); ctx.moveTo(ox - 8, oy); ctx.lineTo(ox + 8, oy); ctx.moveTo(ox, oy - 8); ctx.lineTo(ox, oy + 8); ctx.stroke();
   if($("show-text").checked) drawText();
-  if($("show-agents").checked) for(const a of viewports()) frame(a.x, a.y, color(a.id, a.active ? .95 : .35), a.label, !a.active);
-  if(S.spawn) frame(S.spawn[0], S.spawn[1], "rgba(31,35,40,.8)", "new agent starts here", true);
+  if($("show-agents").checked) for(const a of viewports()) frame(a.x, a.y, color(a.id, a.active ? .95 : .35), a.label, !a.active, a.size);
+  if(S.spawn) frame(S.spawn[0], S.spawn[1], "rgba(31,35,40,.8)", "new agent starts here", true, spawnSize());
 }
 // Messages sit above the paint. Each is drawn letter by letter on the 6 x 13 font grid it was set in, outlined
 // in a contrasting colour the way agents see it. Too small to read, it shows as a faint box so it can be found.
@@ -234,8 +234,10 @@ function drawText(){
     ctx.restore();
   }
 }
-function frame(x, y, stroke, label, dashed){
-  const [sx, sy] = toScreen(x, y), side = S.size * S.cam.z;
+const sizeOf = a => a?.config?.viewport || S.size;  // an agent's own viewport, or the canvas's
+const spawnSize = () => Number($("viewport").value) || S.size;
+function frame(x, y, stroke, label, dashed, size = S.size){
+  const [sx, sy] = toScreen(x, y), side = size * S.cam.z;
   ctx.save(); ctx.strokeStyle = stroke; ctx.lineWidth = 2; if(dashed) ctx.setLineDash([6, 5]);
   ctx.strokeRect(Math.round(sx) + .5, Math.round(sy) + .5, side, side); ctx.restore();
   if(label && side > 60){ ctx.font = "12px -apple-system,system-ui,sans-serif"; const tw = ctx.measureText(label).width;
@@ -244,14 +246,14 @@ function frame(x, y, stroke, label, dashed){
 // Where each agent's viewport is: live, its last known corner; in replay, its corner as of the replayed op.
 function viewports(){
   const name = id => S.agents.find(a => a.id === id)?.name || String(id).slice(0, 6);
-  if(S.mode === "live") return S.agents.filter(a => LIVE.includes(a.status)).map(a => ({id:a.id, x:a.x, y:a.y, label:a.name, active:true}));
+  if(S.mode === "live") return S.agents.filter(a => LIVE.includes(a.status)).map(a => ({id:a.id, x:a.x, y:a.y, label:a.name, active:true, size:sizeOf(a)}));
   const at = S.history.ops[S.idx]?.[0] ?? 0, out = [];
   for(const [id, track] of S.tracks){
     if(track[0][0] > at) continue;
     let lo = 0, hi = track.length - 1, k = 0;
     while(lo <= hi){ const m = (lo + hi) >> 1; if(track[m][0] <= at){ k = m; lo = m + 1; } else hi = m - 1; }
     const done = track[track.length - 1][0] < at;
-    out.push({id, x:track[k][1], y:track[k][2], label:name(id), active:!done});
+    out.push({id, x:track[k][1], y:track[k][2], label:name(id), active:!done, size:sizeOf(S.agents.find(a => a.id === id))});
   }
   return out;
 }
@@ -265,7 +267,7 @@ function setZoom(z, sx, sy){
 function centerOn(x, y, z){ const r = $("wrap").getBoundingClientRect(); if(z) S.cam.z = z; S.cam.x = x - r.width / 2 / S.cam.z; S.cam.y = y - r.height / 2 / S.cam.z; setZoom(S.cam.z); }
 function fit(){
   const tiles = [...S.heads.keys()].map(k => k.split(",").map(Number));
-  const pts = tiles.flatMap(([tx, ty]) => [[tx * TILE, ty * TILE], [(tx + 1) * TILE, (ty + 1) * TILE]]).concat(S.agents.flatMap(a => [[a.x, a.y], [a.x + S.size, a.y + S.size]]));
+  const pts = tiles.flatMap(([tx, ty]) => [[tx * TILE, ty * TILE], [(tx + 1) * TILE, (ty + 1) * TILE]]).concat(S.agents.flatMap(a => [[a.x, a.y], [a.x + sizeOf(a), a.y + sizeOf(a)]]));
   if(!pts.length) return centerOn(S.size / 2, S.size / 2, 1);
   const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]), r = $("wrap").getBoundingClientRect();
   const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
@@ -285,13 +287,13 @@ $("wrap").onpointermove = e => {
 $("wrap").onpointerup = e => {
   if(drag && !drag.moved && S.cid){
     const r = $("wrap").getBoundingClientRect(), [wx, wy] = toWorld(e.clientX - r.left, e.clientY - r.top);
-    S.spawn = [Math.round(wx - S.size / 2), Math.round(wy - S.size / 2)]; $("x").value = S.spawn[0]; $("y").value = S.spawn[1]; draw();
+    S.spawn = [Math.round(wx - spawnSize() / 2), Math.round(wy - spawnSize() / 2)]; $("x").value = S.spawn[0]; $("y").value = S.spawn[1]; draw();
   }
   drag = null; $("wrap").classList.remove("dragging");
 };
 $("wrap").onpointercancel = () => { drag = null; $("wrap").classList.remove("dragging"); };
 $("wrap").addEventListener("wheel", e => { e.preventDefault(); const r = $("wrap").getBoundingClientRect(); setZoom(S.cam.z * Math.exp(-e.deltaY * (e.ctrlKey ? .01 : .0025)), e.clientX - r.left, e.clientY - r.top); }, {passive:false});
-$("x").oninput = $("y").oninput = () => { S.spawn = [Number($("x").value) || 0, Number($("y").value) || 0]; draw(); };
+$("x").oninput = $("y").oninput = $("viewport").oninput = () => { S.spawn = [Number($("x").value) || 0, Number($("y").value) || 0]; draw(); };
 new ResizeObserver(resize).observe($("wrap"));
 
 // ---- live -----------------------------------------------------------------------------------------------
@@ -325,7 +327,7 @@ function renderAgents(){
     const c = a.config || {}, live = LIVE.includes(a.status), pct = Math.round(100 * a.calls_used / a.max_calls);
     const model = [c.harness === "pi" ? `pi · ${c.provider}` : "claude", c.model, c.effort].filter(Boolean).join(" · ");
     return `<div class="agent" style="--c:${color(a.id)}"><div class="top"><b title="${esc(a.name)}">${esc(a.name)}</b><span class="status ${live ? "running" : ""}">${esc(a.status.replace("_", " "))}</span></div>
-      <div class="meta">${esc(model)}${c.generation > 1 ? ` · session ${c.generation}, from ${esc(agentName(c.parent_id))}` : ""}${c.successors === false ? " · no successors" : ""}${c.random ? " · painter drawn at random" : ""}</div>
+      <div class="meta">${esc(model)}${c.generation > 1 ? ` · session ${c.generation}, from ${esc(agentName(c.parent_id))}` : ""}${c.viewport && c.viewport !== S.size ? ` · ${c.viewport} px viewport` : ""}${c.successors === false ? " · no successors" : ""}${c.random ? " · painter drawn at random" : ""}</div>
       ${a.status === "handed_off" ? `<div class="meta">Handed off to ${esc(S.agents.filter(x => x.config?.parent_id === a.id).map(x => x.name).join(", ") || "a successor")}</div>` : ""}
       ${c.agent_task ? `<div class="meta clamp" title="${esc(c.agent_task)}"><b>Task:</b> ${esc(c.agent_task)}</div>` : ""}
       <div class="meta clamp" title="${esc(c.instrument_label)}">Instrument: ${esc(c.instrument_label)}</div>
@@ -341,7 +343,7 @@ function renderMessages(){
 }
 $("agents").onclick = async e => {
   const find = e.target.closest("[data-find]"), stop = e.target.closest("[data-stop]");
-  if(find){ const a = S.agents.find(a => a.id === find.dataset.find); if(a) centerOn(a.x + S.size / 2, a.y + S.size / 2, Math.max(S.cam.z, .5)); }
+  if(find){ const a = S.agents.find(a => a.id === find.dataset.find); if(a) centerOn(a.x + sizeOf(a) / 2, a.y + sizeOf(a) / 2, Math.max(S.cam.z, .5)); }
   if(stop){ stop.disabled = true; try{ await api(`/api/canvases/${encodeURIComponent(S.cid)}/agents/${encodeURIComponent(stop.dataset.stop)}/stop`, "POST", {}); }catch(err){ $("message").textContent = err.message; } poll(); }
 };
 $("messages").onclick = e => { const m = e.target.closest("[data-at]"); if(m){ const [x, y] = m.dataset.at.split(",").map(Number); centerOn(x + 80, y + 20, 2); } };
@@ -416,7 +418,7 @@ $("spawn").onsubmit = async e => {
   $("submit").disabled = true; $("message").textContent = "Spawning…";
   const body = {pair_id:$("random").checked ? "random" : $("painter").value, harness:$("harness").value, effort:$("effort").value,
     model:$("model").value.trim() || null, x:Math.round(Number($("x").value) || 0), y:Math.round(Number($("y").value) || 0),
-    cap:Number($("cap").value) || 5, name:$("name").value.trim() || null, task:$("agent-task").value.trim() || null, paint_batch:$("batch").checked,
+    cap:Number($("cap").value) || 5, name:$("name").value.trim() || null, viewport:Number($("viewport").value) || null, task:$("agent-task").value.trim() || null, paint_batch:$("batch").checked,
     successors:$("successors").checked};
   if(body.harness === "pi") body.provider = $("provider").value;
   try{ const a = await api(`/api/canvases/${encodeURIComponent(S.cid)}/agents`, "POST", body); $("message").textContent = `Spawned ${a.name || a.id} at (${a.x}, ${a.y})${a.painter.random ? ", drawn at random" : ""}: ${a.painter.instrument} / ${a.painter.prompt}.`; S.spawn = null; await poll(); }
