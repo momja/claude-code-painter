@@ -209,3 +209,42 @@ esac
     claude = Launcher(tmp_path / "t.db", build_parser).harnesses()["claude"]
     assert claude["ok"] is False and "not logged in" in claude["detail"] and "auth login" in claude["detail"]
     assert logged_in("/nonexistent/claude") is None
+
+
+def _png(size, mode="RGB", color=(200, 30, 30)):
+    import base64
+    import io
+
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new(mode, size, color).save(out, format="PNG")
+    return base64.b64encode(out.getvalue()).decode()
+
+
+def test_import_target_stores_a_shrunk_png_and_argv_uses_its_path(launcher):
+    done = launcher.import_target({"name": "My Photo!.png", "image": _png((4000, 3000))})
+    assert (done["width"], done["height"]) == (2048, 1536)
+    assert done["target"].startswith("My-Photo-") and done["target"] in launcher.targets()
+    assert launcher.import_target({"name": "My Photo!.png", "image": _png((4000, 3000))})["target"] == done["target"]
+    argv = launcher.argv({"target": done["target"]})
+    path = next(a for a in argv if a.startswith("--target=")).split("=", 1)[1]
+    assert path.endswith(done["target"] + ".png") and build_parser().parse_args(argv).target == path
+
+
+@pytest.mark.parametrize("body, message", [
+    ({"image": "not base64!"}, "valid image"),
+    ({"image": _png((8, 8))}, "at least 16"),
+    ({"image": "A" * (9 * 1024 * 1024)}, "6 MB"),
+    ({}, "6 MB"),
+])
+def test_import_target_refuses(launcher, body, message):
+    with pytest.raises(LaunchError, match=message):
+        launcher.import_target(body)
+
+
+def test_import_target_over_http(served):
+    base, launcher = served
+    status, done = call(base, "POST", "/api/targets", {"name": "x.png", "image": _png((64, 64))})
+    assert status == 201 and done["target"] in call(base, "GET", "/api/options")[1]["targets"]
+    assert call(base, "POST", "/api/targets", {"image": "zzz"})[0] == 422

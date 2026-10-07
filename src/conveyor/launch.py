@@ -13,7 +13,11 @@ starts. Every value is passed as `--flag=value`, so no value can be read as anot
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import hashlib
 import hmac
+import io
 import os
 import re
 import signal
@@ -26,10 +30,14 @@ from collections import deque
 from pathlib import Path
 from typing import Callable
 
+from PIL import Image, UnidentifiedImageError
+
 from conveyor.claude import DEFAULT_MODEL
 from conveyor.store import new_id
 
 LOG_LINES = 300
+MAX_TARGET_BYTES = 6 * 1024 * 1024  # an uploaded target, before decoding
+MAX_TARGET_SIDE = 2048  # an uploaded target is shrunk to fit this, however big it came
 RUN_LINE = re.compile(r"^Run ([0-9a-f]{12}) writing to ")
 # How long a stopping run gets before it's terminated, then killed. A stop is Ctrl+C: the run stops its
 # sessions and writes its closing events, which takes a few seconds.
@@ -124,6 +132,7 @@ class Launcher:
         self.python = python or sys.executable
         self._parser = build_parser(_Parser)
         self._targets = targets
+        self.targets_dir = self.db.parent / f"{self.db.stem}-targets"  # imported images, beside the database
         self._launches: dict[str, Launch] = {}
         self._agents: dict[str, tuple[str, Launch]] = {}  # canvas agent id -> (its canvas, its process)
         self._watching = threading.Event()  # set while the canvas watcher runs; cleared to stop it
@@ -140,11 +149,52 @@ class Launcher:
         return self._parser.commands["run"]  # type: ignore[attr-defined]
 
     def targets(self) -> list[str]:
+        """Names a run may paint: the bundled images, then any imported ones."""
         if self._targets is not None:
-            return self._targets
-        from conveyor.painting.canvas import TARGETS_DIR
+            base = list(self._targets)
+        else:
+            from conveyor.painting.canvas import TARGETS_DIR
 
-        return sorted(p.stem for p in Path(TARGETS_DIR).glob("*.jpg"))
+            base = sorted(p.stem for p in Path(TARGETS_DIR).glob("*.jpg"))
+        return base + [n for n in sorted(self._imported()) if n not in base]
+
+    def _imported(self) -> dict[str, Path]:
+        return {p.stem: p for p in self.targets_dir.glob("*.png")} if self.targets_dir.is_dir() else {}
+
+    def import_target(self, body: dict) -> dict:
+        """
+        Keep an uploaded image as a target. It's decoded safely (size limits, EXIF rotation, transparency flattened
+        onto white), shrunk to MAX_TARGET_SIDE and stored as PNG named after the file plus a content hash, so the
+        same image is stored once and a name can't collide with a bundled one. The run scales it to its canvas.
+        """
+        from conveyor.painting.canvas import open_image
+
+        image = body.get("image") if isinstance(body, dict) else None
+        if not isinstance(image, str) or len(image) > MAX_TARGET_BYTES * 4 // 3 + 256:
+            raise LaunchError("Image must be at most 6 MB.")
+        try:
+            data = base64.b64decode(image.split(",", 1)[1] if image.startswith("data:image/") else image, validate=True)
+            if len(data) > MAX_TARGET_BYTES:
+                raise LaunchError("Image must be at most 6 MB.")
+            im = open_image(io.BytesIO(data))
+        except LaunchError:
+            raise
+        except ValueError as error:  # too many pixels, or not base64
+            raise LaunchError(str(error) if "pixels" in str(error) else "Upload a valid image.") from None
+        except (binascii.Error, UnidentifiedImageError, OSError, Image.DecompressionBombError):
+            raise LaunchError("Upload a valid PNG, JPEG, WebP, GIF or BMP image.") from None
+        if min(im.size) < 16:
+            raise LaunchError("Image must be at least 16 pixels on each side.")
+        im.thumbnail((MAX_TARGET_SIDE, MAX_TARGET_SIDE), Image.LANCZOS)
+        out = io.BytesIO()
+        im.save(out, format="PNG")
+        stem = re.sub(r"[^A-Za-z0-9_-]+", "-", Path(str(body.get("name") or "image")).stem).strip("-")[:40] or "image"
+        name = f"{stem}-{hashlib.sha256(out.getvalue()).hexdigest()[:8]}"
+        self.targets_dir.mkdir(parents=True, exist_ok=True)
+        path = self.targets_dir / f"{name}.png"
+        if not path.exists():
+            path.write_bytes(out.getvalue())
+        return {"target": name, "width": im.width, "height": im.height, "targets": self.targets()}
 
     def options(self) -> dict:
         from conveyor.painting.seeds import SEEDS
@@ -240,6 +290,8 @@ class Launcher:
         weights = [values.get(k) for k in ("refine", "invent", "recombine")]
         if any(w is not None for w in weights) and not sum(float(w or 0) for w in weights) > 0:
             raise LaunchError("The operator weights can't all be zero.")
+        if target in (imported := self._imported()):  # a run finds an imported image by path, not by name
+            argv = [f"--target={imported[target]}" if a.startswith("--target=") else a for a in argv]
         argv += ["--no-serve", f"--db={self.db}"]
         self._parser.parse_args(argv)  # raises LaunchError with the parser's own message
         return argv

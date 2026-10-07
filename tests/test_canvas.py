@@ -92,3 +92,23 @@ def test_error_table_can_follow_a_window():
     window = error_table(paper, t, rect=(32, 48, 96, 112), patch=view_patch(64))
     assert "Error per 8 x 8 px region in x 32-96, y 48-112" in window
     assert len(window.splitlines()) == 10  # header, column labels, and eight 8 px rows
+
+
+def test_load_target_handles_any_image(tmp_path):
+    from PIL import Image
+
+    from conveyor.painting.canvas import MAX_TARGET_HEIGHT
+
+    rgba = tmp_path / "logo.png"
+    Image.new("RGBA", (300, 200), (0, 0, 0, 0)).save(rgba)  # fully transparent: flattens to white, not black
+    t = load_target(rgba, width=64)
+    assert t.image.shape == (32, 64, 3) and t.image.min() > 0.99
+
+    tall = tmp_path / "tall.png"
+    Image.new("RGB", (50, 20000), (10, 200, 10)).save(tall)  # a scroll: cropped, not a 25000 row canvas
+    t = load_target(tall, width=128)
+    assert t.height == MAX_TARGET_HEIGHT and t.height % t.patch == 0
+
+    tiny = tmp_path / "tiny.png"
+    Image.new("RGB", (100, 1), (1, 2, 3)).save(tiny)  # absurdly flat: still one patch row
+    assert load_target(tiny, width=64).height == 16

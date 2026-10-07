@@ -23,9 +23,12 @@ import numpy as np
 from PIL import Image
 from PIL import ImageDraw
 from PIL import ImageFont
+from PIL import ImageOps
 
 PAPER = (0.94, 0.91, 0.84)
 TARGETS_DIR = Path(__file__).parent / "targets"
+MAX_TARGET_PIXELS = 100_000_000  # refuse to decode anything bigger: a 16-bit panorama can cost gigabytes of RAM
+MAX_TARGET_HEIGHT = 2048  # canvas rows; a taller image is cropped to its middle
 BASE_WIDTH = 64  # the canvas width the size limits below were written for
 
 # Per call, as a share of the canvas: at 128 x 128 (the self-portrait) this is 1310 px, about a 50 x 26 px
@@ -285,15 +288,41 @@ class Target:
         return slice(row * p, (row + 1) * p), slice(col * p, (col + 1) * p)
 
 
+def open_image(source) -> Image.Image:
+    """
+    Decode any image a person might hand over as RGB, upright and without transparency. Refuses a decompression
+    bomb. JPEGs decode at reduced size when the caller will shrink them anyway (see `load_target`).
+    """
+    with Image.open(source) as im:
+        if im.width * im.height > MAX_TARGET_PIXELS:
+            raise ValueError(f"Image is {im.width} x {im.height}; the limit is {MAX_TARGET_PIXELS // 1_000_000} million pixels.")
+        im = ImageOps.exif_transpose(im)
+        if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info:
+            rgba = im.convert("RGBA")
+            flat = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+            return Image.alpha_composite(flat, rgba).convert("RGB")
+        return im.convert("RGB")
+
+
 def load_target(name_or_path: str | Path, width: int = 128, patch: int = 16) -> Target:
-    """A target resized to `width`, cropped to a whole number of patches. Bare names look in `targets/`."""
+    """
+    A target resized to `width`, cropped to a whole number of patches and at most MAX_TARGET_HEIGHT rows tall.
+    Bare names look in `targets/`; anything with a suffix is a path to any PNG, JPEG, WebP, GIF or BMP.
+    """
     path = Path(name_or_path)
     if not path.suffix:
         path = TARGETS_DIR / f"{path.name}.jpg"
-    im = Image.open(path).convert("RGB")
-    full_height = round(im.height * width / im.width)
-    height = full_height - full_height % patch
-    im = im.resize((width, full_height), Image.LANCZOS)
+    im = open_image(path)
+    cap = MAX_TARGET_HEIGHT - MAX_TARGET_HEIGHT % patch
+    full_height = max(patch, round(im.height * width / im.width))
+    height = min(full_height - full_height % patch, cap)
+    if height < full_height:  # crop the source to the middle band first, so a very tall image never gets resized whole
+        band = round(height * im.width / width)
+        top = (im.height - band) // 2
+        im = im.crop((0, top, im.width, top + band))
+        full_height = height
+    # One LANCZOS pass from the original; `reducing_gap` lets Pillow pre-shrink cheaply on the way.
+    im = im.resize((width, full_height), Image.LANCZOS, reducing_gap=3.0)
     top = (full_height - height) // 2
     img = np.asarray(im, dtype=np.float32)[top : top + height] / 255.0
     return Target(name=path.stem, image=img, patch=patch)

@@ -985,6 +985,9 @@ function nrField(f) {
   const cls = (f.model ? " needs-model" : "");
   const hint = f.hint ? `<span class="hint">${esc(f.hint)}</span>` : "";
   if (f.type === "check") return `<label class="f check${cls}" title="${tip}"><input type="checkbox" name="${f.k}"${d ? " checked" : ""}><span>${esc(f.label)}</span>${hint}</label>`;
+  if (f.k === "target") return `<div class="f${cls}" title="${tip}"><label style="display:contents"><span>${esc(f.label)}</span><select name="target">${nrOptions(O.targets, d)}</select></label>
+    <span class="hint"><label style="cursor:pointer;text-decoration:underline">Import an image<input type="file" id="nr-import" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" hidden></label>
+    <span id="nr-import-msg"></span> Shrunk to fit, then scaled to the canvas width.</span></div>`;
   if (f.type === "select") return `<label class="f${cls}" title="${tip}"><span>${esc(f.label)}</span><select name="${f.k}">${nrOptions(O[f.from], d)}</select>${hint}</label>`;
   const shown = d == null ? "" : f.scale ? Math.round(d * f.scale) : d;
   const attrs = f.type === "number" ? `type="number" step="${f.step || (f.int ? 1 : "any")}"${f.min != null ? ` min="${f.min}"` : ""}${f.max != null ? ` max="${f.max}"` : ""}` : `type="text"`;
@@ -1173,6 +1176,22 @@ document.addEventListener("click", (e) => {
 });
 async function pollLaunchesOnce() { nr.launches = await get("/api/launches"); if (state.overview) pills(state.overview); }
 $("#nr-form").addEventListener("input", nrRefresh);
+// Import a target: send the file, then add it to the Target list and pick it.
+$("#nr-form").addEventListener("change", async (e) => {
+  if (e.target.id !== "nr-import" || !e.target.files[0]) return;
+  const file = e.target.files[0], msg = $("#nr-import-msg");
+  msg.textContent = " Importing…";
+  try {
+    const image = await new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = no; r.readAsDataURL(file); });
+    const done = await api("POST", "/api/targets", { name: file.name, image });
+    nr.opts.targets = done.targets;
+    const sel = $("#nr-form").elements.target;
+    sel.innerHTML = nrOptions(done.targets, done.target);
+    msg.textContent = ` Imported (${done.width} × ${done.height}).`;
+    nrRefresh();
+  } catch (err) { msg.textContent = ` ${err.message}`; }
+  e.target.value = "";
+});
 function showView(name) {
   $("#nr-form-view").hidden = name !== "form"; $("#nr-progress").hidden = name !== "progress"; $("#nr-unlock").hidden = name !== "unlock";
 }

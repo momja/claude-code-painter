@@ -26,6 +26,7 @@ With a launcher (`conveyor serve` on a loopback address) it can also start runs:
   GET  /api/options                  what the new-run form offers: defaults, help, models, seeds, targets, harnesses
   GET  /api/launches                 runs started from here, newest first
   GET  /api/launches/<id>            one launch: state, run id once it has one, the last lines of its output
+  POST /api/targets                  import a target image from {name, image: base64}; answers its target name
   POST /api/launches                 start a run from {option: value}; answers 201 with the launch
   POST /api/launches/<id>/stop       stop it, as Ctrl+C would
   POST /api/runs/<run>/paintings      paint with saved instrument_id/prompt_id, text and optional base64 image
@@ -492,7 +493,9 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
             try:
                 painting_post = len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "paintings"
                 canvas_post = parts[:2] == ["api", "canvases"]
-                if launcher is None or (parts[:2] != ["api", "launches"] and not painting_post and not canvas_post):
+                target_post = parts == ["api", "targets"]
+                if launcher is None or (parts[:2] != ["api", "launches"] and not painting_post and not canvas_post
+                                        and not target_post):
                     return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 if (why := self._guard_post()) is not None:
                     return self._json({"error": why}, HTTPStatus.FORBIDDEN)
@@ -504,13 +507,18 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                     return self._json({"error": "invalid content length"}, HTTPStatus.BAD_REQUEST)
                 if length < 0:
                     return self._json({"error": "invalid content length"}, HTTPStatus.BAD_REQUEST)
-                if length > (MAX_PAINTING_BODY if painting_post else MAX_BODY):
+                if length > (MAX_PAINTING_BODY if painting_post or target_post else MAX_BODY):
                     return self._json({"error": "body too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
                 try:
                     body = json.loads(self.rfile.read(length) or b"{}")
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     return self._json({"error": "body isn't JSON"}, HTTPStatus.BAD_REQUEST)
-                if canvas_post:
+                if target_post:
+                    try:
+                        self._json(launcher.import_target(body), HTTPStatus.CREATED)
+                    except LaunchError as e:
+                        self._json({"error": str(e)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                elif canvas_post:
                     try:
                         if len(parts) == 2:
                             self._json(launcher.create_canvas(body), HTTPStatus.CREATED)
