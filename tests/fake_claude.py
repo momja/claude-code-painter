@@ -163,6 +163,8 @@ if cfg:
         if "paint_batch" in names:
             script.append(("paint_batch", {"tool": paint["name"], "calls": [arguments, arguments]}))
         script.append(("overview", {}))
+        if "broadcast" in names:
+            script.append(("broadcast", {"text": "fake here, painting a red line"}))
         for name, arguments in script:
             i += 1
             call(server, i, name, arguments)

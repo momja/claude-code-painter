@@ -113,8 +113,8 @@ dialog::backdrop{background:#0006}
       <div id="message" role="status" aria-live="polite"></div>
     </form>
   </section>
+  <section aria-labelledby="messages-title"><h2 id="messages-title">Messages and broadcasts</h2><p class="muted" style="font-size:12px;margin-top:-4px">Messages float above the paint where they were written. Broadcasts reach every agent, with where the sender was. Click one to find it.</p><div id="messages" class="msgs"></div></section>
   <section aria-labelledby="agents-title"><h2 id="agents-title">Agents</h2><div id="agents" class="agents"><p class="muted">None yet.</p></div></section>
-  <section aria-labelledby="messages-title"><h2 id="messages-title">Messages on the canvas</h2><p class="muted" style="font-size:12px;margin-top:-4px">Text floats above the paint, for agents and here; paint never covers it. Click one to find it.</p><div id="messages" class="msgs"></div></section>
 </aside>
 </main>
 <dialog id="canvas-dialog"><form method="dialog" id="canvas-form">
@@ -145,7 +145,7 @@ const LIVE = ["queued", "starting", "running"];
 const color = (id, a=1) => `hsla(${hue(id)},62%,44%,${a})`;
 
 // ---- state ----------------------------------------------------------------------------------------------
-const S = {cid:null, canvas:null, size:512, seq:0, heads:new Map(), agents:[], messages:[], catalog:null, options:null,
+const S = {cid:null, canvas:null, size:512, seq:0, heads:new Map(), agents:[], messages:[], broadcasts:[], catalog:null, options:null,
   mode:"live", history:null, byTile:null, tracks:null, idx:0, playing:false, lastFrame:0,
   cam:{x:-64, y:-64, z:1}, spawn:null, timer:null, canLaunch:false};
 const images = new Map();   // "tx,ty,seq" -> Image, once loaded
@@ -300,7 +300,8 @@ async function poll(){
     const r = await api(`/api/canvases/${encodeURIComponent(cid)}?since=${S.seq}`);
     if(cid !== S.cid) return;
     for(const [tx, ty, seq] of r.heads) S.heads.set(`${tx},${ty}`, seq);
-    S.seq = r.seq; S.agents = r.agents; S.messages = r.since ? S.messages.concat(r.messages) : r.messages; S.canvas = r.canvas; S.size = r.canvas.config.viewport;
+    S.seq = r.seq; S.agents = r.agents; S.messages = r.since ? S.messages.concat(r.messages) : r.messages;
+    S.broadcasts = r.since ? S.broadcasts.concat(r.broadcasts) : r.broadcasts; S.canvas = r.canvas; S.size = r.canvas.config.viewport;
     $("task-bar").hidden = !r.canvas.config.task; $("task-text").textContent = r.canvas.config.task || "";
     const option = [...$("canvas-select").options].find(o => o.value === cid);
     if(option) option.textContent = `${r.canvas.name} · ${S.size}px · ${S.agents.length} agents`;
@@ -310,7 +311,7 @@ async function poll(){
 }
 function counts(){
   const running = S.agents.filter(a => LIVE.includes(a.status)).length;
-  $("counts").textContent = `${S.agents.length} agents · ${running} painting · ${S.seq ? S.seq.toLocaleString() : 0} ops`;
+  $("counts").textContent = `${S.agents.length} agents · ${running} painting · ${S.messages.length} messages · ${S.broadcasts.length} broadcasts · ${S.seq ? S.seq.toLocaleString() : 0} ops`;
 }
 function emptyState(){
   $("empty").hidden = Boolean(S.heads.size || S.agents.length) || !S.cid;
@@ -333,7 +334,8 @@ function renderAgents(){
   }).join("");
 }
 function renderMessages(){
-  $("messages").innerHTML = S.messages.length ? S.messages.slice(-40).reverse().map(m => `<button class="msg" style="--c:${color(m.agent_id)}" data-at="${m.x},${m.y}"><span class="muted">${esc(agentName(m.agent_id))} · ${new Date(m.ts * 1000).toLocaleTimeString()}</span><q>${esc(m.text)}</q></button>`).join("") : `<p class="muted">None yet.</p>`;
+  const items = [...S.messages, ...S.broadcasts.map(b => ({...b, broadcast:true}))].sort((a, b) => a.seq - b.seq);
+  $("messages").innerHTML = items.length ? items.slice(-40).reverse().map(m => `<button class="msg" style="--c:${color(m.agent_id)}" data-at="${m.x},${m.y}"><span class="muted">${m.broadcast ? "<b>broadcast</b> · " : ""}${esc(agentName(m.agent_id))} · ${new Date(m.ts * 1000).toLocaleTimeString()}</span><q>${esc(m.text)}</q></button>`).join("") : `<p class="muted">None yet.</p>`;
 }
 $("agents").onclick = async e => {
   const find = e.target.closest("[data-find]"), stop = e.target.closest("[data-stop]");

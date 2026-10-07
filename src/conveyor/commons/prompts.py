@@ -34,7 +34,11 @@ down/south, 180 left, 270 up). One move goes at most {max_move} pixels, three qu
 view always overlaps the one you left. It shows you the new view. Move to find room, to follow something \
 someone else started, or to see what's out there.
 - `write_message` sets ASCII text in the viewport. The text floats above the paint: every agent whose view takes \
-in that spot sees it, paint never covers it, and it can't be erased. It's the only way to talk to anyone.{batch}{views}{successor}
+in that spot sees it, paint never covers it, and it can't be erased.
+- `broadcast` sends a short text, at most {max_broadcast} characters, to every other agent on the canvas, \
+wherever they are. Each gets it with its next tool result, with where your viewport was but not who sent it, and \
+agents that start later get the newest few. Broadcasts from others reach you the same way, under your results. \
+Messages and broadcasts are the only ways to talk to anyone.{batch}{views}{successor}
 
 You have {max_calls} tool calls in total, and every call counts: painting, looking, moving, writing, and calls \
 refused for bad arguments. Each result says how many are left. When they run out your session ends. There is \

@@ -5,8 +5,8 @@ One agent on the shared canvas, as an MCP server in its own process.
 
 The session directory holds `job.json`: the database, the canvas and agent ids, the instrument's source, the
 viewport's starting corner, and whether batches and successors are on. The server gives the agent the
-instrument's tools on its viewport, plus `look`, `overview`, `move_viewport`, `write_message`, `paint_batch`
-and `spawn_successor`, and counts every call it receives against the canvas's tool-call budget, refused calls
+instrument's tools on its viewport, plus `look`, `overview`, `move_viewport`, `write_message`, `broadcast`,
+`paint_batch` and `spawn_successor`, and counts every call it receives against the canvas's tool-call budget, refused calls
 included. Past the budget, or once the agent has handed off to a successor, every call is refused.
 
 `spawn_successor` only writes `successor.json` with where the agent's viewport stands. The host
@@ -61,8 +61,10 @@ from conveyor.painting.instrument import ToolError
 from conveyor.painting.paintserver import MAX_BATCH_CALLS
 from conveyor.painting.paintserver import batch_calls
 
+MAX_BROADCAST = 280  # characters in one broadcast
+BROADCASTS_SHOWN = 5  # the most broadcasts one result carries; the newest are kept
 SUCCESSOR_WINDOW = 10  # spawn_successor works only in an agent's last this-many calls, so a session stays put
-HARNESS_TOOLS = ("look", "overview", "move_viewport", "write_message", "paint_batch", "spawn_successor")
+HARNESS_TOOLS = ("look", "overview", "move_viewport", "write_message", "broadcast", "paint_batch", "spawn_successor")
 
 
 class AgentSession:
@@ -85,6 +87,7 @@ class AgentSession:
         self.rng = np.random.default_rng(job.get("seed", 0))
         self.calls_used = 0
         self.index = 0
+        self.heard = 0  # the newest broadcast seq this agent has been given
         (self.dir / "snaps").mkdir(exist_ok=True)
         self._log = open(self.dir / "calls.jsonl", "a", buffering=1)
 
@@ -150,9 +153,25 @@ class AgentSession:
         try:
             blocks = self._dispatch(name, args, tool_use_id)
         except ToolFailure as e:
-            raise ToolFailure(f"{e}\n\n{self.status()}") from e
-        blocks[0] = text((blocks[0]["text"] + "\n\n" + self.status()).strip())
+            raise ToolFailure("\n\n".join(p for p in (str(e), self._news(), self.status()) if p)) from e
+        blocks[0] = text("\n\n".join(p for p in (blocks[0]["text"], self._news(), self.status()) if p).strip())
         return blocks
+
+    def _news(self) -> str:
+        """Broadcasts from other agents that this one hasn't been given yet, the newest few, with where each
+        sender's viewport was. An agent's first call brings the newest ones sent before it started."""
+        rows = self.canvas.conn.execute(
+            "SELECT seq, x, y, note FROM canvas_ops WHERE canvas_id=? AND tool='broadcast' AND status='sent' "
+            "AND seq>? AND agent_id IS NOT ? ORDER BY seq", (self.canvas.canvas_id, self.heard, self.agent_id)).fetchall()
+        if not rows:
+            return ""
+        first, self.heard = not self.heard and self.index <= 1, rows[-1]["seq"]
+        shown = rows[-BROADCASTS_SHOWN:]
+        head = "The newest broadcasts on this canvas" if first else "Broadcasts since your last call"
+        more = f" ({len(rows) - len(shown)} older ones not shown)" if len(rows) > len(shown) else ""
+        half = self.size // 2
+        lines = [f'- from around canvas ({r["x"] + half}, {r["y"] + half}): "{r["note"]}"' for r in shown]
+        return f"{head}, oldest first{more}:\n" + "\n".join(lines)
 
     def _dispatch(self, name: str, args: dict, tool_use_id: str | None) -> list[dict]:
         if name == "look":
@@ -163,6 +182,8 @@ class AgentSession:
             return self.move(args, tool_use_id)
         if name == "write_message":
             return [text(self.write_message(args, tool_use_id))]
+        if name == "broadcast":
+            return [text(self.broadcast(args, tool_use_id))]
         if name == "spawn_successor" and self.successors:
             return [text(self.spawn_successor(args, tool_use_id))]
         if name == "paint_batch" and self.batch_enabled:
@@ -289,6 +310,16 @@ class AgentSession:
         return (f"Your successor starts here, with its viewport at canvas ({self.x}, {self.y}) and {self.max_calls} "
                 "fresh tool calls, once this session closes. It gets the canvas and nothing of this conversation.")
 
+    def broadcast(self, args: dict, tool_use_id: str | None = None) -> str:
+        message = args.get("text")
+        if not isinstance(message, str) or not message.strip() or len(message) > MAX_BROADCAST:
+            self._op("broadcast", "rejected", args, "bad text", tool_use_id=tool_use_id)
+            raise ToolFailure(f"text must be 1 to {MAX_BROADCAST} characters. Nothing was sent.")
+        message = message.strip()
+        self._op("broadcast", "sent", {"text": message}, message, tool_use_id=tool_use_id)
+        return ("Sent to every other agent on the canvas, with where your viewport is now. Each gets it with its next "
+                "tool result, and agents that start later get it among the newest broadcasts.")
+
     def write_message(self, args: dict, tool_use_id: str | None = None) -> str:
         try:
             message = args.get("text")
@@ -371,6 +402,12 @@ class CommonsServer(StdioServer):
                  "distance": {"type": "number", "minimum": 0, "maximum": int(MOVE_SHARE * s),
                               "description": f"Pixels to move. Default {int(MOVE_SHARE * s)}."}},
                  "required": ["angle"], "additionalProperties": False}},
+            {"name": "broadcast", "description": "Send a short text to every other agent on the canvas, wherever "
+             "they are. Each gets it with its next tool result, with where your viewport is but not who sent it; "
+             "agents that start later get the newest few. It isn't on the canvas.",
+             "inputSchema": {"type": "object", "properties": {
+                 "text": {"type": "string", "maxLength": MAX_BROADCAST, "description": "What to say."}},
+                 "required": ["text"], "additionalProperties": False}},
             {"name": "write_message", "description": "Set ASCII text in your viewport, wrapped at the viewport's "
              "right edge. It floats above the paint: every agent whose view takes in that spot sees it, paint never "
              "covers it, and it can't be erased.",

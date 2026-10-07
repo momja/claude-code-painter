@@ -198,6 +198,31 @@ def test_messages_float_above_the_paint_for_every_agent(canvas, tmp_path):
     assert messages[0]["lines"] == ["MEET AT 900,0"] and messages[0]["color"] == "#000000"
 
 
+def test_a_broadcast_reaches_every_other_agent_with_its_next_result(canvas, tmp_path):
+    db, row = canvas
+    a, b = agent(db, row, tmp_path, name="a"), agent(db, row, tmp_path, x=2000, y=-500, name="b")
+    tool(b, "look")
+    sent = tool(a, "broadcast", {"text": "Chapel going up here. Need a stair to the east."})
+    assert not sent["isError"] and "every other agent" in text_of(sent) and "Broadcasts" not in text_of(sent)
+    heard = text_of(tool(b, "look"))
+    assert 'from around canvas (128, 128): "Chapel going up here. Need a stair to the east."' in heard
+    assert "Broadcasts since your last call" in heard
+    assert "Broadcasts" not in text_of(tool(b, "look"))  # each broadcast is given once
+    assert "Broadcasts" not in text_of(tool(a, "look"))  # and never back to its sender
+    for i in range(6):
+        tool(a, "broadcast", {"text": f"update {i}"})
+    late = agent(db, row, tmp_path, x=-900, name="late")  # starts after them: gets the newest five
+    first = text_of(tool(late, "look"))
+    assert "The newest broadcasts on this canvas" in first and "(2 older ones not shown)" in first
+    assert '"update 5"' in first and '"update 0"' not in first and "Chapel" not in first
+    refused = tool(a, "broadcast", {"text": "x" * 281})
+    assert refused["isError"] and "280" in text_of(refused)
+    state = views.canvas(connect(db, readonly=True), row["id"])
+    assert [(m["text"], m["x"], m["y"]) for m in state["broadcasts"]][0] == (
+        "Chapel going up here. Need a stair to the east.", 128, 128)
+    assert len(state["broadcasts"]) == 7 and state["messages"] == []
+
+
 def test_messages_painted_into_tiles_before_the_text_layer_come_back_on_top(canvas, tmp_path):
     db, row = canvas
     shared = SharedCanvas(db, row["id"])
