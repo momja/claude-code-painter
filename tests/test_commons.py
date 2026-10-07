@@ -582,7 +582,7 @@ def test_a_judge_looks_moves_and_writes_notes_but_never_paints(tmp_path):
     row = create_canvas(db, "C", viewport=256, max_calls=20, task="A harbour at dusk.", frame=(2048, 1536))
     made = create_agent(db, row["id"], {"kind": "judge", "viewport": 128, "successors": True, "x": 900, "y": 600,
                                         "task": "Look hardest at the boats."})
-    assert made["kind"] == "judge" and made["painter"] is None and made["viewport"] == 512
+    assert made["kind"] == "judge" and made["painter"] is None and made["viewport"] == 512 and made["max_calls"] == 20
     config = views.canvas(connect(db, readonly=True), row["id"])["agents"][0]["config"]
     assert config["kind"] == "judge" and config["viewport"] == 512 and not config["successors"]
     assert not config["paint_batch"] and made["name"].startswith("judge ")
@@ -658,7 +658,7 @@ def test_a_judge_runs_to_the_end_of_its_budget(tmp_path, fake_claude, monkeypatc
     conn = connect(db, readonly=True)
     state = views.canvas(conn, row["id"])
     done = state["agents"][0]
-    assert done["status"] == "finished" and done["calls_used"] == 7, done["error"]
+    assert done["status"] == "finished" and done["calls_used"] == 20, done["error"]  # a judge's own budget
     assert [m["text"] for m in state["messages"]] == ["sky is flat: add clouds"] and state["heads"]
     session = conn.execute("SELECT * FROM sessions WHERE id=?", (done["session_id"],)).fetchone()
     request = json.loads(session["request"])

@@ -98,7 +98,7 @@ dialog::backdrop{background:#0006}
     <h2 id="spawn-title">Spawn an agent</h2>
     <form id="spawn">
       <label>Agent<select id="kind"><option value="painter">Painter</option><option value="judge">Judge</option></select></label>
-      <p id="judge-note" class="pair" hidden>A judge doesn't paint. It walks the canvas with a 512 px viewport and paints notes where the work needs to improve, which painters act on and paint over. One also starts by itself at the centre of the canvas every 1,000 operations while painters are at work.</p>
+      <p id="judge-note" class="pair" hidden>A judge doesn't paint. It walks the canvas with a 512 px viewport and 20 tool calls and paints notes where the work needs to improve, which painters act on and paint over. One also starts by itself at the centre of the canvas every 1,000 operations while painters are at work.</p>
       <label class="check painter-only"><input id="random" type="checkbox" checked> Random painter: an instrument and its prompt, drawn from each run's top 5</label>
       <div id="choice" hidden>
       <label>Painter<select id="painter"></select></label>

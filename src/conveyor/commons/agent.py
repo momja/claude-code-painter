@@ -63,6 +63,7 @@ GRACE_CALLS = 5  # calls past the budget a model may make, refused, before its s
 KINDS = ("painter", "judge")
 JUDGE_VIEWPORT = 512
 JUDGE_EVERY = 1000  # ops on a canvas between the judges that start by themselves
+JUDGE_CALLS = 20  # a judge's whole budget, whatever the canvas gives painters: given more, it wrote junk
 
 
 def session_scope(canvas_id: str) -> str:
@@ -149,7 +150,7 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued", e
         name = name or f"{'judge ' if judge else ''}{re.sub(r'^claude-', '', model.split('/')[-1])} {agent_id[:4]}"
         config.update(lineage=agent_id, base_name=name)
         canvas_config = json.loads(canvas["config"])
-        max_calls = int(canvas_config.get("max_calls", 100))
+        max_calls = JUDGE_CALLS if judge else int(canvas_config.get("max_calls", 100))
         viewport = JUDGE_VIEWPORT if judge else body.get("viewport")
         if viewport in (None, ""):
             viewport = int(canvas_config["viewport"])
