@@ -277,6 +277,8 @@ def test_a_canvas_task_reaches_every_agent_word_for_word(tmp_path):
     assert task in with_task and prompts.NO_TASK not in with_task and "far beyond your viewport" in with_task
     assert prompts.NO_TASK in without and "same task" not in without and "far beyond" not in without
     assert "`overview`" in with_task and "`overview`" in without
+    assert "paint over it and do it better" in with_task and "paint over it and do it better" in without
+    assert "not who painted which part" in with_task and "not who painted" not in without
 
 
 def test_the_pen_keeps_its_state_across_calls(canvas, tmp_path):

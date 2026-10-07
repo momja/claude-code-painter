@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 STRATEGY_BRIDGE = """\
-The strategy above was written for copying a target picture. Here there is no target picture, no score and no \
-judge: keep what it says about learning the instrument, order of work and handling paint, and set aside anything about \
+The strategy above was written for copying a target picture. Here there is no target picture and no score, and \
+the only judge is you: keep what it says about learning the instrument, order of work and handling paint, and set aside anything about \
 matching a target."""
 
 AGENT_RULES = """\
 You are one of many painters working on a shared canvas with no edges. Other agents, run by other models with \
 other instruments, paint on it before you, after you and at the same time as you. You can't see them, only the \
-paint they leave. What you find is part of the canvas: work beside it, extend it, answer it, or paint over it.
+paint they leave. Nothing on the canvas belongs to anyone, including what you painted yourself. Look at what is \
+there the way a painter looks at an unfinished canvas, and decide what works and what doesn't. Where something is \
+weak, muddy, badly drawn or out of keeping with what is around it, paint over it and do it better. Repainting \
+what's there is as much the work as adding to it.
 
 {purpose}
 
@@ -59,7 +62,7 @@ Every agent on this canvas has the same task. Together you are making one image:
 {task}
 
 The image spans the whole canvas, far beyond your viewport. You only ever see a narrow piece of it, and other \
-agents are painting the rest."""
+agents are painting the rest. The finished image is all that counts, not who painted which part."""
 
 BATCH_RULE = """
 - `paint_batch` runs up to 40 of the instrument's paint calls, in order, for one tool call of your budget. Set \
