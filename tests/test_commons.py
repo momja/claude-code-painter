@@ -224,6 +224,59 @@ def test_a_broadcast_reaches_every_other_agent_with_its_next_result(canvas, tmp_
     assert len(state["broadcasts"]) == 7 and state["messages"] == []
 
 
+def test_a_sketch_from_the_page_floats_above_the_paint_for_every_agent(canvas, tmp_path):
+    db, row = canvas
+    launcher = Launcher(db, build_parser)
+    near, far = agent(db, row, tmp_path, name="near"), agent(db, row, tmp_path, x=3000, y=0, name="far")
+    blue = lambda img: (img[..., 2] > 0.8) & (img[..., 0] < 0.2)  # noqa: E731
+    tool(near, "stroke", stroke(10, 120, length=200, size=20))
+    first = launcher.add_sketch(row["id"], {"points": [[20, 128], [230, 128]], "color": "#0a84ff", "width": 8})
+    assert first["seq"] and first["width"] == 8.0
+    said = text_of(tool(near, "look"))
+    assert "Lines of the sketch by the person running this canvas cross it." in said
+    assert "sketched 1 new line since your last call, over canvas x 14 to 236, y 122 to 134." in said
+    seen = near.s._seen()
+    assert blue(seen[126:131, 30:220]).all()  # the line, over the red paint
+    assert not blue(SharedCanvas(db, row["id"]).read(0, 0, 256, 256).image()).any()  # and not in the paint
+    assert not blue(seen[:110]).any() and not blue(seen[150:]).any()  # outlined, nothing more
+    tool(near, "stroke", stroke(10, 128, length=200, size=20, color="#20a040"))
+    assert blue(near.s._seen()[126:131, 30:220]).all()  # paint never covers it
+    far_said = text_of(tool(far, "look"))  # far away: told about the sketch, but it isn't in view
+    assert "has sketched 1 line on it" in far_said and "cross it" not in far_said
+    over = tool(near, "overview")
+    with Image.open(io.BytesIO(base64.b64decode(over["content"][1]["data"]))) as pic:
+        assert blue(np.asarray(pic.convert("RGB")).astype(np.float32) / 255).sum() > 50
+    late = agent(db, row, tmp_path, x=-900, name="late")  # its first result says what the sketch holds
+    assert "has sketched 1 line on it, over canvas x 14 to 236" in text_of(tool(late, "look"))
+    second = launcher.add_sketch(row["id"], {"points": [[3100, 50]], "width": 30})  # a dot, in the default colour
+    assert "sketched 1 new line since your last call, over canvas x 3083 to 3117, y 33 to 67." in text_of(tool(far, "look"))
+    assert blue(far.s._seen()[45:56, 95:106]).all()
+    erased = launcher.erase_sketch(row["id"], {"seqs": [first["seq"], second["seq"], 999999]})
+    assert erased["erased"] == [first["seq"], second["seq"]]
+    gone = text_of(tool(near, "look"))
+    assert "erased 1 line of the sketch since your last call" in gone and "Lines of the sketch" not in gone
+    assert not blue(near.s._seen()).any()
+    with pytest.raises(LaunchError, match="None of those"):
+        launcher.erase_sketch(row["id"], {"seqs": [first["seq"]]})
+    state = views.canvas(connect(db, readonly=True), row["id"])
+    assert [s["seq"] for s in state["sketches"]] == [first["seq"], second["seq"]]
+    assert state["erasures"] == [[erased["seq"], [first["seq"], second["seq"]]]]
+    assert views.canvas(connect(db, readonly=True), row["id"], since=erased["seq"])["erasures"] == []
+    assert launcher.add_sketch("nope", {"points": [[0, 0]]}) is None
+
+
+@pytest.mark.parametrize("body, match", [
+    ({"points": []}, "points"), ({"points": [[0, 0]] * 2001}, "points"), ({"points": [[0]]}, "point"),
+    ({"points": [[0, float("nan")]]}, "point"), ({"points": [[True, 0]]}, "point"), ({"points": [[0, 1e9]]}, "point"),
+    ({"points": [[0, 0]], "width": 0}, "width"), ({"points": [[0, 0]], "width": 65}, "width"),
+    ({"points": [[0, 0]], "color": "blue-ish"}, "color"), ({"points": [[0, 0]], "label": "x"}, "Expected"),
+])
+def test_a_sketch_line_is_checked(canvas, body, match):
+    db, row = canvas
+    with pytest.raises(LaunchError, match=match):
+        Launcher(db, build_parser).add_sketch(row["id"], body)
+
+
 def test_messages_painted_into_tiles_before_the_text_layer_come_back_on_top(canvas, tmp_path):
     db, row = canvas
     shared = SharedCanvas(db, row["id"])
@@ -280,6 +333,7 @@ def test_a_canvas_task_reaches_every_agent_word_for_word(tmp_path):
     assert "`overview`" in with_task and "`overview`" in without
     assert "paint over it and do it better" in with_task and "paint over it and do it better" in without
     assert "not who painted which part" in with_task and "not who painted" not in without
+    assert "rather than tracing its lines" in with_task and "rather than tracing its lines" in without
 
 
 def test_an_agent_task_goes_to_that_agent_alone_and_its_successors(tmp_path):
@@ -682,6 +736,16 @@ def test_the_page_and_its_reads(served, tmp_path):
     assert op["args"]["color"] == RED
     status, cat = http(base, "GET", "/api/canvas-catalog")
     assert status == 200 and cat["pairs"][0]["id"] == PAIR
+    status, line = http(base, "POST", f"/api/canvases/{made['id']}/sketches", {"points": [[1, 2], [30, 40]], "width": 4})
+    assert status == 201 and line["points"] == [[1.0, 2.0], [30.0, 40.0]] and line["color"] == "#0a84ff"
+    assert http(base, "POST", f"/api/canvases/{made['id']}/sketches", {"points": "here"})[0] == 422
+    assert http(base, "POST", "/api/canvases/nope/sketches", {"points": [[0, 0]]})[0] == 404
+    status, drawn = http(base, "GET", f"/api/canvases/{made['id']}?since={state['seq']}")
+    assert [s["seq"] for s in drawn["sketches"]] == [line["seq"]] and drawn["erasures"] == []
+    status, erased = http(base, "POST", f"/api/canvases/{made['id']}/sketches/erase", {"seqs": [line["seq"]]})
+    assert status == 200 and erased["erased"] == [line["seq"]]
+    assert http(base, "POST", f"/api/canvases/{made['id']}/sketches/erase", {"seqs": [line["seq"]]})[0] == 422
+    assert http(base, "GET", f"/api/canvases/{made['id']}/history")[1]["ops"][-1][1:4] == [None, "erase_sketch", "erased"]
     assert http(base, "GET", f"/api/canvases/{made['id']}?since=soon")[0] == 400
     assert http(base, "GET", "/api/canvases/nope")[0] == 404
 

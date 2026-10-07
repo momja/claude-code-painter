@@ -38,8 +38,8 @@ def canvases(conn: sqlite3.Connection) -> list[dict]:
 
 
 def canvas(conn: sqlite3.Connection, canvas_id: str, since: int = 0) -> dict:
-    """The canvas now: its agents, the tiles whose head moved after op `since` (all of them from 0), the messages
-    written after it, and the newest op, which the page passes back as `since` on its next poll. A message comes
+    """The canvas now: its agents, the tiles whose head moved after op `since` (all of them from 0), the messages,
+    broadcasts and sketch lines after it, the sketch erasures after it, and the newest op, which the page passes back as `since` on its next poll. A message comes
     in canvas pixels with its wrapped lines, the way the text layer draws it."""
     row = conn.execute("SELECT * FROM canvases WHERE id=?", (canvas_id,)).fetchone()
     if row is None:
@@ -63,8 +63,16 @@ def canvas(conn: sqlite3.Connection, canvas_id: str, since: int = 0) -> dict:
         half = int(json.loads(r["args"] or "{}").get("viewport") or meta["config"]["viewport"]) // 2
         broadcasts.append({"seq": r["seq"], "agent_id": r["agent_id"], "ts": r["ts"], "text": r["note"],
                            "x": r["x"] + half, "y": r["y"] + half})
+    sketches, erasures = [], []  # lines drawn after `since`, and [erase seq, [line seqs]] for erasures after it
+    for r in conn.execute("SELECT seq, ts, tool, args FROM canvas_ops WHERE canvas_id=? AND seq>? AND "
+                          "tool IN ('sketch', 'erase_sketch') ORDER BY seq", (canvas_id, since)):
+        args = json.loads(r["args"] or "{}")
+        if r["tool"] == "sketch":
+            sketches.append({"seq": r["seq"], "ts": r["ts"], **args})
+        else:
+            erasures.append([r["seq"], args.get("seqs", [])])
     return {"canvas": meta, "agents": agents, "heads": heads, "seq": seq, "since": since, "messages": messages,
-            "broadcasts": broadcasts,
+            "broadcasts": broadcasts, "sketches": sketches, "erasures": erasures,
             "now": time.time()}
 
 

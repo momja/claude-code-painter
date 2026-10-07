@@ -33,6 +33,8 @@ With a launcher (`conveyor serve` on a loopback address) it can also start runs:
   POST /api/canvases/<id>/agents     spawn an agent: catalog pair_id (or "random"), harness, model, effort,
                                      provider, start x and y, name, cap, paint_batch, successors, task, viewport
   POST /api/canvases/<id>/agents/<agent>/stop   stop it, as Ctrl+C would
+  POST /api/canvases/<id>/sketches   draw a sketch line from {points: [[x, y], ...], color, width} in canvas pixels
+  POST /api/canvases/<id>/sketches/erase        erase sketch lines from {seqs: [...]}
 
 On a loopback address launching needs nothing more. Served to a network, it needs a token: the launcher is given
 one, and then these endpoints answer only to a request carrying it in X-Conveyor-Token. The dashboard's reads stay
@@ -514,6 +516,11 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                             self._json(launcher.create_canvas(body), HTTPStatus.CREATED)
                         elif len(parts) == 4 and parts[3] == "agents":
                             self._json(launcher.start_agent(parts[2], body), HTTPStatus.CREATED)
+                        elif parts[3:] in (["sketches"], ["sketches", "erase"]):
+                            done = (launcher.add_sketch if len(parts) == 4 else launcher.erase_sketch)(parts[2], body)
+                            self._json(done or {"error": "not found"},
+                                       (HTTPStatus.CREATED if len(parts) == 4 else HTTPStatus.OK) if done
+                                       else HTTPStatus.NOT_FOUND)
                         elif len(parts) == 6 and parts[3] == "agents" and parts[5] == "stop":
                             agent = launcher.stop_agent(parts[2], parts[4])
                             self._json(agent or {"error": "not found"}, HTTPStatus.OK if agent else HTTPStatus.NOT_FOUND)

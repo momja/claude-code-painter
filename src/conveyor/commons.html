@@ -20,10 +20,12 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 380px;height:calc(100dvh -
 .stage{display:flex;flex-direction:column;min-width:0;min-height:0}
 .toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 16px;border-bottom:1px solid var(--line)}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}.seg button{border:0;border-radius:0}.seg button[aria-pressed=true]{background:var(--accent);color:var(--surface)}
-#where{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;min-width:150px;text-align:right}
+#where{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;min-width:110px;text-align:right}
 #task-bar{padding:8px 16px;border-bottom:1px solid var(--line);background:var(--surface);font-size:13px;white-space:pre-wrap;max-height:6.5em;overflow:auto}
 #wrap{position:relative;flex:1;min-height:0;background:var(--paper);overflow:hidden;cursor:grab;touch-action:none}
-#wrap.dragging{cursor:grabbing}
+#wrap.dragging{cursor:grabbing}#wrap.pen{cursor:crosshair}#wrap.pen.dragging{cursor:grabbing}
+#pen[aria-pressed=true]{background:var(--accent);color:var(--surface);border-color:var(--accent)}
+.pen-opts{display:inline-flex;align-items:center;gap:6px}.pen-opts input[type=color]{width:34px;height:31px;padding:2px}
 #view{position:absolute;inset:0;width:100%;height:100%}
 #hint{position:absolute;left:12px;bottom:12px;font-size:12px;background:color-mix(in srgb,var(--surface) 85%,transparent);padding:5px 9px;border-radius:6px;pointer-events:none}
 #empty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;color:#6a6e75;padding:30px;pointer-events:none}
@@ -73,6 +75,11 @@ dialog::backdrop{background:#0006}
     <button id="fit">Fit painting</button><button id="home">Origin</button>
     <label class="check" style="margin:0"><input id="show-agents" type="checkbox" checked> Viewports</label>
     <label class="check" style="margin:0"><input id="show-text" type="checkbox" checked> Text</label>
+    <label class="check" style="margin:0"><input id="show-sketch" type="checkbox" checked> Sketch</label>
+    <button id="pen" aria-pressed="false" hidden title="Draw on the canvas: every agent sees your lines above the paint (P)">Pen</button>
+    <span id="pen-opts" class="pen-opts" hidden><input id="pen-color" type="color" value="#0a84ff" aria-label="Pen colour">
+      <select id="pen-width" aria-label="Pen width"><option value="3">Thin</option><option value="6" selected>Medium</option><option value="14">Thick</option></select>
+      <button id="undo" title="Erase the newest line (Ctrl+Z)">Undo</button><button id="clear-sketch">Clear</button></span>
     <span class="spacer"></span><span id="where" class="muted"></span>
   </div>
   <div id="task-bar" hidden><b>Task</b> <span id="task-text"></span></div>
@@ -148,6 +155,7 @@ const color = (id, a=1) => `hsla(${hue(id)},62%,44%,${a})`;
 
 // ---- state ----------------------------------------------------------------------------------------------
 const S = {cid:null, canvas:null, size:512, seq:0, heads:new Map(), agents:[], messages:[], broadcasts:[], catalog:null, options:null,
+  sketches:[], erased:new Map(), pending:[], pen:false, drawing:null, space:false,
   mode:"live", history:null, byTile:null, tracks:null, idx:0, playing:false, lastFrame:0,
   cam:{x:-64, y:-64, z:1}, spawn:null, timer:null, canLaunch:false};
 const images = new Map();   // "tx,ty,seq" -> Image, once loaded
@@ -227,6 +235,7 @@ function draw(){
     ctx.fillStyle = "#1f2328"; ctx.fillRect(lx, ly, lw, 20); ctx.fillStyle = "#fff"; ctx.fillText(label, lx + 6, ly + 14); ctx.restore();
   }
   const [ox, oy] = toScreen(0, 0); ctx.strokeStyle = "rgba(47,75,143,.35)"; ctx.beginPath(); ctx.moveTo(ox - 8, oy); ctx.lineTo(ox + 8, oy); ctx.moveTo(ox, oy - 8); ctx.lineTo(ox, oy + 8); ctx.stroke();
+  if($("show-sketch").checked) drawSketch();
   if($("show-text").checked) drawText();
   if($("show-agents").checked) for(const a of viewports()) frame(a.x, a.y, color(a.id, a.active ? .95 : .35), a.label, !a.active, a.size);
   if(S.spawn) frame(S.spawn[0], S.spawn[1], "rgba(31,35,40,.8)", "new agent starts here", true, spawnSize());
@@ -247,6 +256,25 @@ function drawText(){
       [...line].forEach((c, col) => { const x = sx + col * 6 * s, y = sy + row * 13 * s; ctx.strokeText(c, x, y); ctx.fillText(c, x, y); }); });
     ctx.restore();
   }
+}
+// The sketch: lines drawn from this page, above the paint and under the text, outlined the way agents see them.
+// A line shows from the op that drew it until the op that erased it.
+function sketchLines(){
+  const at = S.mode === "replay" ? (S.history.ops[S.idx]?.[0] ?? 0) : Infinity;
+  return S.sketches.filter(l => l.seq <= at && !(S.erased.get(l.seq) <= at));
+}
+function drawSketch(){
+  const lines = sketchLines().concat(S.mode === "live" ? S.pending : [], S.drawing ? [S.drawing] : []);
+  ctx.save(); ctx.lineCap = "round"; ctx.lineJoin = "round";
+  for(const l of lines){
+    const rgb = [1, 3, 5].map(i => parseInt(l.color.slice(i, i + 2), 16) / 255), light = .2126 * rgb[0] + .7152 * rgb[1] + .0722 * rgb[2] > .5;
+    const core = Math.max(1, l.width * S.cam.z);
+    ctx.beginPath(); l.points.forEach(([x, y], i) => { const [sx, sy] = toScreen(x, y); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
+    if(l.points.length === 1){ const [sx, sy] = toScreen(...l.points[0]); ctx.lineTo(sx + .01, sy); }
+    ctx.strokeStyle = light ? "#141419" : "#f7f2e6"; ctx.lineWidth = core + 2 * Math.max(1, 2 * S.cam.z); ctx.stroke();
+    ctx.strokeStyle = l.color; ctx.lineWidth = core; ctx.stroke();
+  }
+  ctx.restore();
 }
 const sizeOf = a => a?.config?.viewport || S.size;  // an agent's own viewport, or the canvas's
 const spawnSize = () => Number($("viewport").value) || S.size;
@@ -291,22 +319,42 @@ function fit(){
 $("zoom-in").onclick = () => setZoom(S.cam.z * 1.25); $("zoom-out").onclick = () => setZoom(S.cam.z / 1.25);
 $("fit").onclick = fit; $("home").onclick = () => centerOn(S.size / 2, S.size / 2, 1); $("show-agents").onchange = $("show-text").onchange = draw;
 let drag = null;
-$("wrap").onpointerdown = e => { if(e.button !== 0) return; drag = {x:e.clientX, y:e.clientY, cx:S.cam.x, cy:S.cam.y, moved:false}; $("wrap").setPointerCapture(e.pointerId); };
+const MAX_POINTS = 2000;
+const penWidth = () => Math.min(64, Math.max(1, Math.round(Number($("pen-width").value) / S.cam.z * 10) / 10));  // screen px, held as canvas px
+$("wrap").onpointerdown = e => {
+  const r = $("wrap").getBoundingClientRect(), [wx, wy] = toWorld(e.clientX - r.left, e.clientY - r.top);
+  if(S.pen && e.button === 0 && !S.space){
+    S.drawing = {points:[[Math.round(wx * 10) / 10, Math.round(wy * 10) / 10]], color:$("pen-color").value, width:penWidth()};
+    $("wrap").setPointerCapture(e.pointerId); draw(); return;
+  }
+  if(e.button !== 0 && !(S.pen && e.button === 1)) return;
+  drag = {x:e.clientX, y:e.clientY, cx:S.cam.x, cy:S.cam.y, moved:false}; $("wrap").setPointerCapture(e.pointerId);
+};
 $("wrap").onpointermove = e => {
   const r = $("wrap").getBoundingClientRect(), [wx, wy] = toWorld(e.clientX - r.left, e.clientY - r.top);
   $("where").textContent = `x ${Math.floor(wx)}, y ${Math.floor(wy)}`;
+  if(S.drawing){
+    const pts = S.drawing.points, [lx, ly] = pts[pts.length - 1];
+    if(Math.hypot(wx - lx, wy - ly) * S.cam.z >= 2){
+      pts.push([Math.round(wx * 10) / 10, Math.round(wy * 10) / 10]);
+      if(pts.length >= MAX_POINTS){ const last = pts[pts.length - 1]; commitLine(S.drawing); S.drawing = {...S.drawing, points:[last]}; }
+      draw();
+    }
+    return;
+  }
   if(!drag) return;
   if(Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 4){ drag.moved = true; $("wrap").classList.add("dragging"); }
   if(drag.moved){ S.cam.x = drag.cx - (e.clientX - drag.x) / S.cam.z; S.cam.y = drag.cy - (e.clientY - drag.y) / S.cam.z; draw(); }
 };
 $("wrap").onpointerup = e => {
-  if(drag && !drag.moved && S.cid){
+  if(S.drawing){ commitLine(S.drawing); S.drawing = null; return; }
+  if(drag && !drag.moved && S.cid && !S.pen){
     const r = $("wrap").getBoundingClientRect(), [wx, wy] = toWorld(e.clientX - r.left, e.clientY - r.top);
     S.spawn = [Math.round(wx - spawnSize() / 2), Math.round(wy - spawnSize() / 2)]; $("x").value = S.spawn[0]; $("y").value = S.spawn[1]; draw();
   }
   drag = null; $("wrap").classList.remove("dragging");
 };
-$("wrap").onpointercancel = () => { drag = null; $("wrap").classList.remove("dragging"); };
+$("wrap").onpointercancel = () => { if(S.drawing){ commitLine(S.drawing); S.drawing = null; } drag = null; $("wrap").classList.remove("dragging"); };
 $("wrap").addEventListener("wheel", e => { e.preventDefault(); const r = $("wrap").getBoundingClientRect(); setZoom(S.cam.z * Math.exp(-e.deltaY * (e.ctrlKey ? .01 : .0025)), e.clientX - r.left, e.clientY - r.top); }, {passive:false});
 $("x").oninput = $("y").oninput = $("viewport").oninput = () => { S.spawn = [Number($("x").value) || 0, Number($("y").value) || 0]; draw(); };
 new ResizeObserver(resize).observe($("wrap"));
@@ -320,6 +368,10 @@ async function poll(){
     for(const [tx, ty, seq] of r.heads) S.heads.set(`${tx},${ty}`, seq);
     S.seq = r.seq; S.agents = r.agents; S.messages = r.since ? S.messages.concat(r.messages) : r.messages;
     S.broadcasts = r.since ? S.broadcasts.concat(r.broadcasts) : r.broadcasts; S.canvas = r.canvas; S.size = r.canvas.config.viewport;
+    if(!r.since){ S.sketches = []; S.erased = new Map(); }
+    const have = new Set(S.sketches.map(l => l.seq));  // a line this page drew is already in
+    S.sketches = S.sketches.concat(r.sketches.filter(l => !have.has(l.seq)));
+    for(const [seq, seqs] of r.erasures) for(const s of seqs) S.erased.set(s, seq);
     $("task-bar").hidden = !r.canvas.config.task; $("task-text").textContent = r.canvas.config.task || "";
     const option = [...$("canvas-select").options].find(o => o.value === cid);
     if(option) option.textContent = `${r.canvas.name} · ${S.size}px${r.canvas.config.frame ? ` · ${r.canvas.config.frame[2]}×${r.canvas.config.frame[3]} frame` : ""} · ${S.agents.length} agents`;
@@ -329,13 +381,13 @@ async function poll(){
 }
 function counts(){
   const running = S.agents.filter(a => LIVE.includes(a.status)).length;
-  $("counts").textContent = `${S.agents.length} agents · ${running} painting · ${S.messages.length} messages · ${S.broadcasts.length} broadcasts · ${S.seq ? S.seq.toLocaleString() : 0} ops`;
+  $("counts").textContent = `${S.agents.length} agents · ${running} painting · ${S.messages.length} messages · ${S.broadcasts.length} broadcasts${S.sketches.length ? ` · ${sketchLines().length} sketch lines` : ""} · ${S.seq ? S.seq.toLocaleString() : 0} ops`;
 }
 function emptyState(){
   $("empty").hidden = Boolean(S.heads.size || S.agents.length) || !S.cid;
   $("empty").textContent = "Blank paper. Click where the first agent should start, then spawn it from the panel.";
 }
-function agentName(id){ return S.agents.find(a => a.id === id)?.name || String(id).slice(0, 6); }
+function agentName(id){ return id == null ? "the page" : S.agents.find(a => a.id === id)?.name || String(id).slice(0, 6); }
 function renderAgents(){
   if(!S.agents.length){ $("agents").innerHTML = `<p class="muted">None yet.</p>`; return; }
   $("agents").innerHTML = [...S.agents].reverse().map(a => {
@@ -365,6 +417,7 @@ $("messages").onclick = e => { const m = e.target.closest("[data-at]"); if(m){ c
 
 // ---- replay ---------------------------------------------------------------------------------------------
 async function enterReplay(){
+  setPen(false); $("pen").disabled = true;
   S.mode = "replay"; $("mode-live").setAttribute("aria-pressed", "false"); $("mode-replay").setAttribute("aria-pressed", "true"); $("replay-bar").hidden = false;
   const h = await api(`/api/canvases/${encodeURIComponent(S.cid)}/history`);
   S.history = h; S.byTile = new Map(); S.tracks = new Map();
@@ -374,7 +427,7 @@ async function enterReplay(){
 }
 function leaveReplay(){
   S.mode = "live"; S.playing = false; $("play").textContent = "▶"; $("mode-live").setAttribute("aria-pressed", "true"); $("mode-replay").setAttribute("aria-pressed", "false");
-  $("replay-bar").hidden = true; draw(); poll();
+  $("replay-bar").hidden = true; $("pen").disabled = false; draw(); poll();
 }
 let captionTimer = null;
 function scrubTo(i){
@@ -441,6 +494,50 @@ $("spawn").onsubmit = async e => {
   updateSubmit();
 };
 
+// ---- the pen --------------------------------------------------------------------------------------------
+// Lines go to the canvas's sketch, which every agent sees over the paint and nothing paints over. Undo and Clear
+// erase lines; replay still shows them from when they were drawn until they were erased.
+const HINT = $("hint").textContent;
+function setPen(on){
+  S.pen = on && Boolean(S.cid); $("pen").setAttribute("aria-pressed", String(S.pen)); $("pen-opts").hidden = !S.pen;
+  $("wrap").classList.toggle("pen", S.pen); if(S.pen){ S.spawn = null; $("show-sketch").checked = true; }
+  $("hint").textContent = S.pen ? "Drawing: agents see your lines above the paint · hold Space or the middle button to pan · scroll to zoom · Esc to stop" : HINT;
+  draw();
+}
+async function commitLine(line){
+  if(!S.cid) return;
+  const body = {points:line.points, color:line.color, width:line.width}, cid = S.cid;
+  S.pending.push(body);
+  try{ const made = await api(`/api/canvases/${encodeURIComponent(cid)}/sketches`, "POST", body);
+    if(cid === S.cid && !S.sketches.some(l => l.seq === made.seq)) S.sketches.push({...made, ts:Date.now() / 1000}); }
+  catch(err){ $("message").textContent = `Couldn't save that line: ${err.message}`; }
+  S.pending = S.pending.filter(l => l !== body); counts(); draw();
+}
+async function erase(seqs){
+  if(!seqs.length) return;
+  try{ const r = await api(`/api/canvases/${encodeURIComponent(S.cid)}/sketches/erase`, "POST", {seqs});
+    for(const s of r.erased) S.erased.set(s, r.seq); }
+  catch(err){ $("message").textContent = `Couldn't erase: ${err.message}`; }
+  counts(); draw();
+}
+$("pen").onclick = () => setPen(!S.pen);
+$("undo").onclick = () => { const live = sketchLines(); if(live.length) erase([live[live.length - 1].seq]); };
+let clearTimer = null;
+$("clear-sketch").onclick = () => {  // a second click within four seconds clears the whole sketch
+  if(!clearTimer){ $("clear-sketch").textContent = "Clear all?"; clearTimer = setTimeout(() => { clearTimer = null; $("clear-sketch").textContent = "Clear"; }, 4000); return; }
+  clearTimeout(clearTimer); clearTimer = null; $("clear-sketch").textContent = "Clear"; erase(sketchLines().map(l => l.seq));
+};
+$("show-sketch").onchange = draw;
+const typing = e => e.target.closest?.("input, textarea, select");
+addEventListener("keydown", e => {
+  if(typing(e) || $("canvas-dialog").open) return;
+  if(e.key === "p" && !e.metaKey && !e.ctrlKey && !$("pen").hidden && !$("pen").disabled) setPen(!S.pen);
+  else if(e.key === "Escape" && S.pen) setPen(false);
+  else if(e.key === " " && S.pen){ S.space = true; e.preventDefault(); }
+  else if(e.key === "z" && (e.metaKey || e.ctrlKey) && S.pen){ e.preventDefault(); $("undo").click(); }
+});
+addEventListener("keyup", e => { if(e.key === " ") S.space = false; });
+
 // ---- canvases -------------------------------------------------------------------------------------------
 async function loadCanvases(want){
   const list = await api("/api/canvases");
@@ -453,7 +550,7 @@ async function loadCanvases(want){
 async function choose(id){
   if(S.mode === "replay") leaveReplay();
   $("task-bar").hidden = true;
-  S.cid = id; S.seq = 0; S.heads = new Map(); S.agents = []; S.spawn = null; shown.clear();
+  S.cid = id; S.seq = 0; S.heads = new Map(); S.agents = []; S.spawn = null; S.sketches = []; S.erased = new Map(); S.pending = []; shown.clear();
   history.replaceState(null, "", `/canvas?canvas=${encodeURIComponent(id)}`);
   await poll(); fit(); updateSubmit();
 }
@@ -473,7 +570,7 @@ async function init(){
   try{
     const [options, cat] = await Promise.all([api("/api/options"), api("/api/canvas-catalog")]);
     S.options = options; S.catalog = cat; S.canLaunch = Boolean(options.launch);
-    $("token-field").hidden = !options.locked; $("new-canvas").hidden = !options.launch;
+    $("token-field").hidden = !options.locked; $("new-canvas").hidden = !options.launch; $("pen").hidden = !options.launch;
     if(!options.launch) $("message").textContent = "This server is read-only. Run conveyor serve without --no-launch to spawn agents.";
     if(options.harnesses && !options.harnesses.claude?.ok && options.harnesses.pi?.ok) $("harness").value = "pi";
     $("provider").innerHTML = Object.keys(options.models?.pi || {"opencode-go":[]}).map(p => `<option>${esc(p)}</option>`).join("");

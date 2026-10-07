@@ -35,13 +35,14 @@ import numpy as np
 from conveyor.commons import prompts
 from conveyor.commons.lettering import MAX_MESSAGE
 from conveyor.commons.lettering import MAX_SCALE
-from conveyor.commons.lettering import draw_messages
 from conveyor.commons.lettering import text_mask
 from conveyor.commons.lettering import wrap
 from conveyor.commons.overview import OVERVIEW_SIDE
 from conveyor.commons.overview import REGION
 from conveyor.commons.overview import overview_png
 from conveyor.commons.overview import region
+from conveyor.commons.sketch import bounds
+from conveyor.commons.sketch import lines as sketch_lines
 from conveyor.commons.tiles import DEFAULT_INK
 from conveyor.commons.tiles import MOVE_SHARE
 from conveyor.commons.tiles import SharedCanvas
@@ -91,6 +92,7 @@ class AgentSession:
         self.calls_used = 0
         self.index = 0
         self.heard = 0  # the newest broadcast seq this agent has been given
+        self.sketched = 0  # the newest sketch or erasure seq it has been told about
         (self.dir / "snaps").mkdir(exist_ok=True)
         self._log = open(self.dir / "calls.jsonl", "a", buffering=1)
 
@@ -136,10 +138,15 @@ class AgentSession:
         self._log.write(json.dumps(entry, default=str) + "\n")
 
     def _seen(self) -> np.ndarray:
-        """The viewport as the agent sees it: the paint, with the text layer on top. Paint calls work on the paint
-        alone, so an instrument that reads the canvas never picks up lettering."""
+        """The viewport as the agent sees it: the paint, with the sketch and the text on top. Paint calls work on
+        the paint alone, so an instrument that reads the canvas never picks up lettering or sketch lines."""
         x, y, s = self.x, self.y, self.size
-        return draw_messages(self.canvas.read(x, y, s, s).image(), x, y, self.canvas.messages(x, y, x + s, y + s))
+        return self.canvas.overlay(self.canvas.read(x, y, s, s).image(), x, y, x + s, y + s)
+
+    def _sketch_here(self) -> str:
+        x, y, s = self.x, self.y, self.size
+        return (" Lines of the sketch by the person running this canvas cross it."
+                if self.canvas.sketch(x, y, x + s, y + s) else "")
 
     def _viewport(self) -> Canvas:
         return Canvas(self.size, self.size, image=self._seen())
@@ -156,8 +163,9 @@ class AgentSession:
         try:
             blocks = self._dispatch(name, args, tool_use_id)
         except ToolFailure as e:
-            raise ToolFailure("\n\n".join(p for p in (str(e), self._news(), self.status()) if p)) from e
-        blocks[0] = text("\n\n".join(p for p in (blocks[0]["text"], self._news(), self.status()) if p).strip())
+            raise ToolFailure("\n\n".join(p for p in (str(e), self._sketch_news(), self._news(), self.status()) if p)) from e
+        blocks[0] = text("\n\n".join(p for p in (blocks[0]["text"], self._sketch_news(), self._news(), self.status())
+                                       if p).strip())
         return blocks
 
     def _news(self) -> str:
@@ -177,6 +185,39 @@ class AgentSession:
             half = int(json.loads(r["args"] or "{}").get("viewport") or self.canvas.config["viewport"]) // 2
             lines.append(f'- from around canvas ({r["x"] + half}, {r["y"] + half}): "{r["note"]}"')
         return f"{head}, oldest first{more}:\n" + "\n".join(lines)
+
+    def _sketch_news(self) -> str:
+        """Sketch lines drawn or erased since this agent's last call, and where. Its first call says what the
+        sketch holds already."""
+        rows = self.canvas.conn.execute(
+            "SELECT seq, tool, args FROM canvas_ops WHERE canvas_id=? AND tool IN ('sketch', 'erase_sketch') "
+            "AND seq>? ORDER BY seq", (self.canvas.canvas_id, self.sketched)).fetchall()
+        if not rows:
+            return ""
+        known, self.sketched = self.sketched, rows[-1]["seq"]
+        first = self.index <= 1
+        live = sketch_lines(self.canvas.conn, self.canvas.canvas_id)
+        # Only lines still there are news, and only erasures of lines this agent was told about.
+        drawn = live if first else [line for line in live if line["seq"] > known]
+        erased = 0 if first else sum(s <= known for r in rows if r["tool"] == "erase_sketch"
+                                     for s in json.loads(r["args"]).get("seqs", []))
+        if not drawn and not erased:
+            return ""
+        plural = lambda n, word: f"{n} {word}{'s' if n != 1 else ''}"  # noqa: E731
+        parts = []
+        if drawn:
+            box = [bounds(line) for line in drawn]
+            span = (f"x {round(min(b[0] for b in box))} to {round(max(b[2] for b in box))}, "
+                    f"y {round(min(b[1] for b in box))} to {round(max(b[3] for b in box))}")
+            parts.append(f"The person running this canvas has sketched {plural(len(drawn), 'line')} on it, over "
+                         f"canvas {span}." if first else
+                         f"The person running this canvas sketched {plural(len(drawn), 'new line')} since your last "
+                         f"call, over canvas {span}.")
+        if erased:
+            parts.append(f"They erased {plural(erased, 'line')} of the sketch." if drawn else
+                         f"The person running this canvas erased {plural(erased, 'line')} of the sketch since your "
+                         "last call.")
+        return " ".join(parts)
 
     def _dispatch(self, name: str, args: dict, tool_use_id: str | None) -> list[dict]:
         if name == "look":
@@ -203,14 +244,15 @@ class AgentSession:
     def look(self, tool_use_id: str | None = None) -> list[dict]:
         img = self._seen()
         self._op("look", "view", {}, tool_use_id=tool_use_id)
-        return [text("Your viewport as it is now, labelled in viewport pixels."), image(gridded_png(img))]
+        return [text(f"Your viewport as it is now, labelled in viewport pixels.{self._sketch_here()}"),
+                image(gridded_png(img))]
 
     def overview(self, tool_use_id: str | None = None) -> list[dict]:
         viewport = (self.x, self.y, self.x + self.size, self.y + self.size)
         window, scale = region(self.x, self.y, self.size)
         x0, y0, x1, y1 = window
         img = self.canvas.shrunk(window, scale).astype(np.float32) / 255.0
-        img = to_uint8(draw_messages(img, x0, y0, self.canvas.messages(x0, y0, x1, y1), scale))
+        img = to_uint8(self.canvas.overlay(img, x0, y0, x1, y1, scale))
         if self.frame:  # nothing exists outside the frame: shade it so the edge is plain
             fx0, fy0, fx1, fy1 = ((c - o) * scale for c, o in zip(self.frame, (x0, y0, x0, y0)))
             rows, cols = np.arange(img.shape[0])[:, None] + 0.5, np.arange(img.shape[1])[None, :] + 0.5
@@ -251,7 +293,8 @@ class AgentSession:
                  + (", stopped by the frame" if stopped else ""), snapshot=img, tool_use_id=tool_use_id)
         edge = " The frame's edge stopped you there." if stopped else ""
         return [text(f"Asked to move {distance:.0f} px toward {angle:g} degrees; moved by {dx} in x and {dy} in y."
-                     f"{edge} Your new viewport, labelled in viewport pixels:"), image(gridded_png(img))]
+                     f"{edge}{self._sketch_here()} Your new viewport, labelled in viewport pixels:"),
+                image(gridded_png(img))]
 
     def view(self, tool: str, args: dict, tool_use_id: str | None = None) -> list[dict]:
         try:

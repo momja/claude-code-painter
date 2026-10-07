@@ -17,6 +17,7 @@ import hmac
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -338,6 +339,51 @@ class Launcher:
             if not all(viewport <= side <= MAX_FRAME for side in frame):
                 raise LaunchError(f"The frame's width and height must be from the viewport's {viewport} to {MAX_FRAME:,} pixels.")
         return create_canvas(self.db, name.strip(), viewport, max_calls, (task or "").strip() or None, frame)
+
+    def _canvas(self, canvas_id: str):
+        from conveyor.commons.tiles import SharedCanvas
+
+        try:
+            return SharedCanvas(self.db, canvas_id)
+        except (ValueError, sqlite3.OperationalError):  # no such canvas, or no canvas tables yet
+            return None
+
+    def add_sketch(self, canvas_id: str, body: dict) -> dict | None:
+        """Draw one line of a canvas's sketch, for its agents to see above the paint. None for an unknown canvas."""
+        from conveyor.commons.sketch import SketchError, bounds, parse_line
+
+        try:
+            line = parse_line(body)
+        except SketchError as e:
+            raise LaunchError(str(e)) from None
+        if (canvas := self._canvas(canvas_id)) is None:
+            return None
+        try:
+            x0, y0, _, _ = bounds(line)
+            seq = canvas.record(agent_id=None, tool="sketch", status="drawn", x=int(x0), y=int(y0), args=line,
+                                note=f"{len(line['points'])} points")
+        finally:
+            canvas.close()
+        return {"seq": seq, **line}
+
+    def erase_sketch(self, canvas_id: str, body: dict) -> dict | None:
+        """Erase lines of a canvas's sketch by their seqs. None for an unknown canvas."""
+        from conveyor.commons.sketch import lines
+
+        seqs = body.get("seqs") if isinstance(body, dict) and set(body) == {"seqs"} else None
+        if not isinstance(seqs, list) or not seqs or any(isinstance(s, bool) or not isinstance(s, int) for s in seqs):
+            raise LaunchError("Expected seqs: a list of the sketch lines to erase.")
+        if (canvas := self._canvas(canvas_id)) is None:
+            return None
+        try:
+            found = sorted(set(seqs) & {line["seq"] for line in lines(canvas.conn, canvas_id)})
+            if not found:
+                raise LaunchError("None of those lines is on the canvas.")
+            seq = canvas.record(agent_id=None, tool="erase_sketch", status="erased", x=None, y=None,
+                                args={"seqs": found}, note=f"{len(found)} lines")
+        finally:
+            canvas.close()
+        return {"seq": seq, "erased": found}
 
     def start_agent(self, canvas_id: str, body: dict) -> dict:
         from conveyor.commons.agent import create_agent

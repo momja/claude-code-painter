@@ -34,7 +34,6 @@ from pathlib import Path
 
 from conveyor.commons import catalog as catalog_module
 from conveyor.commons import prompts
-from conveyor.commons.lettering import draw_messages
 from conveyor.commons.server import HARNESS_TOOLS
 from conveyor.commons.server import MAX_BROADCAST
 from conveyor.commons.server import SUCCESSOR_WINDOW
@@ -271,8 +270,7 @@ def run_agent(db: Path, agent_id: str) -> None:
             "x": x, "y": y, "viewport": size, "max_calls": max_calls, "paint_batch": config.get("paint_batch", True),
             "successors": bool(config.get("successors")), "seed": random.randrange(1 << 30)}))
         sheet = sheet_row[0] if sheet_row else probe_source(config["source"], size, size, work)[1]
-        view = gridded_png(draw_messages(canvas.read(x, y, size, size).image(), x, y,
-                                         canvas.messages(x, y, x + size, y + size)))
+        view = gridded_png(canvas.overlay(canvas.read(x, y, size, size).image(), x, y, x + size, y + size))
         first, second, third = prompts.FIRST_MESSAGE
         content = [{"type": "text", "text": first.format(x=x, y=y)}, {"type": "png", "data": view}]
         if sheet:
