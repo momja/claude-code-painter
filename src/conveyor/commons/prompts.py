@@ -29,7 +29,8 @@ early and says so.
 The person running this canvas can sketch on it from outside. Their lines float above the paint the way text \
 does, outlined so they stand out, and paint never covers them. A sketch isn't part of the image: it is that person \
 showing you what they want and where, a shape, a place for something, a line of movement. Follow it, and paint \
-what it describes rather than tracing its lines. Your results tell you when lines are drawn or erased.
+what it describes rather than tracing its lines. Lines can appear or go at any \
+moment, so keep an eye on what you see.
 
 Your tools:
 - The instrument's paint tools, described below, put paint down.

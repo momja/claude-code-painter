@@ -92,7 +92,6 @@ class AgentSession:
         self.calls_used = 0
         self.index = 0
         self.heard = 0  # the newest broadcast seq this agent has been given
-        self.sketched = 0  # the newest sketch or erasure seq it has been told about
         (self.dir / "snaps").mkdir(exist_ok=True)
         self._log = open(self.dir / "calls.jsonl", "a", buffering=1)
 
@@ -163,7 +162,8 @@ class AgentSession:
         try:
             blocks = self._dispatch(name, args, tool_use_id)
         except ToolFailure as e:
-            raise ToolFailure("\n\n".join(p for p in (str(e), self._sketch_news(), self._news(), self.status()) if p)) from e
+            raise ToolFailure("\n\n".join(p for p in (str(e), self._sketch_news(), self._news(), self.status())
+                                            if p)) from e
         blocks[0] = text("\n\n".join(p for p in (blocks[0]["text"], self._sketch_news(), self._news(), self.status())
                                        if p).strip())
         return blocks
@@ -187,37 +187,14 @@ class AgentSession:
         return f"{head}, oldest first{more}:\n" + "\n".join(lines)
 
     def _sketch_news(self) -> str:
-        """Sketch lines drawn or erased since this agent's last call, and where. Its first call says what the
-        sketch holds already."""
-        rows = self.canvas.conn.execute(
-            "SELECT seq, tool, args FROM canvas_ops WHERE canvas_id=? AND tool IN ('sketch', 'erase_sketch') "
-            "AND seq>? ORDER BY seq", (self.canvas.canvas_id, self.sketched)).fetchall()
-        if not rows:
+        """On an agent's first call, where the sketch is, so it can go and see it. After that nothing: new lines
+        show up in its pictures, and a note under each result whenever lines were drawn would be noise."""
+        if self.index > 1 or not (live := sketch_lines(self.canvas.conn, self.canvas.canvas_id)):
             return ""
-        known, self.sketched = self.sketched, rows[-1]["seq"]
-        first = self.index <= 1
-        live = sketch_lines(self.canvas.conn, self.canvas.canvas_id)
-        # Only lines still there are news, and only erasures of lines this agent was told about.
-        drawn = live if first else [line for line in live if line["seq"] > known]
-        erased = 0 if first else sum(s <= known for r in rows if r["tool"] == "erase_sketch"
-                                     for s in json.loads(r["args"]).get("seqs", []))
-        if not drawn and not erased:
-            return ""
-        plural = lambda n, word: f"{n} {word}{'s' if n != 1 else ''}"  # noqa: E731
-        parts = []
-        if drawn:
-            box = [bounds(line) for line in drawn]
-            span = (f"x {round(min(b[0] for b in box))} to {round(max(b[2] for b in box))}, "
-                    f"y {round(min(b[1] for b in box))} to {round(max(b[3] for b in box))}")
-            parts.append(f"The person running this canvas has sketched {plural(len(drawn), 'line')} on it, over "
-                         f"canvas {span}." if first else
-                         f"The person running this canvas sketched {plural(len(drawn), 'new line')} since your last "
-                         f"call, over canvas {span}.")
-        if erased:
-            parts.append(f"They erased {plural(erased, 'line')} of the sketch." if drawn else
-                         f"The person running this canvas erased {plural(erased, 'line')} of the sketch since your "
-                         "last call.")
-        return " ".join(parts)
+        box = [bounds(line) for line in live]
+        return (f"The person running this canvas has sketched {len(live)} line{'s' if len(live) != 1 else ''} on it, "
+                f"over canvas x {round(min(b[0] for b in box))} to {round(max(b[2] for b in box))}, "
+                f"y {round(min(b[1] for b in box))} to {round(max(b[3] for b in box))}.")
 
     def _dispatch(self, name: str, args: dict, tool_use_id: str | None) -> list[dict]:
         if name == "look":

@@ -234,7 +234,7 @@ def test_a_sketch_from_the_page_floats_above_the_paint_for_every_agent(canvas, t
     assert first["seq"] and first["width"] == 8.0
     said = text_of(tool(near, "look"))
     assert "Lines of the sketch by the person running this canvas cross it." in said
-    assert "sketched 1 new line since your last call, over canvas x 14 to 236, y 122 to 134." in said
+    assert "sketched" not in said  # drawing isn't announced: the line shows up in the picture
     seen = near.s._seen()
     assert blue(seen[126:131, 30:220]).all()  # the line, over the red paint
     assert not blue(SharedCanvas(db, row["id"]).read(0, 0, 256, 256).image()).any()  # and not in the paint
@@ -249,12 +249,14 @@ def test_a_sketch_from_the_page_floats_above_the_paint_for_every_agent(canvas, t
     late = agent(db, row, tmp_path, x=-900, name="late")  # its first result says what the sketch holds
     assert "has sketched 1 line on it, over canvas x 14 to 236" in text_of(tool(late, "look"))
     second = launcher.add_sketch(row["id"], {"points": [[3100, 50]], "width": 30})  # a dot, in the default colour
-    assert "sketched 1 new line since your last call, over canvas x 3083 to 3117, y 33 to 67." in text_of(tool(far, "look"))
+    assert "sketched" not in text_of(tool(far, "look"))
+    assert "has sketched 2 lines on it, over canvas x 14 to 3117, y 33 to 134." in text_of(
+        tool(agent(db, row, tmp_path, x=-900, y=900, name="later"), "look"))
     assert blue(far.s._seen()[45:56, 95:106]).all()
     erased = launcher.erase_sketch(row["id"], {"seqs": [first["seq"], second["seq"], 999999]})
     assert erased["erased"] == [first["seq"], second["seq"]]
     gone = text_of(tool(near, "look"))
-    assert "erased 1 line of the sketch since your last call" in gone and "Lines of the sketch" not in gone
+    assert "erased" not in gone and "sketch" not in gone
     assert not blue(near.s._seen()).any()
     with pytest.raises(LaunchError, match="None of those"):
         launcher.erase_sketch(row["id"], {"seqs": [first["seq"]]})
