@@ -427,8 +427,15 @@ class Launcher:
         threading.Thread(target=loop, name="canvas-watcher", daemon=True).start()
 
     def start_queued(self) -> list[str]:
-        """One pass: claim each queued agent (queued -> starting, so only one claim wins) and start it."""
+        """One pass: queue the judges that are due, then claim each queued agent (queued -> starting, so only one
+        claim wins) and start it."""
+        from conveyor.commons.agent import queue_judges
         from conveyor.store import connect
+
+        try:
+            queue_judges(self.db)
+        except Exception as e:  # noqa: BLE001 - a judge that can't be queued mustn't stop the agents that are
+            print(f"[canvas] couldn't queue judges: {e}", flush=True)
 
         conn = connect(self.db)
         try:

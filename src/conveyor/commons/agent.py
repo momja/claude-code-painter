@@ -8,6 +8,10 @@ with, or `random` to draw one; a harness, model, effort and provider; a starting
 or catalog change never alters it. The launcher then starts this module in a child process, so stopping an agent
 and shutting the server down work like they do for runs and studio paintings.
 
+An agent is a painter or a judge. A judge has no instrument: it walks the canvas with a 512 px viewport and paints
+notes where the work needs to improve. `queue_judges`, which the launcher's watcher runs, also starts one at the
+centre of a canvas every JUDGE_EVERY ops while painters are at work there.
+
 An agent's model sessions are recorded under `canvas-<canvas id>` instead of a run, so the dashboard's session
 drawer shows its transcript and replays its viewport, and the run list doesn't fill up with agents.
 
@@ -35,12 +39,14 @@ from pathlib import Path
 from conveyor.commons import catalog as catalog_module
 from conveyor.commons import prompts
 from conveyor.commons.server import HARNESS_TOOLS
+from conveyor.commons.server import JUDGE_TOOLS
 from conveyor.commons.server import MAX_BROADCAST
 from conveyor.commons.server import SUCCESSOR_WINDOW
 from conveyor.commons.tiles import MOVE_SHARE
 from conveyor.commons.tiles import VIEWPORT_RANGE
 from conveyor.commons.tiles import clamp_to_frame
 from conveyor.commons.tiles import SharedCanvas
+from conveyor.commons.views import STALE_SECONDS
 from conveyor.launch import LaunchError
 from conveyor.store import Store
 from conveyor.store import connect
@@ -54,6 +60,9 @@ SESSION_TIMEOUT = 3 * 3600.0  # seconds; a hundred calls at high effort can outl
 MAX_AGENT_TASK = 1000  # characters in the task a human gives one agent
 RANDOM = "random"  # a spawn request's pair_id that asks for a painter drawn from the whole catalog
 GRACE_CALLS = 5  # calls past the budget a model may make, refused, before its session is killed
+KINDS = ("painter", "judge")
+JUDGE_VIEWPORT = 512
+JUDGE_EVERY = 1000  # ops on a canvas between the judges that start by themselves
 
 
 def session_scope(canvas_id: str) -> str:
@@ -69,15 +78,21 @@ def _text(body: dict, key: str, limit: int, default: str | None = None) -> str |
     return value.strip()
 
 
-def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued") -> dict:
+def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued", extra: dict | None = None) -> dict:
     """Check a spawn request and save the agent. `queued` waits for the launcher's watcher; the launcher passes
-    `starting` when it starts the process itself, so the watcher never starts it a second time."""
+    `starting` when it starts the process itself, so the watcher never starts it a second time. An agent is a
+    painter, or a judge: no instrument, a 512 px viewport, and notes instead of paint. `extra` goes into its
+    settings as it is."""
     from conveyor.pi import PROVIDERS
 
-    allowed = {"pair_id", "harness", "model", "effort", "provider", "x", "y", "name", "cap",
+    allowed = {"kind", "pair_id", "harness", "model", "effort", "provider", "x", "y", "name", "cap",
                "paint_batch", "successors", "task", "viewport"}
     if not isinstance(body, dict) or set(body) - allowed:
         raise LaunchError("Expected " + ", ".join(sorted(allowed)) + ".")
+    kind = body.get("kind") or "painter"
+    if kind not in KINDS:
+        raise LaunchError("kind must be painter or judge.")
+    judge = kind == "judge"
     harness = body.get("harness") or "claude"
     if harness not in ("claude", "pi"):
         raise LaunchError("harness must be claude or pi.")
@@ -106,31 +121,36 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued") -
     paint_batch, successors = body.get("paint_batch", True), body.get("successors", True)
     if not isinstance(paint_batch, bool) or not isinstance(successors, bool):
         raise LaunchError("paint_batch and successors must be on or off.")
+    if judge:  # a judge has nothing to batch, and its work ends with its budget
+        paint_batch = successors = False
     init_db(db)
     conn = connect(db)
     try:
         canvas = conn.execute("SELECT * FROM canvases WHERE id=?", (canvas_id,)).fetchone()
         if canvas is None:
             raise LaunchError("Canvas not found.")
-        drawn = body.get("pair_id") == RANDOM
-        if drawn:
+        drawn, pair = body.get("pair_id") == RANDOM, None
+        if judge:
+            drawn = False
+        elif drawn:
             pair = draw_pair(conn)
         else:
             pair = catalog_module.entry(conn, body["pair_id"]) if isinstance(body.get("pair_id"), str) else None
-        if pair is None:
+        if pair is None and not judge:
             raise LaunchError("Choose a painter from the catalog.")
-        clash = _clash(pair)
+        clash = _clash(pair) if pair else set()
         if clash:
             raise LaunchError(f"That painter's instrument has a tool named {', '.join(sorted(clash))}, which the canvas uses.")
-        config = {**painter(pair, drawn), "harness": harness, "model": model, "effort": effort,
+        config = {**(painter(pair, drawn) if pair else {}), "kind": kind, "harness": harness, "model": model, "effort": effort,
                   "provider": provider if harness == "pi" else None, "cap": cap, "paint_batch": paint_batch,
                   "successors": successors, "agent_task": agent_task, "start": [x, y], "generation": 1}
+        config.update(extra or {})
         agent_id = new_id()
-        name = name or f"{re.sub(r'^claude-', '', model.split('/')[-1])} {agent_id[:4]}"
+        name = name or f"{'judge ' if judge else ''}{re.sub(r'^claude-', '', model.split('/')[-1])} {agent_id[:4]}"
         config.update(lineage=agent_id, base_name=name)
         canvas_config = json.loads(canvas["config"])
         max_calls = int(canvas_config.get("max_calls", 100))
-        viewport = body.get("viewport")
+        viewport = JUDGE_VIEWPORT if judge else body.get("viewport")
         if viewport in (None, ""):
             viewport = int(canvas_config["viewport"])
         elif isinstance(viewport, bool) or not isinstance(viewport, (int, float)) or viewport != int(viewport) \
@@ -148,11 +168,90 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued") -
                      (agent_id, canvas_id, name, time.time(), status, dumps(config), x, y, max_calls))
         conn.commit()
         return {"id": agent_id, "canvas_id": canvas_id, "name": name, "x": x, "y": y, "max_calls": max_calls,
-                "viewport": config["viewport"],
+                "viewport": config["viewport"], "kind": kind,
                 "painter": {"id": pair["id"], "random": drawn, "instrument": config["instrument_label"],
-                            "prompt": config["prompt_label"], "best_score": pair["best_score"]}}
+                            "prompt": config["prompt_label"], "best_score": pair["best_score"]} if pair else None}
     finally:
         conn.close()
+
+
+def queue_judges(db: Path) -> list[str]:
+    """Queue a judge at the centre of each canvas whose op count has passed another multiple of JUDGE_EVERY since
+    the last judge that started by itself there. Only while a painter is at work on the canvas, so an abandoned
+    canvas gets no judges, and only once the last automatic judge is done, so they never pile up. A judge takes the
+    harness, model, effort and cap of the newest agent spawned by hand there, the settings the person is using."""
+    conn = connect(db)
+    try:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvas_agents'").fetchone() is None:
+            return []
+        busy = [r[0] for r in conn.execute("SELECT DISTINCT canvas_id FROM canvas_agents "
+                                           "WHERE status IN ('queued', 'starting', 'running')").fetchall()]
+        due = []
+        now = time.time()
+        for canvas_id in busy:
+            agents = [(dict(r), json.loads(r["config"] or "{}")) for r in conn.execute(
+                "SELECT * FROM canvas_agents WHERE canvas_id=? ORDER BY created", (canvas_id,)).fetchall()]
+
+            def live(r: dict) -> bool:  # a running row with no call in a long while died without closing it
+                return r["status"] in ("queued", "starting") or (
+                    r["status"] == "running" and now - (r["last_ts"] or r["created"]) < STALE_SECONDS)
+
+            if not any(live(r) and c.get("kind", "painter") == "painter" for r, c in agents):
+                continue
+            autos = [(r, c) for r, c in agents if c.get("auto")]
+            if any(live(r) for r, _ in autos):
+                continue
+            ops = conn.execute("SELECT count(*) FROM canvas_ops WHERE canvas_id=?", (canvas_id,)).fetchone()[0]
+            last = max((int(c.get("at_ops", 0)) for _, c in autos), default=0)
+            if ops // JUDGE_EVERY <= last // JUDGE_EVERY:
+                continue
+            canvas_row = conn.execute("SELECT config FROM canvases WHERE id=?", (canvas_id,)).fetchone()
+            cx, cy = _centre(conn, canvas_id, json.loads(canvas_row["config"]))
+            hand = next((c for _, c in reversed(agents) if not c.get("auto") and int(c.get("generation", 1)) == 1), {})
+            due.append((canvas_id, ops, {
+                "kind": "judge", "harness": hand.get("harness") or "claude", "model": hand.get("model"),
+                "effort": hand.get("effort") or "high", "provider": hand.get("provider"),
+                "cap": hand.get("cap") or 5.0, "x": cx - JUDGE_VIEWPORT // 2, "y": cy - JUDGE_VIEWPORT // 2}))
+    finally:
+        conn.close()
+    queued = []
+    for canvas_id, ops, body in due:
+        try:
+            queued.append(create_agent(db, canvas_id, body, status="queued", extra={"auto": True, "at_ops": ops})["id"])
+        except LaunchError as e:  # a frame too small for a judge, say: skip this canvas
+            print(f"[canvas] no judge for {canvas_id}: {e}", flush=True)
+    return queued
+
+
+def _centre(conn, canvas_id: str, config: dict) -> tuple[int, int]:
+    """The middle of the frame, or of the paint on a canvas with no edges, or the origin on blank paper."""
+    frame = config.get("frame")
+    if frame:
+        return (frame[0] + frame[2]) // 2, (frame[1] + frame[3]) // 2
+    lo = conn.execute("SELECT min(tx), min(ty), max(tx), max(ty) FROM canvas_heads WHERE canvas_id=?",
+                      (canvas_id,)).fetchone()
+    if lo[0] is None:
+        return 0, 0
+    tile = int(config.get("tile", 128))
+    return (lo[0] + lo[2] + 1) * tile // 2, (lo[1] + lo[3] + 1) * tile // 2
+
+
+def judge_prompt(config: dict, size: int, x: int, y: int, max_calls: int, task: str | None = None,
+                 frame: list[int] | None = None) -> str:
+    from conveyor.commons.overview import OVERVIEW_SIDE, REGION
+    from conveyor.painting.canvas import Canvas
+
+    own = (config.get("agent_task") or "").strip()
+    w, h = (frame[2] - frame[0], frame[3] - frame[1]) if frame else (0, 0)
+    span = prompts.JUDGE_SPAN_FRAMED.format(w=w, h=h) if frame else prompts.JUDGE_SPAN_OPEN
+    purpose = prompts.JUDGE_TASK.format(task=task.strip(), span=span) if task else prompts.JUDGE_NO_TASK
+    if own:
+        purpose += "\n\n" + prompts.AGENT_TASK.format(agent_task=own)
+    return prompts.JUDGE_RULES.format(
+        purpose=purpose, extent=f", {w} x {h} pixels inside a frame" if frame else " with no edges",
+        frame_rule=prompts.FRAME_RULE.format(w=w, h=h) if frame else "", overview_side=OVERVIEW_SIDE,
+        region=REGION, s=size, x=x, y=y, max_move=int(MOVE_SHARE * size), max_calls=max_calls,
+        area_cap=Canvas(size, size).area_cap)
 
 
 def draw_pair(conn) -> dict | None:
@@ -247,6 +346,7 @@ def run_agent(db: Path, agent_id: str) -> None:
         row = dict(conn.execute("SELECT * FROM canvas_agents WHERE id=?", (agent_id,)).fetchone())
         sheet_row = None
         config = json.loads(row["config"])
+        judge = config.get("kind") == "judge"
         if config.get("sheet"):
             sheet_row = conn.execute("SELECT data FROM artifacts WHERE name=?", (config["sheet"],)).fetchone()
     finally:
@@ -266,18 +366,25 @@ def run_agent(db: Path, agent_id: str) -> None:
         d = work / session_scope(row["canvas_id"]) / f"agent-{agent_id}"
         d.mkdir(parents=True, exist_ok=True)
         (d / "job.json").write_text(json.dumps({
-            "db": str(db), "canvas_id": row["canvas_id"], "agent_id": agent_id, "source": config["source"],
+            "db": str(db), "canvas_id": row["canvas_id"], "agent_id": agent_id, "source": config.get("source"),
+            "kind": config.get("kind", "painter"),
             "x": x, "y": y, "viewport": size, "max_calls": max_calls, "paint_batch": config.get("paint_batch", True),
             "successors": bool(config.get("successors")), "seed": random.randrange(1 << 30)}))
-        sheet = sheet_row[0] if sheet_row else probe_source(config["source"], size, size, work)[1]
         view = gridded_png(canvas.overlay(canvas.read(x, y, size, size).image(), x, y, x + size, y + size))
-        first, second, third = prompts.FIRST_MESSAGE
-        content = [{"type": "text", "text": first.format(x=x, y=y)}, {"type": "png", "data": view}]
-        if sheet:
-            content += [{"type": "text", "text": second}, {"type": "png", "data": sheet}]
-        content.append({"type": "text", "text": third})
-        inst = Instrument(config["source"])
-        tools = [t.name for t in [*inst.spec.tools, *inst.spec.views]] + ["look", "overview", "move_viewport", "write_message", "broadcast"]
+        if judge:
+            first, last = prompts.JUDGE_FIRST_MESSAGE
+            content = [{"type": "text", "text": first.format(x=x, y=y)}, {"type": "png", "data": view},
+                       {"type": "text", "text": last}]
+            tools = list(JUDGE_TOOLS)
+        else:
+            sheet = sheet_row[0] if sheet_row else probe_source(config["source"], size, size, work)[1]
+            first, second, third = prompts.FIRST_MESSAGE
+            content = [{"type": "text", "text": first.format(x=x, y=y)}, {"type": "png", "data": view}]
+            if sheet:
+                content += [{"type": "text", "text": second}, {"type": "png", "data": sheet}]
+            content.append({"type": "text", "text": third})
+            inst = Instrument(config["source"])
+            tools = [t.name for t in [*inst.spec.tools, *inst.spec.views]] + ["look", "overview", "move_viewport", "write_message", "broadcast"]
         if config.get("paint_batch", True):
             tools.append("paint_batch")
         if config.get("successors"):
@@ -297,8 +404,9 @@ def run_agent(db: Path, agent_id: str) -> None:
                 if tool_uses[0] > max_calls + GRACE_CALLS:  # it kept calling after being told it was out
                     harness.stop_all()
 
-        prompt = system_prompt(config, size, x, y, max_calls, canvas.config.get("task"), canvas.config.get("frame"))
-        job = Job(purpose="canvas agent", system_prompt=prompt, content=content,
+        prompt = (judge_prompt if judge else system_prompt)(config, size, x, y, max_calls, canvas.config.get("task"),
+                                                             canvas.config.get("frame"))
+        job = Job(purpose="canvas judge" if judge else "canvas agent", system_prompt=prompt, content=content,
                   cwd=d, mcp={"name": "commons", "command": sys.executable, "args": ["-m", "conveyor.commons.server", str(d)]},
                   tools=tools, max_budget_usd=config["cap"], timeout=SESSION_TIMEOUT, node="canvas",
                   organism_id=agent_id, on_start=started, on_event=on_event)

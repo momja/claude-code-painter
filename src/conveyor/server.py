@@ -30,7 +30,7 @@ With a launcher (`conveyor serve` on a loopback address) it can also start runs:
   POST /api/launches/<id>/stop       stop it, as Ctrl+C would
   POST /api/runs/<run>/paintings      paint with saved instrument_id/prompt_id, text and optional base64 image
   POST /api/canvases                 create a shared canvas from {name, viewport, max_calls, task, frame: {width, height}}
-  POST /api/canvases/<id>/agents     spawn an agent: catalog pair_id (or "random"), harness, model, effort,
+  POST /api/canvases/<id>/agents     spawn an agent: kind (painter or judge), catalog pair_id (or "random"), harness, model, effort,
                                      provider, start x and y, name, cap, paint_batch, successors, task, viewport
   POST /api/canvases/<id>/agents/<agent>/stop   stop it, as Ctrl+C would
   POST /api/canvases/<id>/sketches   draw a sketch line from {points: [[x, y], ...], color, width} in canvas pixels

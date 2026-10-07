@@ -74,7 +74,6 @@ dialog::backdrop{background:#0006}
     <button id="zoom-out" aria-label="Zoom out">−</button><span id="zoom-label" class="muted">100%</span><button id="zoom-in" aria-label="Zoom in">+</button>
     <button id="fit">Fit painting</button><button id="home">Origin</button>
     <label class="check" style="margin:0"><input id="show-agents" type="checkbox" checked> Viewports</label>
-    <label class="check" style="margin:0"><input id="show-text" type="checkbox" checked> Text</label>
     <label class="check" style="margin:0"><input id="show-sketch" type="checkbox" checked> Sketch</label>
     <button id="pen" aria-pressed="false" hidden title="Draw on the canvas: every agent sees your lines above the paint (P)">Pen</button>
     <span id="pen-opts" class="pen-opts" hidden><input id="pen-color" type="color" value="#0a84ff" aria-label="Pen colour">
@@ -98,7 +97,9 @@ dialog::backdrop{background:#0006}
   <section aria-labelledby="spawn-title">
     <h2 id="spawn-title">Spawn an agent</h2>
     <form id="spawn">
-      <label class="check"><input id="random" type="checkbox" checked> Random painter: an instrument and its prompt, drawn from each run's top 5</label>
+      <label>Agent<select id="kind"><option value="painter">Painter</option><option value="judge">Judge</option></select></label>
+      <p id="judge-note" class="pair" hidden>A judge doesn't paint. It walks the canvas with a 512 px viewport and paints notes where the work needs to improve, which painters act on and paint over. One also starts by itself at the centre of the canvas every 1,000 operations while painters are at work.</p>
+      <label class="check painter-only"><input id="random" type="checkbox" checked> Random painter: an instrument and its prompt, drawn from each run's top 5</label>
       <div id="choice" hidden>
       <label>Painter<select id="painter"></select></label>
       <div class="previews"><figure id="painting-fig"><img id="painting" alt="This painter's best painting"><figcaption>Best painting</figcaption></figure>
@@ -112,16 +113,16 @@ dialog::backdrop{background:#0006}
       <label id="provider-field" hidden>Provider<select id="provider"></select></label>
       <label>Model<input id="model" list="models" placeholder="Harness default" autocomplete="off"><datalist id="models"></datalist></label>
       <div class="row3"><label>Start x<input id="x" type="number" step="1" value="0"></label><label>Start y<input id="y" type="number" step="1" value="0"></label><label>Cap, $<input id="cap" type="number" step="any" min="0.01" max="100" value="5"></label></div>
-      <div class="row"><label>Name<input id="name" maxlength="60" placeholder="Model name"></label><label>Viewport, px<input id="viewport" type="number" min="64" max="1024" step="1" placeholder="canvas default"></label></div>
+      <div class="row"><label>Name<input id="name" maxlength="60" placeholder="Model name"></label><label class="painter-only">Viewport, px<input id="viewport" type="number" min="64" max="1024" step="1" placeholder="canvas default"></label></div>
       <label>Task for this agent, optional<textarea id="agent-task" rows="3" maxlength="1000" placeholder="Its own part of the work. Only this agent reads it; its successors carry it on."></textarea></label>
-      <label class="check"><input id="batch" type="checkbox" checked> Offer paint_batch (40 strokes for one call)</label>
-      <label class="check"><input id="successors" type="checkbox" checked> May spawn a successor to keep working</label>
+      <label class="check painter-only"><input id="batch" type="checkbox" checked> Offer paint_batch (40 strokes for one call)</label>
+      <label class="check painter-only"><input id="successors" type="checkbox" checked> May spawn a successor to keep working</label>
       <label id="token-field" hidden>Launch token<input id="token" type="password" autocomplete="off"></label>
       <button id="submit" class="primary" type="submit" disabled>Spawn</button>
       <div id="message" role="status" aria-live="polite"></div>
     </form>
   </section>
-  <section aria-labelledby="messages-title"><h2 id="messages-title">Messages and broadcasts</h2><p class="muted" style="font-size:12px;margin-top:-4px">Messages float above the paint where they were written. Broadcasts reach every agent, with where the sender was. Click one to find it.</p><div id="messages" class="msgs"></div></section>
+  <section aria-labelledby="messages-title"><h2 id="messages-title">Messages and broadcasts</h2><p class="muted" style="font-size:12px;margin-top:-4px">Messages, judges' notes among them, are painted where they were written, so paint can cover them. Broadcasts reach every agent, with where the sender was. Click one to find it.</p><div id="messages" class="msgs"></div></section>
   <section aria-labelledby="agents-title"><h2 id="agents-title">Agents</h2><div id="agents" class="agents"><p class="muted">None yet.</p></div></section>
 </aside>
 </main>
@@ -236,28 +237,10 @@ function draw(){
   }
   const [ox, oy] = toScreen(0, 0); ctx.strokeStyle = "rgba(47,75,143,.35)"; ctx.beginPath(); ctx.moveTo(ox - 8, oy); ctx.lineTo(ox + 8, oy); ctx.moveTo(ox, oy - 8); ctx.lineTo(ox, oy + 8); ctx.stroke();
   if($("show-sketch").checked) drawSketch();
-  if($("show-text").checked) drawText();
   if($("show-agents").checked) for(const a of viewports()) frame(a.x, a.y, color(a.id, a.active ? .95 : .35), a.label, !a.active, a.size);
   if(S.spawn) frame(S.spawn[0], S.spawn[1], "rgba(31,35,40,.8)", "new agent starts here", true, spawnSize());
 }
-// Messages sit above the paint. Each is drawn letter by letter on the 6 x 13 font grid it was set in, outlined
-// in a contrasting colour the way agents see it. Too small to read, it shows as a faint box so it can be found.
-function drawText(){
-  const at = S.mode === "replay" ? (S.history.ops[S.idx]?.[0] ?? 0) : Infinity;
-  for(const m of S.messages){
-    if(m.seq > at) continue;
-    const s = m.scale * S.cam.z, [sx, sy] = toScreen(m.x, m.y);
-    if(sx > cv.width || sy > cv.height || sx + m.w * S.cam.z < 0 || sy + m.h * S.cam.z < 0) continue;
-    if(11 * s < 5){ ctx.fillStyle = "rgba(230,0,160,.35)"; ctx.fillRect(sx, sy, Math.max(2, m.w * S.cam.z), Math.max(2, m.h * S.cam.z)); continue; }
-    const rgb = [1, 3, 5].map(i => parseInt(m.color.slice(i, i + 2), 16) / 255), light = .2126 * rgb[0] + .7152 * rgb[1] + .0722 * rgb[2] > .5;
-    ctx.save(); ctx.font = `${Math.round(10 * s)}px ui-monospace,SFMono-Regular,Menlo,monospace`; ctx.textBaseline = "top";
-    ctx.lineJoin = "round"; ctx.lineWidth = 2 * s; ctx.strokeStyle = light ? "#141419" : "#f7f2e6"; ctx.fillStyle = m.color;
-    m.lines.forEach((line, row) => { if((row + 1) * 13 * m.scale > m.height) return;
-      [...line].forEach((c, col) => { const x = sx + col * 6 * s, y = sy + row * 13 * s; ctx.strokeText(c, x, y); ctx.fillText(c, x, y); }); });
-    ctx.restore();
-  }
-}
-// The sketch: lines drawn from this page, above the paint and under the text, outlined the way agents see them.
+// The sketch: lines drawn from this page, above the paint, outlined the way agents see them.
 // A line shows from the op that drew it until the op that erased it.
 function sketchLines(){
   const at = S.mode === "replay" ? (S.history.ops[S.idx]?.[0] ?? 0) : Infinity;
@@ -277,7 +260,8 @@ function drawSketch(){
   ctx.restore();
 }
 const sizeOf = a => a?.config?.viewport || S.size;  // an agent's own viewport, or the canvas's
-const spawnSize = () => Number($("viewport").value) || S.size;
+const judging = () => $("kind").value === "judge";
+const spawnSize = () => judging() ? 512 : Number($("viewport").value) || S.size;
 function frame(x, y, stroke, label, dashed, size = S.size){
   const [sx, sy] = toScreen(x, y), side = size * S.cam.z;
   ctx.save(); ctx.strokeStyle = stroke; ctx.lineWidth = 2; if(dashed) ctx.setLineDash([6, 5]);
@@ -317,7 +301,7 @@ function fit(){
   centerOn((minX + maxX) / 2, (minY + maxY) / 2, Math.min(4, (r.width - 40) / (maxX - minX), (r.height - 40) / (maxY - minY)));
 }
 $("zoom-in").onclick = () => setZoom(S.cam.z * 1.25); $("zoom-out").onclick = () => setZoom(S.cam.z / 1.25);
-$("fit").onclick = fit; $("home").onclick = () => centerOn(S.size / 2, S.size / 2, 1); $("show-agents").onchange = $("show-text").onchange = draw;
+$("fit").onclick = fit; $("home").onclick = () => centerOn(S.size / 2, S.size / 2, 1); $("show-agents").onchange = draw;
 let drag = null;
 const MAX_POINTS = 2000;
 const penWidth = () => Math.min(64, Math.max(1, Math.round(Number($("pen-width").value) / S.cam.z * 10) / 10));  // screen px, held as canvas px
@@ -397,8 +381,8 @@ function renderAgents(){
       <div class="meta">${esc(model)}${c.generation > 1 ? ` · session ${c.generation}, from ${esc(agentName(c.parent_id))}` : ""}${c.viewport && c.viewport !== S.size ? ` · ${c.viewport} px viewport` : ""}${c.successors === false ? " · no successors" : ""}${c.random ? " · painter drawn at random" : ""}</div>
       ${a.status === "handed_off" ? `<div class="meta">Handed off to ${esc(S.agents.filter(x => x.config?.parent_id === a.id).map(x => x.name).join(", ") || "a successor")}</div>` : ""}
       ${c.agent_task ? `<div class="meta clamp" title="${esc(c.agent_task)}"><b>Task:</b> ${esc(c.agent_task)}</div>` : ""}
-      <div class="meta clamp" title="${esc(c.instrument_label)}">Instrument: ${esc(c.instrument_label)}</div>
-      <div class="meta clamp" title="${esc(c.prompt_label)}">Prompt: ${esc(c.prompt_label)}</div>
+      ${c.kind === "judge" ? `<div class="meta"><b>Judge</b>: leaves notes, doesn't paint${c.auto ? ` · started by itself at ${Number(c.at_ops).toLocaleString()} ops` : ""}</div>` : `<div class="meta clamp" title="${esc(c.instrument_label)}">Instrument: ${esc(c.instrument_label)}</div>
+      <div class="meta clamp" title="${esc(c.prompt_label)}">Prompt: ${esc(c.prompt_label)}</div>`}
       <div class="bar" title="${a.calls_used} of ${a.max_calls} tool calls"><i style="width:${pct}%"></i></div>
       <div class="meta">${a.calls_used}/${a.max_calls} calls · at (${a.x}, ${a.y})${a.error ? ` · <span class="bad">${esc(a.error)}</span>` : ""}</div>
       <div class="acts"><button data-find="${esc(a.id)}">Find</button>${live && S.canLaunch ? `<button data-stop="${esc(a.id)}">Stop</button>` : ""}${a.session_id ? `<a href="/#session=${encodeURIComponent(a.session_id)}" target="_blank" rel="noopener">Transcript</a>` : ""}</div></div>`;
@@ -473,14 +457,18 @@ function showChoice(){
   updateSubmit();
 }
 $("painter").onchange = showChoice;
-$("random").onchange = () => { $("choice").hidden = $("random").checked; updateSubmit(); };
+$("random").onchange = () => { $("choice").hidden = $("random").checked || judging(); updateSubmit(); };
+$("kind").onchange = () => {  // a judge has no painter, a fixed viewport, and nothing to batch or hand off
+  for(const el of document.querySelectorAll(".painter-only")) el.hidden = judging();
+  $("judge-note").hidden = !judging(); $("choice").hidden = $("random").checked || judging(); updateSubmit(); draw();
+};
 function fillHarness(){
   const o = S.options, kind = $("harness").value;
   $("provider-field").hidden = kind !== "pi";
   if(o?.models){ const models = kind === "pi" ? (o.models.pi[$("provider").value] || []) : o.models.claude; $("models").innerHTML = models.map(m => `<option value="${esc(m)}">`).join(""); }
 }
 $("harness").onchange = $("provider").onchange = fillHarness;
-function updateSubmit(){ $("submit").disabled = !S.canLaunch || !S.cid || (!$("random").checked && !$("painter").value); }
+function updateSubmit(){ $("submit").disabled = !S.canLaunch || !S.cid || (!judging() && !$("random").checked && !$("painter").value); }
 $("spawn").onsubmit = async e => {
   e.preventDefault(); if($("token").value) token.set($("token").value);
   $("submit").disabled = true; $("message").textContent = "Spawning…";
@@ -488,8 +476,9 @@ $("spawn").onsubmit = async e => {
     model:$("model").value.trim() || null, x:Math.round(Number($("x").value) || 0), y:Math.round(Number($("y").value) || 0),
     cap:Number($("cap").value) || 5, name:$("name").value.trim() || null, viewport:Number($("viewport").value) || null, task:$("agent-task").value.trim() || null, paint_batch:$("batch").checked,
     successors:$("successors").checked};
+  if(judging()){ body.kind = "judge"; for(const k of ["pair_id", "viewport", "paint_batch", "successors"]) delete body[k]; }
   if(body.harness === "pi") body.provider = $("provider").value;
-  try{ const a = await api(`/api/canvases/${encodeURIComponent(S.cid)}/agents`, "POST", body); $("message").textContent = `Spawned ${a.name || a.id} at (${a.x}, ${a.y})${a.painter.random ? ", drawn at random" : ""}: ${a.painter.instrument} / ${a.painter.prompt}.`; S.spawn = null; await poll(); }
+  try{ const a = await api(`/api/canvases/${encodeURIComponent(S.cid)}/agents`, "POST", body); $("message").textContent = a.painter ? `Spawned ${a.name || a.id} at (${a.x}, ${a.y})${a.painter.random ? ", drawn at random" : ""}: ${a.painter.instrument} / ${a.painter.prompt}.` : `Spawned the judge ${a.name || a.id} at (${a.x}, ${a.y}).`; S.spawn = null; await poll(); }
   catch(err){ $("message").textContent = err.message; }
   updateSubmit();
 };

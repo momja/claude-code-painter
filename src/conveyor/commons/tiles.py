@@ -34,7 +34,6 @@ from PIL import Image
 
 from conveyor.commons.lettering import GLYPH_W
 from conveyor.commons.lettering import LINE_H
-from conveyor.commons.lettering import draw_messages
 from conveyor.commons.lettering import wrap
 from conveyor.commons.sketch import bounds
 from conveyor.commons.sketch import draw_sketch
@@ -236,28 +235,14 @@ class SharedCanvas:
             out[ys, xs] = small[ys.start - top:ys.stop - top, xs.start - left:xs.stop - left]
         return out
 
-    def messages(self, x0: int, y0: int, x1: int, y1: int) -> list[dict]:
-        """Every message that reaches into the window x0..x1, y0..y1, oldest first. A message is an op, not
-        pixels, so paint never covers one."""
-        size, out = int(self.config["viewport"]), []
-        for row in self.conn.execute("SELECT seq, x, y, args FROM canvas_ops WHERE canvas_id=? AND tool='write_message' "
-                                     "AND status IN ('painted', 'written') ORDER BY seq", (self.canvas_id,)):
-            m = message(row["seq"], row["x"], row["y"], json.loads(row["args"]), size)
-            pad = m["scale"]  # the outline
-            if m["x"] - pad < x1 and m["x"] + m["w"] + pad > x0 and m["y"] - pad < y1 and m["y"] + m["h"] + pad > y0:
-                out.append(m)
-        return out
-
     def sketch(self, x0: float, y0: float, x1: float, y1: float) -> list[dict]:
         """Every line of the sketch that reaches into the window x0..x1, y0..y1, oldest first."""
         return [line for line in sketch_lines(self.conn, self.canvas_id)
                 if (b := bounds(line))[0] < x1 and b[2] > x0 and b[1] < y1 and b[3] > y0]
 
     def overlay(self, img: np.ndarray, x0: int, y0: int, x1: int, y1: int, scale: float = 1.0) -> np.ndarray:
-        """`img`, the paint of the window x0..x1, y0..y1 at `scale`, with what floats above the paint drawn on
-        top: the sketch, then the messages, so text stays readable over a line."""
-        img = draw_sketch(img, x0, y0, self.sketch(x0, y0, x1, y1), scale)
-        return draw_messages(img, x0, y0, self.messages(x0, y0, x1, y1), scale)
+        """`img`, the paint of the window x0..x1, y0..y1 at `scale`, with the sketch drawn on top."""
+        return draw_sketch(img, x0, y0, self.sketch(x0, y0, x1, y1), scale)
 
     def record(self, *, agent_id: str | None, tool: str, status: str, x: int, y: int, args: dict | None = None,
                note: str = "", tiles: dict[tuple[int, int], np.ndarray] | None = None) -> int:

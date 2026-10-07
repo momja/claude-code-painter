@@ -153,11 +153,11 @@ if cfg:
     elif server_name == "commons":
         # A shared-canvas agent: one of each kind of call, then looks until the budget refuses one.
         names = {t["name"] for t in tools}
-        paint = next(t for t in tools if t["name"] not in ("look", "move_viewport", "write_message", "paint_batch")
-                     and "x" in t["inputSchema"].get("properties", {}))
-        props = paint["inputSchema"].get("properties", {})
-        arguments = {k: sample(v) for k, v in props.items() if k in paint["inputSchema"].get("required", [])}
-        script = [("look", {}), (paint["name"], arguments),
+        paint = next((t for t in tools if t["name"] not in ("look", "move_viewport", "write_message", "paint_batch")
+                      and "x" in t["inputSchema"].get("properties", {})), None)  # a judge has no paint tool
+        props = paint["inputSchema"].get("properties", {}) if paint else {}
+        arguments = {k: sample(v) for k, v in props.items() if k in paint["inputSchema"].get("required", [])} if paint else {}
+        script = [("look", {})] + ([(paint["name"], arguments)] if paint else []) + [
                   ("write_message", {"text": os.environ.get("FAKE_CLAUDE_MESSAGE", "hello from a fake"), "x": 8, "y": 8}),
                   ("move_viewport", {"angle": 0, "distance": 10_000})]
         if "paint_batch" in names:

@@ -16,10 +16,11 @@ from PIL import Image
 
 from conveyor.__main__ import build_parser
 from conveyor.commons import catalog
-from conveyor.commons import lettering
 from conveyor.commons import prompts
 from conveyor.commons import views
 from conveyor.commons.agent import create_agent
+from conveyor.commons.agent import judge_prompt
+from conveyor.commons.agent import queue_judges
 from conveyor.commons.agent import queue_successor
 from conveyor.commons.agent import run_agent
 from conveyor.commons.agent import session_scope
@@ -53,7 +54,7 @@ def canvas(tmp_path):
 
 
 def agent(db: Path, canvas_row: dict, tmp: Path, *, x=0, y=0, source=ROUND, max_calls=None, name="a",
-          successors=False, viewport=None) -> CommonsServer:
+          successors=False, viewport=None, kind="painter") -> CommonsServer:
     conn = connect(db)
     conn.execute("INSERT INTO canvas_agents (id, canvas_id, created, status, config, x, y, max_calls) "
                  "VALUES (?, ?, ?, 'running', '{}', ?, ?, ?)",
@@ -64,7 +65,7 @@ def agent(db: Path, canvas_row: dict, tmp: Path, *, x=0, y=0, source=ROUND, max_
     d.mkdir()
     (d / "job.json").write_text(json.dumps({"db": str(db), "canvas_id": canvas_row["id"], "agent_id": name,
                                             "source": source, "x": x, "y": y, "max_calls": max_calls,
-                                            "successors": successors, "viewport": viewport}))
+                                            "successors": successors, "viewport": viewport, "kind": kind}))
     return CommonsServer(AgentSession(d))
 
 
@@ -173,30 +174,42 @@ def test_a_move_goes_at_most_three_quarters_of_the_viewport(canvas, tmp_path):
     assert tool(server, "move_viewport", {"distance": 5})["isError"]
 
 
-def test_messages_float_above_the_paint_for_every_agent(canvas, tmp_path):
+def test_messages_are_painted_into_the_canvas_where_paint_can_cover_them(canvas, tmp_path):
     db, row = canvas
     server = agent(db, row, tmp_path)
     result = tool(server, "write_message", {"text": "MEET AT 900,0", "x": 10, "y": 10, "scale": 2, "color": "#000000"})
-    assert not result["isError"], text_of(result)
+    assert not result["isError"] and "anyone can paint over it" in text_of(result), text_of(result)
     shared = SharedCanvas(db, row["id"])
-    assert views.canvas(connect(db, readonly=True), row["id"])["heads"] == []  # no tile changed: tiles hold paint only
+    paint = lambda: shared.read(0, 0, 256, 256).image()  # noqa: E731
     dark = lambda img: img.min(axis=-1) < 0.05  # noqa: E731
-    ink = dark(server.s._seen()[10:36, 10:200]).sum()
+    assert views.canvas(connect(db, readonly=True), row["id"])["heads"]  # the letters are in the tiles
+    ink = dark(paint()[10:36, 10:200]).sum()
     assert ink > 100
-    tool(server, "paint_batch", {"tool": "stroke", "defaults": {"length": 200, "size": 12, "color": "#ffffff",
-                                                               "pressure": 1.0, "angle": 0},
-                                 "calls": [{"x": 10, "y": 14}, {"x": 10, "y": 30}]})
-    assert shared.read(0, 0, 256, 256).image()[14, 60].min() > 0.95  # the paint went down
-    assert dark(server.s._seen()[10:36, 10:200]).sum() == ink  # and the text is still on top of it
     other = agent(db, row, tmp_path, x=5, y=4, name="b")  # another agent sees it where it is on the canvas
-    assert not tool(other, "look")["isError"]
     assert dark(other.s._seen()[6:32, 5:195]).sum() == ink
+    tool(server, "paint_batch", {"tool": "stroke", "defaults": {"length": 200, "size": 14, "color": "#ffffff",
+                                                               "pressure": 1.0, "angle": 0},
+                                 "calls": [{"x": 6, "y": 14}, {"x": 6, "y": 24}, {"x": 6, "y": 32}]})
+    assert dark(paint()[10:36, 10:200]).sum() < ink // 4  # painted over, like any paint
     huge = tool(server, "write_message", {"text": "x" * 200, "x": 0, "y": 0, "scale": 4})
     assert huge["isError"] and "area" in text_of(huge)
     tool(other, "write_message", {"text": "hi", "x": 0, "y": 100})
     messages = views.canvas(connect(db, readonly=True), row["id"])["messages"]
     assert [(m["text"], m["x"], m["y"]) for m in messages] == [("MEET AT 900,0", 10, 10), ("hi", 5, 104)]
     assert messages[0]["lines"] == ["MEET AT 900,0"] and messages[0]["color"] == "#000000"
+
+
+def test_lettering_is_outlined_so_dark_ink_reads_on_dark_paint(canvas, tmp_path):
+    db, row = canvas
+    server = agent(db, row, tmp_path)
+    tool(server, "paint_batch", {"tool": "stroke", "defaults": {"length": 200, "size": 30, "color": "#000000",
+                                                               "pressure": 1.0, "angle": 0},
+                                 "calls": [{"x": 10, "y": 40}, {"x": 10, "y": 50}]})
+    painted = SharedCanvas(db, row["id"]).read(0, 0, 256, 256).image()
+    assert (painted[36:56, 30:120].min(axis=-1) > 0.85).sum() == 0  # black paint
+    tool(server, "write_message", {"text": "DARK", "x": 40, "y": 38, "scale": 2, "color": "#000000"})
+    lettered = SharedCanvas(db, row["id"]).read(0, 0, 256, 256).image()
+    assert (lettered[36:66, 38:92].min(axis=-1) > 0.85).sum() > 50  # a light outline around black letters
 
 
 def test_a_broadcast_reaches_every_other_agent_with_its_next_result(canvas, tmp_path):
@@ -277,24 +290,6 @@ def test_a_sketch_line_is_checked(canvas, body, match):
     db, row = canvas
     with pytest.raises(LaunchError, match=match):
         Launcher(db, build_parser).add_sketch(row["id"], body)
-
-
-def test_messages_painted_into_tiles_before_the_text_layer_come_back_on_top(canvas, tmp_path):
-    db, row = canvas
-    shared = SharedCanvas(db, row["id"])
-    shared.record(agent_id="old", tool="write_message", status="painted", x=0, y=0, note="FROM BEFORE",
-                  args={"text": "FROM BEFORE", "x": 20, "y": 40, "background": "#ffffff"})
-    assert [m["text"] for m in shared.messages(0, 0, 256, 256)] == ["FROM BEFORE"]
-    assert shared.messages(300, 0, 400, 100) == []
-
-
-def test_lettering_is_outlined_so_dark_ink_reads_on_dark_paint():
-    black = np.zeros((40, 120, 3), dtype=np.float32)
-    m = {"x": 4, "y": 4, "text": "DARK", "scale": 2, "width": 116, "height": 36, "color": (0.0, 0.0, 0.0)}
-    out = lettering.draw_messages(black, 0, 0, [m])
-    assert (out.min(axis=-1) > 0.85).sum() > 50  # a light outline around black letters
-    small = lettering.draw_messages(np.zeros((10, 30, 3), dtype=np.float32), 0, 0, [m], scale=0.25)
-    assert small.max() > 0.1  # shrunk for an overview, the text still shows
 
 
 def test_the_overview_shows_the_region_around_the_viewport_and_how_far_the_paint_reaches(canvas, tmp_path):
@@ -577,6 +572,99 @@ def test_an_agent_runs_to_the_end_of_its_budget(tmp_path, fake_claude, monkeypat
                            (done["session_id"],)).fetchone()
     assert strokes[0] == 9 and strokes[1] >= 3
     assert not conn.execute("SELECT 1 FROM runs WHERE id=?", (session_scope(row["id"]),)).fetchone()
+
+
+# ---- judges ----------------------------------------------------------------------------------------------------
+
+
+def test_a_judge_looks_moves_and_writes_notes_but_never_paints(tmp_path):
+    db = seeded_db(tmp_path)
+    row = create_canvas(db, "C", viewport=256, max_calls=20, task="A harbour at dusk.", frame=(2048, 1536))
+    made = create_agent(db, row["id"], {"kind": "judge", "viewport": 128, "successors": True, "x": 900, "y": 600,
+                                        "task": "Look hardest at the boats."})
+    assert made["kind"] == "judge" and made["painter"] is None and made["viewport"] == 512
+    config = views.canvas(connect(db, readonly=True), row["id"])["agents"][0]["config"]
+    assert config["kind"] == "judge" and config["viewport"] == 512 and not config["successors"]
+    assert not config["paint_batch"] and made["name"].startswith("judge ")
+    with pytest.raises(LaunchError, match="kind"):
+        create_agent(db, row["id"], {"kind": "critic"})
+    judge = agent(db, row, tmp_path, kind="judge", source=None, viewport=512, name="j")
+    names = [t["name"] for t in judge.tools()]
+    assert sorted(names) == sorted(["look", "overview", "move_viewport", "write_message"])
+    refused = tool(judge, "stroke", stroke(10, 10))
+    assert refused["isError"] and "No tool named stroke" in text_of(refused)
+    assert tool(judge, "broadcast", {"text": "hi"})["isError"]
+    assert views.canvas(connect(db, readonly=True), row["id"])["heads"] == []
+    note = tool(judge, "write_message", {"text": "Boats float: give them reflections", "x": 20, "y": 20})
+    assert not note["isError"] and views.canvas(connect(db, readonly=True), row["id"])["heads"]
+    prompt = judge_prompt(config, 512, 900, 600, 20, "A harbour at dusk.", [0, 0, 2048, 1536])
+    assert "You are the judge" in prompt and "You don't paint" in prompt and "A harbour at dusk." in prompt
+    assert "Look hardest at the boats." in prompt and "2048 x 1536" in prompt and "Paint big." not in prompt
+    painter_prompt = system_prompt({"source": ROUND, "prompt": "Paint big."}, 256, 0, 0, 20)
+    assert "A judge walks the canvas" in painter_prompt and "paint over the note" in painter_prompt
+
+
+def test_a_judge_starts_by_itself_at_the_centre_every_thousand_ops(tmp_path):
+    db = seeded_db(tmp_path)
+    row = create_canvas(db, "C", viewport=256, max_calls=20, frame=(2048, 1536))
+    painter_row = create_agent(db, row["id"], {"pair_id": PAIR, "model": "fake-model", "effort": "low", "cap": 2})
+
+    def ops(n):
+        conn = connect(db)
+        conn.executemany("INSERT INTO canvas_ops (canvas_id, agent_id, ts, tool, status) VALUES (?, ?, ?, 'look', 'view')",
+                         [(row["id"], painter_row["id"], time.time())] * n)
+        conn.commit()
+        conn.close()
+
+    def status(agent_id, value, last_ts=None):
+        conn = connect(db)
+        conn.execute("UPDATE canvas_agents SET status=?, last_ts=? WHERE id=?", (value, last_ts or time.time(), agent_id))
+        conn.commit()
+        conn.close()
+
+    def judges():
+        agents = views.canvas(connect(db, readonly=True), row["id"])["agents"]
+        return [a for a in agents if a["config"].get("kind") == "judge"]
+
+    ops(999)
+    assert queue_judges(db) == []
+    ops(1)
+    [first] = queue_judges(db)
+    [judge] = judges()
+    assert judge["id"] == first and judge["status"] == "queued" and (judge["x"], judge["y"]) == (1024 - 256, 768 - 256)
+    assert judge["config"]["auto"] and judge["config"]["at_ops"] == 1000 and judge["config"]["viewport"] == 512
+    assert (judge["config"]["model"], judge["config"]["effort"], judge["config"]["cap"]) == ("fake-model", "low", 2)
+    ops(1500)
+    assert queue_judges(db) == []  # the last one isn't done yet
+    status(first, "finished")
+    [second] = queue_judges(db)  # 2,500 ops: past 2,000
+    status(second, "finished")
+    ops(400)
+    assert queue_judges(db) == []  # 2,900: not past 3,000 yet
+    ops(100)
+    status(painter_row["id"], "running", last_ts=time.time() - 3600)  # its process died an hour ago
+    assert queue_judges(db) == []  # nobody is painting: no judge
+    status(painter_row["id"], "running")
+    assert len(queue_judges(db)) == 1
+
+
+def test_a_judge_runs_to_the_end_of_its_budget(tmp_path, fake_claude, monkeypatch):
+    monkeypatch.setenv("PATH", f"{fake_claude.parent}:{__import__('os').environ['PATH']}")
+    monkeypatch.setenv("FAKE_CLAUDE_MESSAGE", "sky is flat: add clouds")
+    db = seeded_db(tmp_path)
+    row = create_canvas(db, "C", viewport=256, max_calls=7, task="A harbour at dusk.")
+    spawned = create_agent(db, row["id"], {"kind": "judge", "x": 0, "y": 0, "model": "fake-model"})
+    run_agent(db, spawned["id"])
+    conn = connect(db, readonly=True)
+    state = views.canvas(conn, row["id"])
+    done = state["agents"][0]
+    assert done["status"] == "finished" and done["calls_used"] == 7, done["error"]
+    assert [m["text"] for m in state["messages"]] == ["sky is flat: add clouds"] and state["heads"]
+    session = conn.execute("SELECT * FROM sessions WHERE id=?", (done["session_id"],)).fetchone()
+    request = json.loads(session["request"])
+    assert session["purpose"] == "canvas judge" and "You are the judge" in request["system"]
+    assert sorted(request["tools"]) == sorted(["look", "overview", "move_viewport", "write_message"])
+    assert [c["type"] for c in request["content"]].count("image") == 1  # the viewport; no instrument, no demo sheet
 
 
 # ---- successors ------------------------------------------------------------------------------------------------

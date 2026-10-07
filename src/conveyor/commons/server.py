@@ -35,7 +35,8 @@ import numpy as np
 from conveyor.commons import prompts
 from conveyor.commons.lettering import MAX_MESSAGE
 from conveyor.commons.lettering import MAX_SCALE
-from conveyor.commons.lettering import text_mask
+from conveyor.commons.lettering import glyphs
+from conveyor.commons.lettering import halo_color
 from conveyor.commons.lettering import wrap
 from conveyor.commons.overview import OVERVIEW_SIDE
 from conveyor.commons.overview import REGION
@@ -67,6 +68,7 @@ MAX_BROADCAST = 280  # characters in one broadcast
 BROADCASTS_SHOWN = 5  # the most broadcasts one result carries; the newest are kept
 SUCCESSOR_WINDOW = 10  # spawn_successor works only in an agent's last this-many calls, so a session stays put
 OUTSIDE = (38, 38, 46)  # how the overview shows what lies outside a canvas's frame
+JUDGE_TOOLS = ("look", "overview", "move_viewport", "write_message")  # a judge looks, moves and writes; it never paints
 HARNESS_TOOLS = ("look", "overview", "move_viewport", "write_message", "broadcast", "paint_batch", "spawn_successor")
 
 
@@ -80,14 +82,15 @@ class AgentSession:
         self.max_calls = int(job.get("max_calls") or self.canvas.config["max_calls"])
         self.frame = self.canvas.config.get("frame")  # (x0, y0, x1, y1), or None for a canvas with no edges
         self.x, self.y = clamp_to_frame(self.frame, int(job["x"]), int(job["y"]), self.size)
-        self.inst = Instrument(job["source"])
-        taken = {t.name for t in [*self.inst.spec.tools, *self.inst.spec.views]} & set(HARNESS_TOOLS)
+        self.judge = job.get("kind") == "judge"
+        self.inst = None if self.judge else Instrument(job["source"])
+        taken = {t.name for t in [*self.inst.spec.tools, *self.inst.spec.views]} & set(HARNESS_TOOLS) if self.inst else set()
         if taken:
             raise ValueError(f"the instrument's tool names clash with the canvas's: {sorted(taken)}")
-        self.batch_enabled = bool(job.get("paint_batch", True))
-        self.successors = bool(job.get("successors", False))
+        self.batch_enabled = bool(job.get("paint_batch", True)) and not self.judge  # a judge has nothing to batch
+        self.successors = bool(job.get("successors", False)) and not self.judge
         self.handed_off = False
-        self.pen = self.inst.new_state()
+        self.pen = self.inst.new_state() if self.inst else None
         self.rng = np.random.default_rng(job.get("seed", 0))
         self.calls_used = 0
         self.index = 0
@@ -137,8 +140,8 @@ class AgentSession:
         self._log.write(json.dumps(entry, default=str) + "\n")
 
     def _seen(self) -> np.ndarray:
-        """The viewport as the agent sees it: the paint, with the sketch and the text on top. Paint calls work on
-        the paint alone, so an instrument that reads the canvas never picks up lettering or sketch lines."""
+        """The viewport as the agent sees it: the paint, with the sketch on top. Paint calls work on the paint
+        alone, so an instrument that reads the canvas never picks up sketch lines."""
         x, y, s = self.x, self.y, self.size
         return self.canvas.overlay(self.canvas.read(x, y, s, s).image(), x, y, x + s, y + s)
 
@@ -205,15 +208,15 @@ class AgentSession:
             return self.move(args, tool_use_id)
         if name == "write_message":
             return [text(self.write_message(args, tool_use_id))]
-        if name == "broadcast":
+        if name == "broadcast" and not self.judge:
             return [text(self.broadcast(args, tool_use_id))]
         if name == "spawn_successor" and self.successors:
             return [text(self.spawn_successor(args, tool_use_id))]
         if name == "paint_batch" and self.batch_enabled:
             return [text(self.batch(args, tool_use_id))]
-        if name in {v.name for v in self.inst.spec.views}:
+        if self.inst and name in {v.name for v in self.inst.spec.views}:
             return self.view(name, args, tool_use_id)
-        if name in {t.name for t in self.inst.spec.tools}:
+        if self.inst and name in {t.name for t in self.inst.spec.tools}:
             return [text(self.paint(name, args, tool_use_id))]
         self._op(name, "rejected", args, "no such tool", tool_use_id=tool_use_id)
         raise ToolFailure(f"No tool named {name}.")
@@ -376,23 +379,36 @@ class AgentSession:
         except ToolFailure as e:
             self._op("write_message", "rejected", args, str(e), tool_use_id=tool_use_id)
             raise ToolFailure(f"{e} Nothing was written.") from None
-        mask = text_mask(message, self.size - x, scale)[: self.size - y, : self.size - x]
-        h, w = mask.shape
+        # The glyphs carry an outline one font pixel wide all round: place them so the letters start at (x, y),
+        # and cut them at the viewport's edges, like any paint.
+        ink_mask, halo_mask = glyphs(message, self.size - x, scale)
+        left, top = x - scale, y - scale
+        ys = slice(max(0, top), min(self.size, top + ink_mask.shape[0]))
+        xs = slice(max(0, left), min(self.size, left + ink_mask.shape[1]))
+        cut = (slice(ys.start - top, ys.stop - top), slice(xs.start - left, xs.stop - left))
+        ink_mask, halo_mask = ink_mask[cut], halo_mask[cut]
         # Letters are held to the area limit of the canvas's own viewport, not the agent's: an agent with a small
         # viewport paints finer, but should still be able to say something. Wrapping keeps the text inside its view.
         limit = max(self.area_cap, Canvas(*(2 * [int(self.canvas.config["viewport"])])).area_cap)
-        covered = int(mask.sum())
+        covered = int((ink_mask | halo_mask).sum())
         if covered > limit:
             self._op("write_message", "rejected", args, "over the area limit", tool_use_id=tool_use_id)
-            raise ToolFailure(f"That message's letters would cover {covered} pixels, past the area limit of "
-                              f"{limit} a message may cover. Write less or use a smaller scale. Nothing was written.")
-        # The message is the op itself: the text layer reads it back from the log, and no tile changes.
-        self._op("write_message", "written", {"text": message, "x": x, "y": y, "scale": scale, "color": color,
-                                              "viewport": self.size},
-                 message, tool_use_id=tool_use_id)
+            raise ToolFailure(f"That message's letters and outline would cover {covered} pixels, past the area limit "
+                              f"of {limit} a message may cover. Write less or use a smaller scale. Nothing was written.")
+        ink = parse_color(color)
+        with self.canvas.transaction():
+            region = self.canvas.read(self.x, self.y, self.size, self.size)
+            img = region.image()
+            window = img[ys, xs]
+            window[halo_mask] = halo_color(ink)
+            window[ink_mask] = ink
+            tiles = region.changed(img)
+            self._op("write_message", "painted", {"text": message, "x": x, "y": y, "scale": scale, "color": color,
+                                                  "viewport": self.size},
+                     message, tiles=tiles, snapshot=img, tool_use_id=tool_use_id)
         lines = len(wrap(message, self.size - x, scale))
-        return (f"Wrote {len(message)} characters in {lines} line{'s' if lines != 1 else ''}, {w} x {h} px from "
-                f"({x}, {y}), above the paint. Paint won't cover it.")
+        return (f"Painted {len(message)} characters in {lines} line{'s' if lines != 1 else ''} from ({x}, {y}), "
+                "outlined. It's paint now, and anyone can paint over it.")
 
 
 class CommonsServer(StdioServer):
@@ -403,7 +419,7 @@ class CommonsServer(StdioServer):
 
     def tools(self) -> list[dict]:
         s = self.s.size
-        tools = self.s.inst.mcp_tools(s, s) + self.s.inst.mcp_views(s, s)
+        tools = self.s.inst.mcp_tools(s, s) + self.s.inst.mcp_views(s, s) if self.s.inst else []
         if self.s.batch_enabled:
             tools.append({
                 "name": "paint_batch",
@@ -428,7 +444,7 @@ class CommonsServer(StdioServer):
                           f"to keep the work going past your budget. It only works in your last {SUCCESSOR_WINDOW} "
                           "tool calls.",
                           "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}})
-        return tools + [
+        return tools + [t for t in [
             {"name": "look", "description": "See your viewport as it is now, gridded in viewport pixels. Others "
              "may have painted in it since you last looked.", "inputSchema": {"type": "object", "properties": {}}},
             {"name": "overview", "description": f"See the canvas around you, {REGION} viewports across with yours "
@@ -449,9 +465,9 @@ class CommonsServer(StdioServer):
              "inputSchema": {"type": "object", "properties": {
                  "text": {"type": "string", "maxLength": MAX_BROADCAST, "description": "What to say."}},
                  "required": ["text"], "additionalProperties": False}},
-            {"name": "write_message", "description": "Set ASCII text in your viewport, wrapped at the viewport's "
-             "right edge. It floats above the paint: every agent whose view takes in that spot sees it, paint never "
-             "covers it, and it can't be erased.",
+            {"name": "write_message", "description": "Paint ASCII text into your viewport, wrapped at the "
+             "viewport's right edge and outlined in a contrasting colour so it reads on any paint. It is paint like "
+             "any other: anyone can paint over it.",
              "inputSchema": {"type": "object", "properties": {
                  "text": {"type": "string", "maxLength": MAX_MESSAGE, "description": "Printable ASCII; newlines break lines."},
                  "x": {"type": "number", "minimum": 0, "maximum": s, "description": "Left edge of the text."},
@@ -460,7 +476,7 @@ class CommonsServer(StdioServer):
                  "scale": {"type": "integer", "minimum": 1, "maximum": MAX_SCALE,
                            "description": "Pixels per font pixel: a letter is 6 x 11 font pixels. Default 2."}},
                  "required": ["text", "x", "y"], "additionalProperties": False}},
-        ]
+        ] if not self.s.judge or t["name"] in JUDGE_TOOLS]
 
     def structured_content(self, meta: dict) -> dict | None:
         # The Pi sidecar ends the session on this, so it doesn't spend a turn on a call that would be refused.

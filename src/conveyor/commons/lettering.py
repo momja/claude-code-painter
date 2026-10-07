@@ -1,9 +1,8 @@
 """
 Messages: ASCII text set in Pillow's built-in 6 x 11 bitmap font, scaled up by whole pixels.
 
-Messages live in a layer above the paint, not in the tiles. Every picture an agent is shown has them drawn on top,
-so paint never covers one. Each glyph gets an outline one font pixel wide in a colour that contrasts with the ink,
-so dark ink stays readable on dark paint.
+Messages are painted into the canvas like any other mark, so paint can cover them. Each glyph gets an outline one
+font pixel wide in a colour that contrasts with the ink, so dark ink stays readable on dark paint.
 """
 
 from __future__ import annotations
@@ -67,33 +66,3 @@ def halo_color(ink: tuple[float, float, float]) -> tuple[float, float, float]:
     """Near-black around light ink, paper-white around dark ink."""
     luminance = 0.2126 * ink[0] + 0.7152 * ink[1] + 0.0722 * ink[2]
     return (0.08, 0.08, 0.1) if luminance > 0.5 else (0.97, 0.95, 0.9)
-
-
-def draw_messages(img: np.ndarray, x0: int, y0: int, messages: list[dict], scale: float = 1.0) -> np.ndarray:
-    """`img` (float RGB in 0..1) showing the canvas from (x0, y0) at `scale` picture px per canvas px, with the
-    messages drawn on top, oldest first. Each message is {x, y, text, scale, width, height, color} in canvas
-    pixels: wrapped at `width` and cut at `height`, the way it was written. Returns a new array."""
-    out = img.copy()
-    h, w = out.shape[:2]
-    for m in messages:
-        ink, halo = glyphs(m["text"], m["width"], m["scale"])
-        pad = m["scale"]
-        ink, halo = ink[: m["height"] + 2 * pad, : m["width"] + 2 * pad], halo[: m["height"] + 2 * pad, : m["width"] + 2 * pad]
-        rgba = np.zeros((*ink.shape, 4), dtype=np.float32)
-        rgba[halo] = (*halo_color(m["color"]), 1.0)
-        rgba[ink] = (*m["color"], 1.0)
-        left, top = (m["x"] - pad - x0) * scale, (m["y"] - pad - y0) * scale
-        if scale != 1.0:  # shrink the lettering with the picture, keeping partial cover as transparency
-            size = (max(1, round(rgba.shape[1] * scale)), max(1, round(rgba.shape[0] * scale)))
-            channels = [Image.fromarray(rgba[..., c]).resize(size, Image.Resampling.BOX) for c in range(4)]
-            rgba = np.stack([np.asarray(c, dtype=np.float32) for c in channels], axis=-1)
-            premultiplied = rgba[..., :3] / np.maximum(rgba[..., 3:], 1e-6)
-            rgba[..., :3] = np.clip(premultiplied * (rgba[..., 3:] > 0), 0, 1)
-        left, top = round(left), round(top)
-        ys, xs = slice(max(0, top), min(h, top + rgba.shape[0])), slice(max(0, left), min(w, left + rgba.shape[1]))
-        if ys.start >= ys.stop or xs.start >= xs.stop:
-            continue
-        patch = rgba[ys.start - top:ys.stop - top, xs.start - left:xs.stop - left]
-        alpha = patch[..., 3:]
-        out[ys, xs] = out[ys, xs] * (1 - alpha) + patch[..., :3] * alpha
-    return out
