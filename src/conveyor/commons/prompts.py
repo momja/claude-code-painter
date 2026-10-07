@@ -51,7 +51,10 @@ NO_TASK = "There is no goal and no score. Paint whatever you want."
 TASK = """\
 Every agent on this canvas has the same task. Together you are making one image:
 
-{task}"""
+{task}
+
+The image spans the whole canvas, far beyond your viewport. You only ever see a narrow piece of it, and other \
+agents are painting the rest."""
 
 BATCH_RULE = """
 - `paint_batch` runs up to 40 of the instrument's paint calls, in order, for one tool call of your budget. Set \
@@ -70,16 +73,13 @@ FIRST_MESSAGE = ("Your viewport as it is now, top-left corner at canvas ({x}, {y
 
 SUCCESSOR_RULE = """
 - `spawn_successor` ends your session at once and starts a new session of you where your viewport is now, with \
-the same instrument, the same instructions and a fresh {max_calls} tool calls. The new session sees the canvas \
-and the note you pass it, and nothing of this conversation, so put in the note what it needs to carry on, in under 2000 characters. It \
-counts as one call, so making it your last call costs you nothing. Use it if you want to keep working after your \
+the same instrument, the same instructions and a fresh {max_calls} tool calls. The new session sees only \
+the canvas: nothing of this conversation goes with it. It counts as one call, so making it your last call costs you nothing. Use it if you want to keep working after your \
 budget runs out. Your successor gets the same choice."""
 
 SUCCESSOR_MESSAGE = """\
 You are session {generation} of this painter. Your previous session used `spawn_successor` to keep its work going \
-and handed it to you here. Its note to you:
-
-{note}"""
+and handed it to you here. Nothing of its conversation came with it, only the canvas."""
 
 SUCCESSOR_REMINDER = "To keep working past your budget, spend one of them on spawn_successor."
 HANDED_OFF = ("You have handed your work to a successor, which starts once this session closes. Your session is over: "

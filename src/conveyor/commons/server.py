@@ -9,7 +9,7 @@ instrument's tools on its viewport, plus `look`, `overview`, `move_viewport`, `w
 and `spawn_successor`, and counts every call it receives against the canvas's tool-call budget, refused calls
 included. Past the budget, or once the agent has handed off to a successor, every call is refused.
 
-`spawn_successor` only writes `successor.json` with the agent's note and where its viewport stands. The host
+`spawn_successor` only writes `successor.json` with where the agent's viewport stands. The host
 process queues the successor once the session has closed (see agent.py).
 
 Each call reads the viewport fresh from the database, so the agent sees what others painted since its last call.
@@ -58,7 +58,6 @@ from conveyor.painting.paintserver import MAX_BATCH_CALLS
 from conveyor.painting.paintserver import batch_calls
 
 HARNESS_TOOLS = ("look", "overview", "move_viewport", "write_message", "paint_batch", "spawn_successor")
-MAX_NOTE = 2000
 
 
 class AgentSession:
@@ -258,17 +257,12 @@ class AgentSession:
         return summary
 
     def spawn_successor(self, args: dict, tool_use_id: str | None = None) -> str:
-        # A long note is cut rather than refused: notes grow as each session copies its predecessor's, and a
-        # refusal on an agent's last call would end the chain without a word.
-        note = str(args.get("note") or "")
-        cut = len(note) > MAX_NOTE
-        note = note[:MAX_NOTE]
-        (self.dir / "successor.json").write_text(json.dumps({"note": note, "x": self.x, "y": self.y, "at": time.time()}))
+        # No note: a successor inherits only the canvas, so what it should know has to be there for anyone to see.
+        (self.dir / "successor.json").write_text(json.dumps({"x": self.x, "y": self.y, "at": time.time()}))
         self.handed_off = True
-        self._op("spawn_successor", "handed_off", {"note": note}, note, tool_use_id=tool_use_id)
-        return (f"Your successor starts here, with its viewport at canvas ({self.x}, {self.y}), {self.max_calls} fresh "
-                "tool calls and your note, once this session closes."
-                + (f" Your note was cut to its first {MAX_NOTE} characters." if cut else ""))
+        self._op("spawn_successor", "handed_off", {}, tool_use_id=tool_use_id)
+        return (f"Your successor starts here, with its viewport at canvas ({self.x}, {self.y}) and {self.max_calls} "
+                "fresh tool calls, once this session closes. It gets the canvas and nothing of this conversation.")
 
     def write_message(self, args: dict, tool_use_id: str | None = None) -> str:
         try:
@@ -338,13 +332,9 @@ class CommonsServer(StdioServer):
             })
         if self.s.successors:
             tools.append({"name": "spawn_successor", "description": "End your session now and start a new session "
-                          f"of you where your viewport is, with {self.s.max_calls} fresh tool calls. It sees the canvas "
-                          "and your note, not this conversation. Use it to keep working past your budget.",
-                          "inputSchema": {"type": "object", "properties": {
-                              "note": {"type": "string", "maxLength": MAX_NOTE,
-                                       "description": "What your successor needs to carry on: what you were making, "
-                                       f"where, and what's left. At most {MAX_NOTE} characters; past that it's cut."}},
-                              "required": ["note"], "additionalProperties": False}})
+                          f"of you where your viewport is, with {self.s.max_calls} fresh tool calls. It sees only the "
+                          "canvas, nothing of this conversation. Use it to keep working past your budget.",
+                          "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}})
         return tools + [
             {"name": "look", "description": "See your viewport as it is now, gridded in viewport pixels. Others "
              "may have painted in it since you last looked.", "inputSchema": {"type": "object", "properties": {}}},

@@ -169,7 +169,7 @@ if cfg:
         if handoff and os.path.exists(handoff) and "spawn_successor" in names:
             os.remove(handoff)
             i += 1
-            call(server, i, "spawn_successor", {"note": "Finish the red line to the east."})
+            call(server, i, "spawn_successor", {})
             i = 300  # and stop, the way a model told its session is over would
         while i < 300:
             i += 1

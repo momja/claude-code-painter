@@ -216,8 +216,8 @@ def test_a_canvas_task_reaches_every_agent_word_for_word(tmp_path):
     config = {"source": ROUND, "prompt": "Paint big."}
     task = "A lighthouse on a cliff at night,\nits beam crossing the whole sky."
     with_task, without = system_prompt(config, 256, 0, 0, 20, task), system_prompt(config, 256, 0, 0, 20)
-    assert task in with_task and prompts.NO_TASK not in with_task
-    assert prompts.NO_TASK in without and "same task" not in without
+    assert task in with_task and prompts.NO_TASK not in with_task and "far beyond your viewport" in with_task
+    assert prompts.NO_TASK in without and "same task" not in without and "far beyond" not in without
     assert "`overview`" in with_task and "`overview`" in without
 
 
@@ -395,7 +395,9 @@ def test_spawning_a_successor_ends_the_session_where_it_stands(canvas, tmp_path)
     tool(server, "look")
     tool(server, "move_viewport", {"angle": 0, "distance": 100})
     assert "spawn_successor" in text_of(tool(server, "look"))  # three calls left: the reminder
-    result = tool(server, "spawn_successor", {"note": "Keep going east."})
+    spawn = next(t for t in server.tools() if t["name"] == "spawn_successor")
+    assert spawn["inputSchema"]["properties"] == {}  # no note: the canvas is all it hands on
+    result = tool(server, "spawn_successor", {})
     assert not result["isError"] and "don't call any more tools" in text_of(result)
     assert result["structuredContent"] == {"stop": True}
     assert json.loads((server.s.dir / "successor.json").read_text())["x"] == 100
@@ -404,15 +406,7 @@ def test_spawning_a_successor_ends_the_session_where_it_stands(canvas, tmp_path)
     assert server.s.calls_used == 4  # the refused call after the hand-off doesn't count
 
 
-def test_a_long_note_is_cut_and_the_hand_off_still_happens(canvas, tmp_path):
-    db, row = canvas
-    server = agent(db, row, tmp_path, max_calls=1, successors=True)
-    result = tool(server, "spawn_successor", {"note": "n" * 5000})
-    assert not result["isError"] and "cut" in text_of(result)
-    assert len(json.loads((server.s.dir / "successor.json").read_text())["note"]) == 2000
-
-
-def test_a_handed_off_agent_queues_its_successor_with_its_note(tmp_path, fake_claude, monkeypatch):
+def test_a_handed_off_agent_queues_its_successor_with_only_the_canvas(tmp_path, fake_claude, monkeypatch):
     monkeypatch.setenv("PATH", f"{fake_claude.parent}:{__import__('os').environ['PATH']}")
     flag = tmp_path / "handoff"
     flag.touch()
@@ -428,14 +422,14 @@ def test_a_handed_off_agent_queues_its_successor_with_its_note(tmp_path, fake_cl
     assert (child["x"], child["y"]) == (parent["x"], parent["y"]) == (5 + 192, 7)
     c = child["config"]
     assert (c["generation"], c["parent_id"], c["lineage"]) == (2, parent["id"], parent["id"])
-    assert c["handoff_note"] == "Finish the red line to the east." and c["pair_id"] == parent["config"]["pair_id"] == PAIR
+    assert "handoff_note" not in c and c["pair_id"] == parent["config"]["pair_id"] == PAIR
     run_agent(db, child["id"])  # the flag is gone, so this one paints to the end of its budget
     conn = connect(db, readonly=True)
     done = views.canvas(conn, row["id"])["agents"][1]
     assert done["status"] == "finished" and done["calls_used"] == 20
     request = json.loads(conn.execute("SELECT request FROM sessions WHERE id=?", (done["session_id"],)).fetchone()[0])
     assert "session 2 of this painter" in request["content"][0]["text"]
-    assert "Finish the red line" in request["content"][0]["text"]
+    assert "only the canvas" in request["content"][0]["text"]
     assert "spawn_successor" in request["system"] and "spawn_successor" in request["tools"]
 
 

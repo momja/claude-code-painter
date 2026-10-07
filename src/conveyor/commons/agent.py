@@ -11,8 +11,9 @@ and shutting the server down work like they do for runs and studio paintings.
 An agent's model sessions are recorded under `canvas-<canvas id>` instead of a run, so the dashboard's session
 drawer shows its transcript and replays its viewport, and the run list doesn't fill up with agents.
 
-An agent may call `spawn_successor`, which ends its session and leaves a note. This process then queues a new
-agent with the same settings where the viewport stopped, one generation on, and the launcher starts it. A
+An agent may call `spawn_successor`, which ends its session. This process then queues a new agent with the same
+settings where the viewport stopped, one generation on, and the launcher starts it. The successor gets no note, only
+the canvas. A
 successor only queues while the session's usage windows are under `--max-usage`, so a chain of agents stops
 itself before it eats the rest of a plan's window.
 """
@@ -132,12 +133,12 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued") -
         conn.close()
 
 
-def queue_successor(canvas: SharedCanvas, row: dict, config: dict, note: str, x: int, y: int) -> dict:
+def queue_successor(canvas: SharedCanvas, row: dict, config: dict, x: int, y: int) -> dict:
     """The agent that carries on from `row`: its settings, one generation on, starting where it stopped."""
     generation = int(config.get("generation", 1)) + 1
     base = config.get("base_name") or row["name"]
     child = {**config, "generation": generation, "parent_id": row["id"], "lineage": config.get("lineage") or row["id"],
-             "base_name": base, "handoff_note": note, "start": [x, y]}
+             "base_name": base, "start": [x, y]}
     agent_id, name = new_id(), f"{base} #{generation}"
     canvas.conn.execute("INSERT INTO canvas_agents (id, canvas_id, name, created, status, config, x, y, calls_used, "
                         "max_calls) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, 0, ?)",
@@ -225,9 +226,7 @@ def run_agent(db: Path, agent_id: str) -> None:
         first, second, third = prompts.FIRST_MESSAGE
         content = []
         if int(config.get("generation", 1)) > 1:
-            note = (config.get("handoff_note") or "").strip()
-            content.append({"type": "text", "text": prompts.SUCCESSOR_MESSAGE.format(
-                generation=config["generation"], note=note or "(It left no note.)")})
+            content.append({"type": "text", "text": prompts.SUCCESSOR_MESSAGE.format(generation=config["generation"])})
         content += [{"type": "text", "text": first.format(x=x, y=y)}, {"type": "png", "data": view}]
         if sheet:
             content += [{"type": "text", "text": second}, {"type": "png", "data": sheet}]
@@ -276,7 +275,7 @@ def run_agent(db: Path, agent_id: str) -> None:
             if full:
                 status, error = "finished", f"It asked for a successor, but none was started: {full}."
             else:
-                child = queue_successor(canvas, row, config, handoff.get("note", ""), latest["x"], latest["y"])
+                child = queue_successor(canvas, row, config, latest["x"], latest["y"])
                 status, error = "handed_off", None
                 print(f"Agent {agent_id} handed off to {child['name']} ({child['id']})")
         elif used >= max_calls:
