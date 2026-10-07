@@ -35,10 +35,12 @@ import numpy as np
 from conveyor.commons import prompts
 from conveyor.commons.lettering import MAX_MESSAGE
 from conveyor.commons.lettering import MAX_SCALE
+from conveyor.commons.lettering import draw_messages
 from conveyor.commons.lettering import text_mask
 from conveyor.commons.lettering import wrap
 from conveyor.commons.overview import OVERVIEW_SIDE
 from conveyor.commons.overview import overview_png
+from conveyor.commons.tiles import DEFAULT_INK
 from conveyor.commons.tiles import MOVE_SHARE
 from conveyor.commons.tiles import SharedCanvas
 from conveyor.commons.tiles import encode_tile
@@ -124,8 +126,14 @@ class AgentSession:
             (self.dir / entry["snapshot"]).write_bytes(encode_tile(to_uint8(snapshot)))
         self._log.write(json.dumps(entry, default=str) + "\n")
 
+    def _seen(self) -> np.ndarray:
+        """The viewport as the agent sees it: the paint, with the text layer on top. Paint calls work on the paint
+        alone, so an instrument that reads the canvas never picks up lettering."""
+        x, y, s = self.x, self.y, self.size
+        return draw_messages(self.canvas.read(x, y, s, s).image(), x, y, self.canvas.messages(x, y, x + s, y + s))
+
     def _viewport(self) -> Canvas:
-        return Canvas(self.size, self.size, image=self.canvas.read(self.x, self.y, self.size, self.size).image())
+        return Canvas(self.size, self.size, image=self._seen())
 
     # ---- the tools ------------------------------------------------------------------------------------------
 
@@ -164,13 +172,14 @@ class AgentSession:
         raise ToolFailure(f"No tool named {name}.")
 
     def look(self, tool_use_id: str | None = None) -> list[dict]:
-        img = self.canvas.read(self.x, self.y, self.size, self.size).image()
+        img = self._seen()
         self._op("look", "view", {}, tool_use_id=tool_use_id)
         return [text("Your viewport as it is now, labelled in viewport pixels."), image(gridded_png(img))]
 
     def overview(self, tool_use_id: str | None = None) -> list[dict]:
         viewport = (self.x, self.y, self.x + self.size, self.y + self.size)
         img, (x0, y0, x1, y1), scale = self.canvas.overview(viewport, OVERVIEW_SIDE)
+        img = to_uint8(draw_messages(img.astype(np.float32) / 255.0, x0, y0, self.canvas.messages(x0, y0, x1, y1), scale))
         self._op("overview", "view", {}, f"x {x0} to {x1}, y {y0} to {y1}", tool_use_id=tool_use_id)
         size = "at full size" if scale >= 1 else f"shrunk so one picture pixel is {1 / scale:.3g} canvas pixels"
         return [text(f"The whole canvas, x {x0} to {x1} and y {y0} to {y1}: everything painted so far and your "
@@ -190,7 +199,7 @@ class AgentSession:
         distance = min(max(distance, 0.0), limit)
         dx, dy = round(distance * math.cos(math.radians(angle))), round(distance * math.sin(math.radians(angle)))
         self.x, self.y = self.x + dx, self.y + dy
-        img = self.canvas.read(self.x, self.y, self.size, self.size).image()
+        img = self._seen()
         self._op("move_viewport", "moved", {"angle": angle, "distance": round(distance, 1)}, f"moved by ({dx}, {dy})",
                  snapshot=img, tool_use_id=tool_use_id)
         return [text(f"Moved {distance:.0f} px toward {angle:g} degrees: by {dx} in x and {dy} in y. "
@@ -275,9 +284,8 @@ class AgentSession:
                 raise ToolFailure(f"scale must be 1 to {MAX_SCALE}.")
             if not (0 <= x < self.size and 0 <= y < self.size):
                 raise ToolFailure(f"x and y must be inside the viewport, 0 to {self.size}.")
-            ink = np.asarray(parse_color(args.get("color", "#1d2a3a")), dtype=np.float32)
-            background = args.get("background")
-            paper = np.asarray(parse_color(background), dtype=np.float32) if background else None
+            color = str(args.get("color") or DEFAULT_INK)
+            parse_color(color)
         except (TypeError, ValueError, CanvasError) as e:
             self._op("write_message", "rejected", args, str(e), tool_use_id=tool_use_id)
             raise ToolFailure(f"{e}. Nothing was written.") from None
@@ -286,22 +294,17 @@ class AgentSession:
             raise ToolFailure(f"{e} Nothing was written.") from None
         mask = text_mask(message, self.size - x, scale)[: self.size - y, : self.size - x]
         h, w = mask.shape
-        covered = h * w if paper is not None else int(mask.sum())
+        covered = int(mask.sum())
         if covered > self.area_cap:
             self._op("write_message", "rejected", args, "over the area limit", tool_use_id=tool_use_id)
-            raise ToolFailure(f"That message would cover {covered} pixels, past the area limit of {self.area_cap} one call may cover. "
-                              "Write less, use a smaller scale, or drop the background. Nothing was written.")
-        with self.canvas.transaction():
-            region = self.canvas.read(self.x, self.y, self.size, self.size)
-            img = region.image()
-            window = img[y:y + h, x:x + w]
-            if paper is not None:
-                window[:] = paper
-            window[mask] = ink
-            tiles = region.changed(img)
-            self._op("write_message", "painted", args, message, tiles=tiles, snapshot=img, tool_use_id=tool_use_id)
+            raise ToolFailure(f"That message's letters would cover {covered} pixels, past the area limit of "
+                              f"{self.area_cap} one call may cover. Write less or use a smaller scale. Nothing was written.")
+        # The message is the op itself: the text layer reads it back from the log, and no tile changes.
+        self._op("write_message", "written", {"text": message, "x": x, "y": y, "scale": scale, "color": color},
+                 message, tool_use_id=tool_use_id)
         lines = len(wrap(message, self.size - x, scale))
-        return f"Wrote {len(message)} characters in {lines} line{'s' if lines != 1 else ''}, {w} x {h} px from ({x}, {y})."
+        return (f"Wrote {len(message)} characters in {lines} line{'s' if lines != 1 else ''}, {w} x {h} px from "
+                f"({x}, {y}), above the paint. Paint won't cover it.")
 
 
 class CommonsServer(StdioServer):
@@ -349,16 +352,16 @@ class CommonsServer(StdioServer):
                  "distance": {"type": "number", "minimum": 0, "maximum": int(MOVE_SHARE * s),
                               "description": f"Pixels to move. Default {int(MOVE_SHARE * s)}."}},
                  "required": ["angle"], "additionalProperties": False}},
-            {"name": "write_message", "description": "Set ASCII text in your viewport as pixels, wrapped at the "
-             "viewport's right edge. Others read it only by seeing it, and it can be painted over like paint.",
+            {"name": "write_message", "description": "Set ASCII text in your viewport, wrapped at the viewport's "
+             "right edge. It floats above the paint: every agent whose view takes in that spot sees it, paint never "
+             "covers it, and it can't be erased.",
              "inputSchema": {"type": "object", "properties": {
                  "text": {"type": "string", "maxLength": MAX_MESSAGE, "description": "Printable ASCII; newlines break lines."},
                  "x": {"type": "number", "minimum": 0, "maximum": s, "description": "Left edge of the text."},
                  "y": {"type": "number", "minimum": 0, "maximum": s, "description": "Top edge of the text."},
                  "color": {"type": "string", "description": "Hex colour of the letters. Default #1d2a3a."},
                  "scale": {"type": "integer", "minimum": 1, "maximum": MAX_SCALE,
-                           "description": "Pixels per font pixel: a letter is 6 x 11 font pixels. Default 2."},
-                 "background": {"type": "string", "description": "Optional hex colour painted behind the text block."}},
+                           "description": "Pixels per font pixel: a letter is 6 x 11 font pixels. Default 2."}},
                  "required": ["text", "x", "y"], "additionalProperties": False}},
         ]
 

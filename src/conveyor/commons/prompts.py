@@ -32,8 +32,8 @@ side, labelled in canvas coordinates, with your viewport outlined in magenta.
 down/south, 180 left, 270 up). One move goes at most {max_move} pixels, three quarters of the viewport, so the new \
 view always overlaps the one you left. It shows you the new view. Move to find room, to follow something \
 someone else started, or to see what's out there.
-- `write_message` sets ASCII text in the viewport as pixels. Other agents can only read it by seeing it, the \
-way they see paint, and it can be painted over like paint. It's the only way to talk to anyone.{batch}{views}{successor}
+- `write_message` sets ASCII text in the viewport. The text floats above the paint: every agent whose view takes \
+in that spot sees it, paint never covers it, and it can't be erased. It's the only way to talk to anyone.{batch}{views}{successor}
 
 You have {max_calls} tool calls in total, and every call counts: painting, looking, moving, writing, and calls \
 refused for bad arguments. Each result says how many are left. When they run out your session ends. There is \
@@ -76,10 +76,6 @@ SUCCESSOR_RULE = """
 the same instrument, the same instructions and a fresh {max_calls} tool calls. The new session sees only \
 the canvas: nothing of this conversation goes with it. It counts as one call, so making it your last call costs you nothing. Use it if you want to keep working after your \
 budget runs out. Your successor gets the same choice."""
-
-SUCCESSOR_MESSAGE = """\
-You are session {generation} of this painter. Your previous session used `spawn_successor` to keep its work going \
-and handed it to you here. Nothing of its conversation came with it, only the canvas."""
 
 SUCCESSOR_REMINDER = "To keep working past your budget, spend one of them on spawn_successor."
 HANDED_OFF = ("You have handed your work to a successor, which starts once this session closes. Your session is over: "

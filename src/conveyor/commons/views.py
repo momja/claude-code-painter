@@ -6,8 +6,9 @@ import json
 import sqlite3
 import time
 
+from conveyor.commons.tiles import message
+
 STALE_SECONDS = 20 * 60  # an agent marked running with no call for this long died without closing its row
-RECENT_MESSAGES = 40
 LIVE = ("queued", "starting", "running")
 
 
@@ -37,8 +38,9 @@ def canvases(conn: sqlite3.Connection) -> list[dict]:
 
 
 def canvas(conn: sqlite3.Connection, canvas_id: str, since: int = 0) -> dict:
-    """The canvas now: its agents, the tiles whose head moved after op `since` (all of them from 0), recent
-    messages, and the newest op, which the page passes back as `since` on its next poll."""
+    """The canvas now: its agents, the tiles whose head moved after op `since` (all of them from 0), the messages
+    written after it, and the newest op, which the page passes back as `since` on its next poll. A message comes
+    in canvas pixels with its wrapped lines, the way the text layer draws it."""
     row = conn.execute("SELECT * FROM canvases WHERE id=?", (canvas_id,)).fetchone()
     if row is None:
         raise KeyError(canvas_id)
@@ -48,11 +50,12 @@ def canvas(conn: sqlite3.Connection, canvas_id: str, since: int = 0) -> dict:
     heads = [list(r) for r in conn.execute("SELECT tx, ty, seq FROM canvas_heads WHERE canvas_id=? AND seq>?",
                                             (canvas_id, since))]
     seq = conn.execute("SELECT max(seq) FROM canvas_ops WHERE canvas_id=?", (canvas_id,)).fetchone()[0] or 0
-    messages = [dict(r) for r in conn.execute(
-        "SELECT seq, agent_id, ts, note AS text, x, y, args FROM canvas_ops WHERE canvas_id=? AND tool='write_message' "
-        "AND status='painted' ORDER BY seq DESC LIMIT ?", (canvas_id, RECENT_MESSAGES))]
-    for m in messages:
-        m["args"] = json.loads(m["args"] or "{}")
+    messages = []
+    for r in conn.execute("SELECT seq, agent_id, ts, x, y, args FROM canvas_ops WHERE canvas_id=? AND seq>? AND "
+                          "tool='write_message' AND status IN ('painted', 'written') ORDER BY seq", (canvas_id, since)):
+        m = message(r["seq"], r["x"], r["y"], json.loads(r["args"]), int(meta["config"]["viewport"]))
+        messages.append({**m, "agent_id": r["agent_id"], "ts": r["ts"],
+                         "color": "#%02x%02x%02x" % tuple(round(c * 255) for c in m["color"])})
     return {"canvas": meta, "agents": agents, "heads": heads, "seq": seq, "since": since, "messages": messages,
             "now": time.time()}
 

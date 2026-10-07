@@ -15,6 +15,7 @@ from PIL import Image
 
 from conveyor.__main__ import build_parser
 from conveyor.commons import catalog
+from conveyor.commons import lettering
 from conveyor.commons import prompts
 from conveyor.commons import views
 from conveyor.commons.agent import create_agent
@@ -170,55 +171,48 @@ def test_a_move_goes_at_most_three_quarters_of_the_viewport(canvas, tmp_path):
     assert tool(server, "move_viewport", {"distance": 5})["isError"]
 
 
-def test_messages_are_pixels_that_can_be_painted_over(canvas, tmp_path):
+def test_messages_float_above_the_paint_for_every_agent(canvas, tmp_path):
     db, row = canvas
     server = agent(db, row, tmp_path)
     result = tool(server, "write_message", {"text": "MEET AT 900,0", "x": 10, "y": 10, "scale": 2, "color": "#000000"})
     assert not result["isError"], text_of(result)
-    img = SharedCanvas(db, row["id"]).read(0, 0, 256, 256).image()
-    ink = img[10:36, 10:200].min(axis=-1) < 0.05
-    assert ink.sum() > 100 and not (img[60:, :].min(axis=-1) < 0.05).any()
+    shared = SharedCanvas(db, row["id"])
+    assert views.canvas(connect(db, readonly=True), row["id"])["heads"] == []  # no tile changed: tiles hold paint only
+    dark = lambda img: img.min(axis=-1) < 0.05  # noqa: E731
+    ink = dark(server.s._seen()[10:36, 10:200]).sum()
+    assert ink > 100
     tool(server, "paint_batch", {"tool": "stroke", "defaults": {"length": 200, "size": 12, "color": "#ffffff",
                                                                "pressure": 1.0, "angle": 0},
                                  "calls": [{"x": 10, "y": 14}, {"x": 10, "y": 30}]})
-    img = SharedCanvas(db, row["id"]).read(0, 0, 256, 256).image()
-    assert (img[10:36, 10:200].min(axis=-1) < 0.05).sum() < ink.sum() / 4
-    huge = tool(server, "write_message", {"text": "x" * 200, "x": 0, "y": 0, "scale": 4, "background": "#ffffff"})
+    assert shared.read(0, 0, 256, 256).image()[14, 60].min() > 0.95  # the paint went down
+    assert dark(server.s._seen()[10:36, 10:200]).sum() == ink  # and the text is still on top of it
+    other = agent(db, row, tmp_path, x=5, y=4, name="b")  # another agent sees it where it is on the canvas
+    assert not tool(other, "look")["isError"]
+    assert dark(other.s._seen()[6:32, 5:195]).sum() == ink
+    huge = tool(server, "write_message", {"text": "x" * 200, "x": 0, "y": 0, "scale": 4})
     assert huge["isError"] and "area" in text_of(huge)
+    tool(other, "write_message", {"text": "hi", "x": 0, "y": 100})
     messages = views.canvas(connect(db, readonly=True), row["id"])["messages"]
-    assert [m["text"] for m in messages] == ["MEET AT 900,0"]
+    assert [(m["text"], m["x"], m["y"]) for m in messages] == [("MEET AT 900,0", 10, 10), ("hi", 5, 104)]
+    assert messages[0]["lines"] == ["MEET AT 900,0"] and messages[0]["color"] == "#000000"
 
 
-def test_the_overview_shows_all_the_paint_shrunk_with_the_viewport_outlined(canvas, tmp_path):
+def test_messages_painted_into_tiles_before_the_text_layer_come_back_on_top(canvas, tmp_path):
     db, row = canvas
-    near, far = agent(db, row, tmp_path, name="near"), agent(db, row, tmp_path, x=3000, y=1000, name="far")
     shared = SharedCanvas(db, row["id"])
-    img, window, scale = shared.overview((0, 0, 256, 256), 512)
-    assert window == (0, 0, 256, 256) and scale == 1 and (img == PAPER_RGB).all()  # blank paper: just the viewport
-    tool(near, "stroke", stroke(10, 10))
-    tool(far, "stroke", stroke(10, 10, color="#2040a0"))
-    img, window, scale = shared.overview((0, 0, 256, 256), 512)
-    assert window == (0, 0, 24 * TILE, 8 * TILE) and scale == 512 / (24 * TILE) and img.shape == (171, 512, 3)
-    blue = (img[..., 2].astype(int) - img[..., 0] > 60).nonzero()
-    assert blue[1].min() >= int(3000 * scale) - 1 and blue[0].min() >= int(1000 * scale) - 1  # far's stroke, in place
-    result = tool(near, "overview")
-    assert not result["isError"] and "x 0 to 3072 and y 0 to 1024" in text_of(result) and "magenta" in text_of(result)
-    with Image.open(io.BytesIO(base64.b64decode(result["content"][1]["data"]))) as pic:
-        arr = np.asarray(pic.convert("RGB")).astype(int)
-    assert pic.width <= 512 + 2 * 60 and pic.height < pic.width
-    magenta = (arr[..., 0] > 200) & (arr[..., 1] < 60) & (arr[..., 2] > 130)
-    assert magenta.any() and magenta.nonzero()[1].max() < pic.width / 4  # near's viewport, at the left
-    assert "18 left" in text_of(result)  # it costs a call like any other
-    assert views.history(connect(db, readonly=True), row["id"])["ops"][-1][2] == "overview"
+    shared.record(agent_id="old", tool="write_message", status="painted", x=0, y=0, note="FROM BEFORE",
+                  args={"text": "FROM BEFORE", "x": 20, "y": 40, "background": "#ffffff"})
+    assert [m["text"] for m in shared.messages(0, 0, 256, 256)] == ["FROM BEFORE"]
+    assert shared.messages(300, 0, 400, 100) == []
 
 
-def test_a_canvas_task_reaches_every_agent_word_for_word(tmp_path):
-    config = {"source": ROUND, "prompt": "Paint big."}
-    task = "A lighthouse on a cliff at night,\nits beam crossing the whole sky."
-    with_task, without = system_prompt(config, 256, 0, 0, 20, task), system_prompt(config, 256, 0, 0, 20)
-    assert task in with_task and prompts.NO_TASK not in with_task and "far beyond your viewport" in with_task
-    assert prompts.NO_TASK in without and "same task" not in without and "far beyond" not in without
-    assert "`overview`" in with_task and "`overview`" in without
+def test_lettering_is_outlined_so_dark_ink_reads_on_dark_paint():
+    black = np.zeros((40, 120, 3), dtype=np.float32)
+    m = {"x": 4, "y": 4, "text": "DARK", "scale": 2, "width": 116, "height": 36, "color": (0.0, 0.0, 0.0)}
+    out = lettering.draw_messages(black, 0, 0, [m])
+    assert (out.min(axis=-1) > 0.85).sum() > 50  # a light outline around black letters
+    small = lettering.draw_messages(np.zeros((10, 30, 3), dtype=np.float32), 0, 0, [m], scale=0.25)
+    assert small.max() > 0.1  # shrunk for an overview, the text still shows
 
 
 def test_the_pen_keeps_its_state_across_calls(canvas, tmp_path):
@@ -428,8 +422,11 @@ def test_a_handed_off_agent_queues_its_successor_with_only_the_canvas(tmp_path, 
     done = views.canvas(conn, row["id"])["agents"][1]
     assert done["status"] == "finished" and done["calls_used"] == 20
     request = json.loads(conn.execute("SELECT request FROM sessions WHERE id=?", (done["session_id"],)).fetchone()[0])
-    assert "session 2 of this painter" in request["content"][0]["text"]
-    assert "only the canvas" in request["content"][0]["text"]
+    # It starts like an agent spawned by hand at that spot: the same prompt, and nothing saying it's a successor.
+    first = json.loads(conn.execute("SELECT request FROM sessions WHERE id=?", (parent["session_id"],)).fetchone()[0])
+    assert request["system"].replace("(197, 7)", "(5, 7)") == first["system"]
+    assert request["content"][0]["text"] == "Your viewport as it is now, top-left corner at canvas (197, 7):"
+    assert not any("session" in b.get("text", "") for b in request["content"])
     assert "spawn_successor" in request["system"] and "spawn_successor" in request["tools"]
 
 

@@ -72,6 +72,7 @@ dialog::backdrop{background:#0006}
     <button id="zoom-out" aria-label="Zoom out">−</button><span id="zoom-label" class="muted">100%</span><button id="zoom-in" aria-label="Zoom in">+</button>
     <button id="fit">Fit painting</button><button id="home">Origin</button>
     <label class="check" style="margin:0"><input id="show-agents" type="checkbox" checked> Viewports</label>
+    <label class="check" style="margin:0"><input id="show-text" type="checkbox" checked> Text</label>
     <span class="spacer"></span><span id="where" class="muted"></span>
   </div>
   <div id="task-bar" hidden><b>Task</b> <span id="task-text"></span></div>
@@ -113,7 +114,7 @@ dialog::backdrop{background:#0006}
     </form>
   </section>
   <section aria-labelledby="agents-title"><h2 id="agents-title">Agents</h2><div id="agents" class="agents"><p class="muted">None yet.</p></div></section>
-  <section aria-labelledby="messages-title"><h2 id="messages-title">Messages on the canvas</h2><p class="muted" style="font-size:12px;margin-top:-4px">Agents read these only as pixels. Click one to find it.</p><div id="messages" class="msgs"></div></section>
+  <section aria-labelledby="messages-title"><h2 id="messages-title">Messages on the canvas</h2><p class="muted" style="font-size:12px;margin-top:-4px">Text floats above the paint, for agents and here; paint never covers it. Click one to find it.</p><div id="messages" class="msgs"></div></section>
 </aside>
 </main>
 <dialog id="canvas-dialog"><form method="dialog" id="canvas-form">
@@ -211,8 +212,26 @@ function draw(){
     ctx.stroke();
   }
   const [ox, oy] = toScreen(0, 0); ctx.strokeStyle = "rgba(47,75,143,.35)"; ctx.beginPath(); ctx.moveTo(ox - 8, oy); ctx.lineTo(ox + 8, oy); ctx.moveTo(ox, oy - 8); ctx.lineTo(ox, oy + 8); ctx.stroke();
+  if($("show-text").checked) drawText();
   if($("show-agents").checked) for(const a of viewports()) frame(a.x, a.y, color(a.id, a.active ? .95 : .35), a.label, !a.active);
   if(S.spawn) frame(S.spawn[0], S.spawn[1], "rgba(31,35,40,.8)", "new agent starts here", true);
+}
+// Messages sit above the paint. Each is drawn letter by letter on the 6 x 13 font grid it was set in, outlined
+// in a contrasting colour the way agents see it. Too small to read, it shows as a faint box so it can be found.
+function drawText(){
+  const at = S.mode === "replay" ? (S.history.ops[S.idx]?.[0] ?? 0) : Infinity;
+  for(const m of S.messages){
+    if(m.seq > at) continue;
+    const s = m.scale * S.cam.z, [sx, sy] = toScreen(m.x, m.y);
+    if(sx > cv.width || sy > cv.height || sx + m.w * S.cam.z < 0 || sy + m.h * S.cam.z < 0) continue;
+    if(11 * s < 5){ ctx.fillStyle = "rgba(230,0,160,.35)"; ctx.fillRect(sx, sy, Math.max(2, m.w * S.cam.z), Math.max(2, m.h * S.cam.z)); continue; }
+    const rgb = [1, 3, 5].map(i => parseInt(m.color.slice(i, i + 2), 16) / 255), light = .2126 * rgb[0] + .7152 * rgb[1] + .0722 * rgb[2] > .5;
+    ctx.save(); ctx.font = `${Math.round(10 * s)}px ui-monospace,SFMono-Regular,Menlo,monospace`; ctx.textBaseline = "top";
+    ctx.lineJoin = "round"; ctx.lineWidth = 2 * s; ctx.strokeStyle = light ? "#141419" : "#f7f2e6"; ctx.fillStyle = m.color;
+    m.lines.forEach((line, row) => { if((row + 1) * 13 * m.scale > m.height) return;
+      [...line].forEach((c, col) => { const x = sx + col * 6 * s, y = sy + row * 13 * s; ctx.strokeText(c, x, y); ctx.fillText(c, x, y); }); });
+    ctx.restore();
+  }
 }
 function frame(x, y, stroke, label, dashed){
   const [sx, sy] = toScreen(x, y), side = S.size * S.cam.z;
@@ -252,7 +271,7 @@ function fit(){
   centerOn((minX + maxX) / 2, (minY + maxY) / 2, Math.min(4, (r.width - 40) / (maxX - minX), (r.height - 40) / (maxY - minY)));
 }
 $("zoom-in").onclick = () => setZoom(S.cam.z * 1.25); $("zoom-out").onclick = () => setZoom(S.cam.z / 1.25);
-$("fit").onclick = fit; $("home").onclick = () => centerOn(S.size / 2, S.size / 2, 1); $("show-agents").onchange = draw;
+$("fit").onclick = fit; $("home").onclick = () => centerOn(S.size / 2, S.size / 2, 1); $("show-agents").onchange = $("show-text").onchange = draw;
 let drag = null;
 $("wrap").onpointerdown = e => { if(e.button !== 0) return; drag = {x:e.clientX, y:e.clientY, cx:S.cam.x, cy:S.cam.y, moved:false}; $("wrap").setPointerCapture(e.pointerId); };
 $("wrap").onpointermove = e => {
@@ -281,7 +300,7 @@ async function poll(){
     const r = await api(`/api/canvases/${encodeURIComponent(cid)}?since=${S.seq}`);
     if(cid !== S.cid) return;
     for(const [tx, ty, seq] of r.heads) S.heads.set(`${tx},${ty}`, seq);
-    S.seq = r.seq; S.agents = r.agents; S.messages = r.messages; S.canvas = r.canvas; S.size = r.canvas.config.viewport;
+    S.seq = r.seq; S.agents = r.agents; S.messages = r.since ? S.messages.concat(r.messages) : r.messages; S.canvas = r.canvas; S.size = r.canvas.config.viewport;
     $("task-bar").hidden = !r.canvas.config.task; $("task-text").textContent = r.canvas.config.task || "";
     const option = [...$("canvas-select").options].find(o => o.value === cid);
     if(option) option.textContent = `${r.canvas.name} · ${S.size}px · ${S.agents.length} agents`;
@@ -314,7 +333,7 @@ function renderAgents(){
   }).join("");
 }
 function renderMessages(){
-  $("messages").innerHTML = S.messages.length ? S.messages.map(m => `<button class="msg" style="--c:${color(m.agent_id)}" data-at="${m.x + (m.args.x || 0)},${m.y + (m.args.y || 0)}"><span class="muted">${esc(agentName(m.agent_id))} · ${new Date(m.ts * 1000).toLocaleTimeString()}</span><q>${esc(m.text)}</q></button>`).join("") : `<p class="muted">None yet.</p>`;
+  $("messages").innerHTML = S.messages.length ? S.messages.slice(-40).reverse().map(m => `<button class="msg" style="--c:${color(m.agent_id)}" data-at="${m.x},${m.y}"><span class="muted">${esc(agentName(m.agent_id))} · ${new Date(m.ts * 1000).toLocaleTimeString()}</span><q>${esc(m.text)}</q></button>`).join("") : `<p class="muted">None yet.</p>`;
 }
 $("agents").onclick = async e => {
   const find = e.target.closest("[data-find]"), stop = e.target.closest("[data-stop]");

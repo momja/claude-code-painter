@@ -31,7 +31,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from conveyor.commons.lettering import GLYPH_W
+from conveyor.commons.lettering import LINE_H
+from conveyor.commons.lettering import wrap
 from conveyor.painting.canvas import PAPER
+from conveyor.painting.canvas import parse_color
 from conveyor.store import BUSY_TIMEOUT
 from conveyor.store import dumps
 from conveyor.store import init_db
@@ -43,6 +47,7 @@ DEFAULT_VIEWPORT = 512
 DEFAULT_MAX_CALLS = 100
 VIEWPORT_RANGE = (128, 1024)
 MAX_TASK = 2000  # characters in a canvas's task
+DEFAULT_INK = "#1d2a3a"
 MOVE_SHARE = 0.75  # the farthest one move goes, as a share of the viewport side; consecutive views always overlap
 
 
@@ -63,6 +68,18 @@ def decode_tile(data: bytes) -> np.ndarray:
 
 def blank_tile() -> np.ndarray:
     return np.broadcast_to(PAPER_RGB, (TILE, TILE, 3)).copy()
+
+
+def message(seq: int, vx: int, vy: int, args: dict, viewport: int) -> dict:
+    """A `write_message` op as the text layer draws it, in canvas pixels. (vx, vy) is the writer's viewport corner;
+    the text was wrapped at the viewport's right edge and cut at its bottom, and stays that way."""
+    ax, ay, scale = int(round(float(args.get("x", 0)))), int(round(float(args.get("y", 0)))), int(args.get("scale", 2))
+    width, height = viewport - ax, viewport - ay
+    lines = wrap(args["text"], width, scale)
+    return {"seq": seq, "x": vx + ax, "y": vy + ay, "text": args["text"], "scale": scale, "width": width,
+            "height": height, "color": parse_color(args.get("color") or DEFAULT_INK), "lines": lines,
+            "w": min(width, max(len(line) for line in lines) * GLYPH_W * scale),
+            "h": min(height, len(lines) * LINE_H * scale)}
 
 
 def create_canvas(db: str | Path, name: str, viewport: int = DEFAULT_VIEWPORT,
@@ -194,6 +211,18 @@ class SharedCanvas:
                 small = im.convert("RGB").resize((right - left, bottom - top), Image.Resampling.BOX)
             out[top:bottom, left:right] = np.asarray(small, dtype=np.uint8)
         return out, (x0, y0, x1, y1), scale
+
+    def messages(self, x0: int, y0: int, x1: int, y1: int) -> list[dict]:
+        """Every message that reaches into the window x0..x1, y0..y1, oldest first. A message is an op, not
+        pixels, so paint never covers one."""
+        size, out = int(self.config["viewport"]), []
+        for row in self.conn.execute("SELECT seq, x, y, args FROM canvas_ops WHERE canvas_id=? AND tool='write_message' "
+                                     "AND status IN ('painted', 'written') ORDER BY seq", (self.canvas_id,)):
+            m = message(row["seq"], row["x"], row["y"], json.loads(row["args"]), size)
+            pad = m["scale"]  # the outline
+            if m["x"] - pad < x1 and m["x"] + m["w"] + pad > x0 and m["y"] - pad < y1 and m["y"] + m["h"] + pad > y0:
+                out.append(m)
+        return out
 
     def record(self, *, agent_id: str | None, tool: str, status: str, x: int, y: int, args: dict | None = None,
                note: str = "", tiles: dict[tuple[int, int], np.ndarray] | None = None) -> int:

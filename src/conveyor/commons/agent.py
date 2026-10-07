@@ -12,8 +12,8 @@ An agent's model sessions are recorded under `canvas-<canvas id>` instead of a r
 drawer shows its transcript and replays its viewport, and the run list doesn't fill up with agents.
 
 An agent may call `spawn_successor`, which ends its session. This process then queues a new agent with the same
-settings where the viewport stopped, one generation on, and the launcher starts it. The successor gets no note, only
-the canvas. A
+settings where the viewport stopped, one generation on, and the launcher starts it. A successor starts exactly like
+an agent spawned by hand at that spot: no note, and nothing in its prompt says it is one. A
 successor only queues while the session's usage windows are under `--max-usage`, so a chain of agents stops
 itself before it eats the rest of a plan's window.
 """
@@ -32,6 +32,7 @@ from pathlib import Path
 
 from conveyor.commons import catalog as catalog_module
 from conveyor.commons import prompts
+from conveyor.commons.lettering import draw_messages
 from conveyor.commons.server import HARNESS_TOOLS
 from conveyor.commons.tiles import MOVE_SHARE
 from conveyor.commons.tiles import SharedCanvas
@@ -222,12 +223,10 @@ def run_agent(db: Path, agent_id: str) -> None:
             "x": x, "y": y, "max_calls": max_calls, "paint_batch": config.get("paint_batch", True),
             "successors": bool(config.get("successors")), "seed": random.randrange(1 << 30)}))
         sheet = sheet_row[0] if sheet_row else probe_source(config["source"], size, size, work)[1]
-        view = gridded_png(canvas.read(x, y, size, size).image())
+        view = gridded_png(draw_messages(canvas.read(x, y, size, size).image(), x, y,
+                                         canvas.messages(x, y, x + size, y + size)))
         first, second, third = prompts.FIRST_MESSAGE
-        content = []
-        if int(config.get("generation", 1)) > 1:
-            content.append({"type": "text", "text": prompts.SUCCESSOR_MESSAGE.format(generation=config["generation"])})
-        content += [{"type": "text", "text": first.format(x=x, y=y)}, {"type": "png", "data": view}]
+        content = [{"type": "text", "text": first.format(x=x, y=y)}, {"type": "png", "data": view}]
         if sheet:
             content += [{"type": "text", "text": second}, {"type": "png", "data": sheet}]
         content.append({"type": "text", "text": third})
