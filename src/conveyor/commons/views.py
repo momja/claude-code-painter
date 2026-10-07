@@ -39,7 +39,7 @@ def canvases(conn: sqlite3.Connection) -> list[dict]:
 
 def canvas(conn: sqlite3.Connection, canvas_id: str, since: int = 0) -> dict:
     """The canvas now: its agents, the tiles whose head moved after op `since` (all of them from 0), the messages,
-    broadcasts and sketch lines after it, the sketch erasures after it, and the newest op, which the page passes back as `since` on its next poll. A message comes
+    broadcasts, reference pictures and sketch lines after it, the sketch erasures after it, and the newest op, which the page passes back as `since` on its next poll. A message comes
     in canvas pixels with its wrapped lines, the way the text layer draws it."""
     row = conn.execute("SELECT * FROM canvases WHERE id=?", (canvas_id,)).fetchone()
     if row is None:
@@ -60,8 +60,17 @@ def canvas(conn: sqlite3.Connection, canvas_id: str, since: int = 0) -> dict:
     for r in conn.execute("SELECT seq, agent_id, ts, x, y, note, args FROM canvas_ops WHERE canvas_id=? AND seq>? "
                           "AND tool='broadcast' AND status='sent' ORDER BY seq", (canvas_id, since)):
         # placed at the middle of its sender's viewport
-        half = int(json.loads(r["args"] or "{}").get("viewport") or meta["config"]["viewport"]) // 2
+        args = json.loads(r["args"] or "{}")
+        half = int(args.get("viewport") or meta["config"]["viewport"]) // 2
         broadcasts.append({"seq": r["seq"], "agent_id": r["agent_id"], "ts": r["ts"], "text": r["note"],
+                           "x": r["x"] + half, "y": r["y"] + half, "image": args.get("image")})
+    references = []  # pictures agents made to study, each with whether it was shared
+    for r in conn.execute("SELECT seq, agent_id, ts, x, y, args FROM canvas_ops WHERE canvas_id=? AND seq>? "
+                          "AND tool='generate_reference' AND status='generated' ORDER BY seq", (canvas_id, since)):
+        args = json.loads(r["args"] or "{}")
+        half = int(args.get("viewport") or meta["config"]["viewport"]) // 2
+        references.append({"seq": r["seq"], "agent_id": r["agent_id"], "ts": r["ts"], "prompt": args.get("prompt"),
+                           "image": args.get("image"), "from_view": bool(args.get("from_view")),
                            "x": r["x"] + half, "y": r["y"] + half})
     sketches, erasures = [], []  # lines drawn after `since`, and [erase seq, [line seqs]] for erasures after it
     for r in conn.execute("SELECT seq, ts, tool, args FROM canvas_ops WHERE canvas_id=? AND seq>? AND "
@@ -72,7 +81,7 @@ def canvas(conn: sqlite3.Connection, canvas_id: str, since: int = 0) -> dict:
         else:
             erasures.append([r["seq"], args.get("seqs", [])])
     return {"canvas": meta, "agents": agents, "heads": heads, "seq": seq, "since": since, "messages": messages,
-            "broadcasts": broadcasts, "sketches": sketches, "erasures": erasures,
+            "broadcasts": broadcasts, "references": references, "sketches": sketches, "erasures": erasures,
             "now": time.time()}
 
 

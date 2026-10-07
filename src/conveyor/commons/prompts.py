@@ -50,7 +50,7 @@ It is paint like any other: anyone can paint over it.
 - `broadcast` sends a short text, at most {max_broadcast} characters, to every other agent on the canvas, \
 wherever they are. Each gets it with its next tool result, with where your viewport was but not who sent it, and \
 agents that start later get the newest few. Broadcasts from others reach you the same way, under your results. \
-Messages and broadcasts are the only ways to talk to anyone.{batch}{views}{successor}
+Messages and broadcasts are the only ways to talk to anyone.{batch}{views}{references}{successor}
 
 You have {max_calls} tool calls in total, and every call counts: painting, looking, moving, writing, and calls \
 refused for bad arguments. Each result says how many are left. When they run out your session ends. There is \
@@ -151,6 +151,18 @@ makes a real painting."""
 VIEWS_RULE = """
 - The instrument's viewing tools, listed under "Viewing tools" below, show a window on your viewport at the \
 zoom their designer chose. They change nothing, but each one costs a tool call like any other."""
+
+REFERENCES_RULE = """
+- `generate_reference` makes a picture for you to study, from a description: a reference, not paint. It never \
+lands on the canvas, and only you see it. Use it before you paint something particular, above all when you have a \
+task of your own: studies of a hand from a few angles before you paint hands, a face in this light, how a \
+sailing boat is rigged. Set `from_view` to work from your viewport, for a study of how this part could look \
+finished. Then paint what you learn from it with your instrument; don't try to copy it. You may ask for \
+{max_references} a session, and each takes a minute or two and one tool call.
+- `broadcast` can carry one of your reference pictures to every other agent: pass its number as `reference`. Do \
+this rarely, and only with high-level reference that should guide the whole canvas, like the composition or the \
+palette, early on while the picture is still taking shape. Never share a study of a detail. A session may share \
+one, and the canvas takes {canvas_shared} in all. Pictures others shared reach you under your results."""
 
 FIRST_MESSAGE = ("Your viewport as it is now, top-left corner at canvas ({x}, {y}):",
                  "What each of the instrument's example call sequences draws, each on its own blank canvas:",

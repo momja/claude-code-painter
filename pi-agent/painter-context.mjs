@@ -59,3 +59,33 @@ export function boundedPainterContext(messages, { keepTurns, state, onTrim }) {
 	onTrim?.({ dropped, kept: retained.length, before_chars: textChars(messages), after_chars: textChars(retained) });
 	return retained;
 }
+
+// GLM answers 400 too_many_images above 8 per request, and a conversation keeps every image it has seen. Keep
+// the first image (the target, or a canvas agent's first view), the newest reference picture the agent made on
+// the canvas, which it is painting from, and the newest of the rest; older canvas views are stale anyway.
+export function trimImages(messages, limit) {
+	if (!limit) return messages;
+	const positions = [];
+	messages.forEach((msg, i) => {
+		if (!Array.isArray(msg.content)) return;
+		const reference = msg.role === "toolResult" && msg.toolName === "generate_reference";
+		msg.content.forEach((block, j) => {
+			if (block.type === "image") positions.push({ key: `${i}:${j}`, i, j, reference });
+		});
+	});
+	if (positions.length <= limit) return messages;
+	const keep = new Set([positions[0].key]);
+	const reference = positions.findLast((p) => p.reference);
+	if (reference) keep.add(reference.key);
+	for (let n = positions.length - 1; n >= 0 && keep.size < limit; n--) keep.add(positions[n].key);
+	const trimmed = messages.slice();
+	const touched = new Map();
+	for (const { key, i, j } of positions) {
+		if (keep.has(key)) continue;
+		const content = (touched.get(i) || trimmed[i].content).slice();
+		content[j] = { type: "text", text: "[older image dropped: the provider limits images per request]" };
+		touched.set(i, content);
+	}
+	for (const [i, content] of touched) trimmed[i] = { ...trimmed[i], content };
+	return trimmed;
+}

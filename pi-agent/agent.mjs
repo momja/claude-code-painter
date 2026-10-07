@@ -29,7 +29,7 @@ import { opencodeGoProvider } from "@earendil-works/pi-ai/providers/opencode-go"
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { JsonCredentialStore } from "./credentials.mjs";
-import { boundedPainterContext, textChars } from "./painter-context.mjs";
+import { boundedPainterContext, textChars, trimImages } from "./painter-context.mjs";
 import { isTransientTransportError, MAX_TRANSPORT_RETRIES, retryDelayMs } from "./transient.mjs";
 
 const LENGTH_NUDGE =
@@ -133,32 +133,6 @@ class McpClient {
 }
 
 // ---- helpers ------------------------------------------------------------------------------------------------
-
-// GLM answers 400 too_many_images above 8 per request, and a conversation keeps every image it has seen. Keep
-// the first image (the target) and the newest ones; older canvas views are stale anyway.
-function trimImages(messages, limit) {
-	if (!limit) return messages;
-	const positions = [];
-	messages.forEach((msg, i) => {
-		if (!Array.isArray(msg.content)) return;
-		msg.content.forEach((block, j) => {
-			if (block.type === "image") positions.push([i, j]);
-		});
-	});
-	if (positions.length <= limit) return messages;
-	const keep = new Set([`${positions[0][0]}:${positions[0][1]}`]);
-	for (const [i, j] of positions.slice(-(limit - 1))) keep.add(`${i}:${j}`);
-	const trimmed = messages.slice();
-	const touched = new Map();
-	for (const [i, j] of positions) {
-		if (keep.has(`${i}:${j}`)) continue;
-		const content = (touched.get(i) || trimmed[i].content).slice();
-		content[j] = { type: "text", text: "[older image dropped: the provider limits images per request]" };
-		touched.set(i, content);
-	}
-	for (const [i, content] of touched) trimmed[i] = { ...trimmed[i], content };
-	return trimmed;
-}
 
 function claudeBlocks(message) {
 	const blocks = [];

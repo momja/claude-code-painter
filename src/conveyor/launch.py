@@ -224,6 +224,7 @@ class Launcher:
             return self._probe[1]
         from conveyor.claude import available as claude_available
         from conveyor.claude import logged_in
+        from conveyor.commons.references import available as references_available
         from conveyor.pi import PROVIDERS
         from conveyor.pi import available as pi_available
         from conveyor.pi import provider_authenticated
@@ -240,7 +241,8 @@ class Launcher:
         out = {"claude": claude,
                "pi": {"ok": problem is None, "detail": problem or "ready", "keys": keys,
                       "env_vars": {k: p.env_var for k, p in PROVIDERS.items() if p.env_var},
-                      "login_commands": {k: p.login_command for k, p in PROVIDERS.items() if p.login_command}}}
+                      "login_commands": {k: p.login_command for k, p in PROVIDERS.items() if p.login_command},
+                      "references": problem is None and references_available()}}
         self._probe = (time.time(), out)
         return out
 

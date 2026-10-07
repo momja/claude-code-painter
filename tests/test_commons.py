@@ -5,6 +5,7 @@ import base64
 import copy
 import io
 import json
+import sys
 import threading
 import time
 import urllib.request
@@ -54,7 +55,7 @@ def canvas(tmp_path):
 
 
 def agent(db: Path, canvas_row: dict, tmp: Path, *, x=0, y=0, source=ROUND, max_calls=None, name="a",
-          successors=False, viewport=None, kind="painter") -> CommonsServer:
+          successors=False, viewport=None, kind="painter", references=False) -> CommonsServer:
     conn = connect(db)
     conn.execute("INSERT INTO canvas_agents (id, canvas_id, created, status, config, x, y, max_calls) "
                  "VALUES (?, ?, ?, 'running', '{}', ?, ?, ?)",
@@ -65,7 +66,8 @@ def agent(db: Path, canvas_row: dict, tmp: Path, *, x=0, y=0, source=ROUND, max_
     d.mkdir()
     (d / "job.json").write_text(json.dumps({"db": str(db), "canvas_id": canvas_row["id"], "agent_id": name,
                                             "source": source, "x": x, "y": y, "max_calls": max_calls,
-                                            "successors": successors, "viewport": viewport, "kind": kind}))
+                                            "successors": successors, "viewport": viewport, "kind": kind,
+                                            "references": references}))
     return CommonsServer(AgentSession(d))
 
 
@@ -235,6 +237,109 @@ def test_a_broadcast_reaches_every_other_agent_with_its_next_result(canvas, tmp_
     assert [(m["text"], m["x"], m["y"]) for m in state["broadcasts"]][0] == (
         "Chapel going up here. Need a stair to the east.", 128, 128)
     assert len(state["broadcasts"]) == 7 and state["messages"] == []
+
+
+@pytest.fixture
+def fake_images(tmp_path, monkeypatch) -> Path:
+    """Reference pictures from tests/fake_image.py; returns the file it logs each request to."""
+    log = tmp_path / "images.jsonl"
+    monkeypatch.setenv("CONVEYOR_IMAGE_COMMAND", f"{sys.executable} {Path(__file__).parent / 'fake_image.py'}")
+    monkeypatch.setenv("FAKE_IMAGE_LOG", str(log))
+    return log
+
+
+def picture(block: dict) -> Image.Image:
+    assert block["type"] == "image"
+    return Image.open(io.BytesIO(base64.b64decode(block["data"])))
+
+
+def test_a_pi_agent_studies_reference_pictures_that_never_touch_the_canvas(canvas, tmp_path, fake_images):
+    db, row = canvas
+    server = agent(db, row, tmp_path, references=True)
+    tools = {t["name"]: t for t in server.tools()}
+    assert "generate_reference" in tools and "reference" in tools["broadcast"]["inputSchema"]["properties"]
+    plain = agent(db, row, tmp_path, name="b")  # a Claude agent, or Pi without the Codex login
+    plain_tools = {t["name"]: t for t in plain.tools()}
+    assert "generate_reference" not in plain_tools and "reference" not in plain_tools["broadcast"]["inputSchema"]["properties"]
+    assert "No tool named generate_reference" in text_of(tool(plain, "generate_reference", {"prompt": "a hand"}))
+
+    made = tool(server, "generate_reference", {"prompt": "A hand, three angles, raking light"})
+    assert not made["isError"] and "Reference picture 1" in text_of(made) and "2 more" in text_of(made)
+    assert picture(made["content"][-1]).size == (512, 342)  # shrunk for the model
+    assert views.canvas(connect(db, readonly=True), row["id"])["heads"] == []  # nothing painted
+    tool(server, "move_viewport", {"angle": 0, "distance": 100})
+    from_view = tool(server, "generate_reference", {"prompt": "This corner, finished", "from_view": True})
+    assert not from_view["isError"] and "and your viewport" in text_of(from_view)
+    failed = tool(server, "generate_reference", {"prompt": "FAIL"})
+    assert failed["isError"] and "quota is used up" in text_of(failed) and "No picture was made" in text_of(failed)
+    over = tool(server, "generate_reference", {"prompt": "one more"})  # the failure counted against the three
+    assert over["isError"] and "all 3" in text_of(over)
+    assert [json.loads(line) for line in fake_images.read_text().splitlines()] == [
+        {"prompt": "A hand, three angles, raking light", "images": 0}, {"prompt": "This corner, finished", "images": 1},
+        {"prompt": "FAIL", "images": 0}]
+    assert server.s.calls_used == 5
+
+    conn = connect(db, readonly=True)
+    refs = views.canvas(conn, row["id"])["references"]
+    assert [(r["prompt"], r["from_view"], r["x"]) for r in refs] == [
+        ("A hand, three angles, raking light", False, 128), ("This corner, finished", True, 228)]
+    stored = conn.execute("SELECT data FROM artifacts WHERE name=?", (refs[0]["image"],)).fetchone()[0]
+    assert Image.open(io.BytesIO(stored)).size == (1024, 683)
+    assert views.canvas(conn, row["id"], since=refs[0]["seq"])["references"] == refs[1:]
+
+
+def test_a_shared_reference_picture_reaches_every_other_agent_once(canvas, tmp_path, fake_images, monkeypatch):
+    db, row = canvas
+    sender = agent(db, row, tmp_path, x=1000, y=0, references=True)
+    other = agent(db, row, tmp_path, name="b")
+    tool(other, "look")
+    nothing = tool(sender, "broadcast", {"text": "Palette: dusk", "reference": 1})
+    assert nothing["isError"] and "no reference pictures" in text_of(nothing)
+    tool(sender, "generate_reference", {"prompt": "The whole harbour at dusk, wide"})
+    bad = tool(sender, "broadcast", {"text": "Palette", "reference": 2})
+    assert bad["isError"] and "1 to 1" in text_of(bad)
+    sent = tool(sender, "broadcast", {"text": "Composition and palette for the harbour", "reference": 1})
+    assert not sent["isError"] and "and your reference picture" in text_of(sent)
+    again = tool(sender, "broadcast", {"text": "And again", "reference": 1})
+    assert again["isError"] and "already shared" in text_of(again)
+    assert "Nothing was sent" in text_of(again)
+
+    heard = tool(other, "look")
+    assert '"Composition and palette for the harbour" (with a reference picture)' in text_of(heard)
+    assert "another agent shared, from around canvas (1128, 128)" in heard["content"][-2]["text"]
+    assert picture(heard["content"][-1]).size == (512, 342)
+    assert len([b for b in tool(other, "look")["content"] if b["type"] == "image"]) == 1  # once: just the view
+    words = tool(other, "broadcast", {"text": "hi", "reference": 1})
+    assert words["isError"] and "can't send pictures" in text_of(words)
+
+    late = agent(db, row, tmp_path, name="c")  # starts after it was shared, and still gets it
+    first = tool(late, "look")
+    assert len([b for b in first["content"] if b["type"] == "image"]) == 2
+    [broadcast] = [b for b in views.canvas(connect(db, readonly=True), row["id"])["broadcasts"] if b["image"]]
+    assert broadcast["image"] == views.canvas(connect(db, readonly=True), row["id"])["references"][0]["image"]
+
+    monkeypatch.setattr("conveyor.commons.server.CANVAS_SHARED", 1)  # the canvas takes only so many
+    second = agent(db, row, tmp_path, name="d", references=True)
+    tool(second, "generate_reference", {"prompt": "Boats"})
+    full = tool(second, "broadcast", {"text": "Boats", "reference": 1})
+    assert full["isError"] and "already has the 1 shared" in text_of(full)
+
+
+def test_reference_pictures_are_for_pi_painters_who_ask_for_them(tmp_path):
+    db = seeded_db(tmp_path)
+    row = create_canvas(db, "C", viewport=256, max_calls=20)
+    config = lambda made: views.canvas(connect(db, readonly=True), row["id"])["agents"][-1]["config"]  # noqa: E731
+    base = {"pair_id": PAIR, "model": "fake-model"}
+    assert config(create_agent(db, row["id"], {**base, "harness": "pi"}))["references"] is True
+    assert config(create_agent(db, row["id"], {**base, "harness": "pi", "references": False}))["references"] is False
+    assert config(create_agent(db, row["id"], {**base, "harness": "claude"}))["references"] is False
+    assert config(create_agent(db, row["id"], {"kind": "judge", "harness": "pi"}))["references"] is False
+    with pytest.raises(LaunchError, match="on or off"):
+        create_agent(db, row["id"], {**base, "references": "yes"})
+    on = system_prompt({"source": ROUND, "prompt": "Paint big.", "references": True}, 256, 0, 0, 20)
+    off = system_prompt({"source": ROUND, "prompt": "Paint big."}, 256, 0, 0, 20)
+    assert "`generate_reference` makes a picture for you to study" in on and "the canvas takes 4 in all" in on
+    assert "generate_reference" not in off
 
 
 def test_a_sketch_from_the_page_floats_above_the_paint_for_every_agent(canvas, tmp_path):

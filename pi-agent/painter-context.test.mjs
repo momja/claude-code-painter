@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boundedPainterContext, textChars } from "./painter-context.mjs";
+import { boundedPainterContext, textChars, trimImages } from "./painter-context.mjs";
 
 const image = (data) => ({ type: "image", data, mimeType: "image/png" });
 const task = () => ({ role: "user", content: [{ type: "text", text: "Target and demo" }, image("target"), image("demo")], timestamp: 1 });
@@ -95,4 +95,17 @@ test("a recovery nudge immediately before retained turns survives", () => {
 test("text metrics count drawing arguments, not image bytes", () => {
 	assert.equal(textChars([{ role: "user", content: [image("x".repeat(10000)), { type: "text", text: "hello" }] }]), 5);
 	assert.equal(textChars([{ role: "assistant", content: [{ type: "toolCall", arguments: { x: 1 } }] }]), 7);
+});
+
+test("an image trim keeps the first image, the newest reference picture and the newest views", () => {
+	const img = (n) => ({ type: "image", data: String(n), mimeType: "image/png" });
+	const messages = [
+		{ role: "user", content: [img(0)] },
+		{ role: "toolResult", toolName: "generate_reference", content: [{ type: "text", text: "ref" }, img(1)] },
+		...[2, 3, 4, 5].map((n) => ({ role: "toolResult", toolName: "look", content: [img(n)] })),
+	];
+	const kept = (out) => out.flatMap((m) => m.content.filter((b) => b.type === "image").map((b) => b.data));
+	assert.deepEqual(kept(trimImages(messages, 4)), ["0", "1", "4", "5"]);
+	assert.deepEqual(kept(trimImages(messages.map((m) => ({ ...m, toolName: "look" })), 4)), ["0", "3", "4", "5"]);
+	assert.equal(trimImages(messages, 10), messages);
 });

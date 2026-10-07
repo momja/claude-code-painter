@@ -4,10 +4,14 @@ One agent on the shared canvas, as an MCP server in its own process.
     python -m conveyor.commons.server <session_dir>
 
 The session directory holds `job.json`: the database, the canvas and agent ids, the instrument's source, the
-viewport's starting corner, and whether batches and successors are on. The server gives the agent the
-instrument's tools on its viewport, plus `look`, `overview`, `move_viewport`, `write_message`, `broadcast`,
-`paint_batch` and `spawn_successor`, and counts every call it receives against the canvas's tool-call budget, refused calls
-included. Past the budget, or once the agent has handed off to a successor, every call is refused.
+viewport's starting corner, and whether batches, successors and reference pictures are on. The server gives the
+agent the instrument's tools on its viewport, plus `look`, `overview`, `move_viewport`, `write_message`, `broadcast`,
+`paint_batch`, `spawn_successor` and `generate_reference`, and counts every call it receives against the canvas's
+tool-call budget, refused calls included. Past the budget, or once the agent has handed off to a successor, every
+call is refused.
+
+`generate_reference` (Pi agents with the OpenAI Codex login, see references.py) makes a picture the agent studies
+and never paints. `broadcast` can carry one of them to every other agent, who get it under their next result.
 
 `spawn_successor` only writes `successor.json` with where the agent's viewport stands. The host
 process queues the successor once the session has closed (see agent.py).
@@ -24,6 +28,7 @@ host copies into the session's stroke log, so the dashboard's session drawer can
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import sys
@@ -42,6 +47,12 @@ from conveyor.commons.overview import OVERVIEW_SIDE
 from conveyor.commons.overview import REGION
 from conveyor.commons.overview import overview_png
 from conveyor.commons.overview import region
+from conveyor.commons.references import MAX_PROMPT
+from conveyor.commons.references import SHOWN_SIDE
+from conveyor.commons.references import STORED_SIDE
+from conveyor.commons.references import ReferenceFailed
+from conveyor.commons.references import generate
+from conveyor.commons.references import shrink
 from conveyor.commons.sketch import bounds
 from conveyor.commons.sketch import lines as sketch_lines
 from conveyor.commons.tiles import DEFAULT_INK
@@ -68,8 +79,12 @@ MAX_BROADCAST = 280  # characters in one broadcast
 BROADCASTS_SHOWN = 5  # the most broadcasts one result carries; the newest are kept
 SUCCESSOR_WINDOW = 10  # spawn_successor works only in an agent's last this-many calls, so a session stays put
 OUTSIDE = (38, 38, 46)  # how the overview shows what lies outside a canvas's frame
+MAX_REFERENCES = 3  # reference pictures one agent may ask for, failures included: a failed one may still use quota
+CANVAS_SHARED = 4  # reference pictures a whole canvas takes through broadcasts, one an agent at most
+SHARED_SHOWN = 2  # the most shared pictures one result carries; the newest are kept
 JUDGE_TOOLS = ("look", "overview", "move_viewport", "write_message")  # a judge looks, moves and writes; it never paints
-HARNESS_TOOLS = ("look", "overview", "move_viewport", "write_message", "broadcast", "paint_batch", "spawn_successor")
+HARNESS_TOOLS = ("look", "overview", "move_viewport", "write_message", "broadcast", "paint_batch", "spawn_successor",
+                 "generate_reference")
 
 
 class AgentSession:
@@ -89,6 +104,11 @@ class AgentSession:
             raise ValueError(f"the instrument's tool names clash with the canvas's: {sorted(taken)}")
         self.batch_enabled = bool(job.get("paint_batch", True)) and not self.judge  # a judge has nothing to batch
         self.successors = bool(job.get("successors", False)) and not self.judge
+        self.references = bool(job.get("references", False)) and not self.judge
+        self.asked = 0  # reference pictures asked for
+        self.made: list[str] = []  # the artifact of each one made, in order: reference n is made[n - 1]
+        self.shared = False  # whether this agent has shared one
+        self.seen_shared = 0  # the newest shared picture's broadcast seq this agent has been shown
         self.handed_off = False
         self.pen = self.inst.new_state() if self.inst else None
         self.rng = np.random.default_rng(job.get("seed", 0))
@@ -169,7 +189,7 @@ class AgentSession:
                                             if p)) from e
         blocks[0] = text("\n\n".join(p for p in (blocks[0]["text"], self._sketch_news(), self._news(), self.status())
                                        if p).strip())
-        return blocks
+        return blocks + self._shared()
 
     def _news(self) -> str:
         """Broadcasts from other agents that this one hasn't been given yet, the newest few, with where each
@@ -185,9 +205,33 @@ class AgentSession:
         more = f" ({len(rows) - len(shown)} older ones not shown)" if len(rows) > len(shown) else ""
         lines = []
         for r in shown:  # placed at the middle of the sender's viewport, whatever its size
-            half = int(json.loads(r["args"] or "{}").get("viewport") or self.canvas.config["viewport"]) // 2
-            lines.append(f'- from around canvas ({r["x"] + half}, {r["y"] + half}): "{r["note"]}"')
+            args = json.loads(r["args"] or "{}")
+            half = int(args.get("viewport") or self.canvas.config["viewport"]) // 2
+            picture = " (with a reference picture)" if args.get("image") else ""
+            lines.append(f'- from around canvas ({r["x"] + half}, {r["y"] + half}): "{r["note"]}"{picture}')
         return f"{head}, oldest first{more}:\n" + "\n".join(lines)
+
+    def _shared(self) -> list[dict]:
+        """Reference pictures other agents shared that this one hasn't been shown, the newest few, each after a line
+        saying where it came from. An agent's first result brings the newest ones shared before it started. Only a
+        result that succeeds carries them; a refusal is text alone, so they wait for the next one."""
+        rows = self.canvas.conn.execute(
+            "SELECT seq, x, y, note, args FROM canvas_ops WHERE canvas_id=? AND tool='broadcast' AND status='sent' "
+            "AND seq>? AND agent_id IS NOT ? AND json_extract(args, '$.image') IS NOT NULL ORDER BY seq",
+            (self.canvas.canvas_id, self.seen_shared, self.agent_id)).fetchall()
+        if not rows:
+            return []
+        self.seen_shared = rows[-1]["seq"]
+        blocks = []
+        for r in rows[-SHARED_SHOWN:]:
+            args = json.loads(r["args"])
+            stored = self.canvas.conn.execute("SELECT data FROM artifacts WHERE name=?", (args["image"],)).fetchone()
+            if stored is None:
+                continue
+            half = int(args.get("viewport") or self.canvas.config["viewport"]) // 2
+            blocks += [text(f"A reference picture another agent shared, from around canvas ({r['x'] + half}, "
+                            f"{r['y'] + half}), with: \"{r['note']}\""), image(shrink(stored[0], SHOWN_SIDE))]
+        return blocks
 
     def _sketch_news(self) -> str:
         """On an agent's first call, where the sketch is, so it can go and see it. After that nothing: new lines
@@ -210,6 +254,8 @@ class AgentSession:
             return [text(self.write_message(args, tool_use_id))]
         if name == "broadcast" and not self.judge:
             return [text(self.broadcast(args, tool_use_id))]
+        if name == "generate_reference" and self.references:
+            return self.generate_reference(args, tool_use_id)
         if name == "spawn_successor" and self.successors:
             return [text(self.spawn_successor(args, tool_use_id))]
         if name == "paint_batch" and self.batch_enabled:
@@ -356,9 +402,68 @@ class AgentSession:
             self._op("broadcast", "rejected", args, "bad text", tool_use_id=tool_use_id)
             raise ToolFailure(f"text must be 1 to {MAX_BROADCAST} characters. Nothing was sent.")
         message = message.strip()
-        self._op("broadcast", "sent", {"text": message, "viewport": self.size}, message, tool_use_id=tool_use_id)
-        return ("Sent to every other agent on the canvas, with where your viewport is now. Each gets it with its next "
+        record = {"text": message, "viewport": self.size}
+        if args.get("reference") is not None:
+            problem = self._unshareable(args["reference"])
+            if problem:
+                self._op("broadcast", "rejected", args, problem, tool_use_id=tool_use_id)
+                raise ToolFailure(f"{problem} Nothing was sent.")
+            record.update(reference=args["reference"], image=self.made[args["reference"] - 1])
+            self.shared = True
+        self._op("broadcast", "sent", record, message, tool_use_id=tool_use_id)
+        return ("Sent to every other agent on the canvas, with where your viewport is now"
+                + (" and your reference picture" if "image" in record else "") + ". Each gets it with its next "
                 "tool result, and agents that start later get it among the newest broadcasts.")
+
+    def _unshareable(self, n) -> str | None:
+        """Why reference `n` can't go out with a broadcast, or None when it can."""
+        if not self.references:
+            return "You can't send pictures."
+        if self.shared:
+            return "You have already shared a reference picture, and a session may share one."
+        if not self.made:
+            return "You have no reference pictures to share."
+        if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= len(self.made):
+            return f"reference must be the number of one of your reference pictures, 1 to {len(self.made)}."
+        shared = self.canvas.conn.execute(
+            "SELECT count(*) FROM canvas_ops WHERE canvas_id=? AND tool='broadcast' AND status='sent' AND "
+            "json_extract(args, '$.image') IS NOT NULL", (self.canvas.canvas_id,)).fetchone()[0]
+        if shared >= CANVAS_SHARED:
+            return (f"This canvas already has the {CANVAS_SHARED} shared reference pictures it takes. Say it in words, "
+                    "or paint it.")
+        return None
+
+    def generate_reference(self, args: dict, tool_use_id: str | None = None) -> list[dict]:
+        prompt = args.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_PROMPT:
+            self._op("generate_reference", "rejected", args, "bad prompt", tool_use_id=tool_use_id)
+            raise ToolFailure(f"prompt must be 1 to {MAX_PROMPT} characters. No picture was made.")
+        if self.asked >= MAX_REFERENCES:
+            self._op("generate_reference", "rejected", args, "none left", tool_use_id=tool_use_id)
+            raise ToolFailure(f"You have asked for all {MAX_REFERENCES} reference pictures a session may. Paint from "
+                              "what you have.")
+        prompt, from_view = prompt.strip(), bool(args.get("from_view"))
+        sources = [encode_tile(to_uint8(self._seen()))] if from_view else []
+        self.asked += 1
+        try:
+            stored = shrink(generate(prompt, sources, session_id=f"conveyor-{self.agent_id}")[0], STORED_SIDE)
+        except (ReferenceFailed, OSError, ValueError) as e:  # a picture PIL can't read is an OSError
+            self._op("generate_reference", "failed", {"prompt": prompt, "from_view": from_view}, str(e),
+                     tool_use_id=tool_use_id)
+            raise ToolFailure(f"{e} No picture was made.") from None
+        name = f"{hashlib.sha256(stored).hexdigest()[:24]}.png"
+        self.canvas.conn.execute("INSERT OR IGNORE INTO artifacts (name, data) VALUES (?, ?)", (name, stored))
+        self.made.append(name)
+        n = len(self.made)
+        self._op("generate_reference", "generated", {"prompt": prompt, "from_view": from_view, "reference": n,
+                                                     "image": name, "viewport": self.size}, prompt, tool_use_id=tool_use_id)
+        left = MAX_REFERENCES - self.asked
+        share = (f" To share it with every other agent, pass reference {n} to broadcast; only for high-level reference "
+                 "that should guide the whole canvas." if not self.shared else "")
+        return [text(f"Reference picture {n}, made from your prompt{' and your viewport' if from_view else ''}. It "
+                     "isn't on the canvas and only you see it: paint what you learn from it with your instrument. "
+                     f"{left} more you may ask for.{share}"),
+                image(shrink(stored, SHOWN_SIDE))]
 
     def write_message(self, args: dict, tool_use_id: str | None = None) -> str:
         try:
@@ -444,6 +549,22 @@ class CommonsServer(StdioServer):
                           f"to keep the work going past your budget. It only works in your last {SUCCESSOR_WINDOW} "
                           "tool calls.",
                           "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}})
+        if self.s.references:
+            tools.append({"name": "generate_reference", "description": "Make a picture to study before you paint: a "
+                          "reference, not paint. Describe what it shows. It never lands on the canvas and only you see "
+                          f"it, unless you share it with broadcast. At most {MAX_REFERENCES} a session; each takes a "
+                          "minute or two and one tool call.",
+                          "inputSchema": {"type": "object", "properties": {
+                              "prompt": {"type": "string", "maxLength": MAX_PROMPT, "description": "What the picture "
+                                         "shows: subject, pose, angle, light, colour, style."},
+                              "from_view": {"type": "boolean", "description": "Work from your viewport as it is now, "
+                                            "for a study of how this part could look. Default false."}},
+                              "required": ["prompt"], "additionalProperties": False}})
+        broadcast = {"text": {"type": "string", "maxLength": MAX_BROADCAST, "description": "What to say."}}
+        if self.s.references:
+            broadcast["reference"] = {"type": "integer", "minimum": 1, "maximum": MAX_REFERENCES, "description":
+                                      "The number of one of your reference pictures, to send it along. Rarely: one "
+                                      "a session, and only high-level reference early on."}
         return tools + [t for t in [
             {"name": "look", "description": "See your viewport as it is now, gridded in viewport pixels. Others "
              "may have painted in it since you last looked.", "inputSchema": {"type": "object", "properties": {}}},
@@ -462,9 +583,8 @@ class CommonsServer(StdioServer):
             {"name": "broadcast", "description": "Send a short text to every other agent on the canvas, wherever "
              "they are. Each gets it with its next tool result, with where your viewport is but not who sent it; "
              "agents that start later get the newest few. It isn't on the canvas.",
-             "inputSchema": {"type": "object", "properties": {
-                 "text": {"type": "string", "maxLength": MAX_BROADCAST, "description": "What to say."}},
-                 "required": ["text"], "additionalProperties": False}},
+             "inputSchema": {"type": "object", "properties": broadcast, "required": ["text"],
+                             "additionalProperties": False}},
             {"name": "write_message", "description": "Paint ASCII text into your viewport, wrapped at the "
              "viewport's right edge and outlined in a contrasting colour so it reads on any paint. It is paint like "
              "any other: anyone can paint over it.",

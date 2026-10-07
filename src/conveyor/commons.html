@@ -54,6 +54,12 @@ pre{font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wr
 .status.running{color:var(--good);border-color:var(--good)}
 .msgs{display:grid;gap:6px}.msg{font-size:12px;text-align:left;border:1px solid var(--line);border-left:4px solid var(--c);border-radius:6px;padding:6px 8px;background:none;width:100%}
 .msg q{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;quotes:none;display:block;white-space:pre-wrap;overflow-wrap:anywhere}
+.msg img{display:block;max-width:100%;max-height:120px;margin-top:5px;border-radius:4px}
+.refs{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px}
+.ref{margin:0;border:1px solid var(--line);border-top:4px solid var(--c);border-radius:6px;padding:5px;font-size:11px;display:grid;gap:4px;min-width:0}
+.ref img{display:block;width:100%;aspect-ratio:1;object-fit:cover;border-radius:4px;background:var(--bg)}
+.ref figcaption{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;color:var(--muted)}
+.ref button{font-size:11px;padding:1px 6px;justify-self:start}.ref .shared{color:var(--accent);font-weight:600}
 dialog{border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--ink);padding:20px;width:min(380px,92vw)}
 dialog::backdrop{background:#0006}
 #painters-dialog{width:min(1120px,95vw);max-height:92dvh;display:none;flex-direction:column;gap:10px}#painters-dialog[open]{display:flex}
@@ -126,12 +132,14 @@ dialog::backdrop{background:#0006}
       <label>Task for this agent, optional<textarea id="agent-task" rows="3" maxlength="1000" placeholder="Its own part of the work. Only this agent reads it; its successors carry it on."></textarea></label>
       <label class="check painter-only"><input id="batch" type="checkbox" checked> Offer paint_batch (40 strokes for one call)</label>
       <label class="check painter-only"><input id="successors" type="checkbox" checked> May spawn a successor to keep working</label>
+      <label id="references-field" class="check" hidden><input id="references" type="checkbox" checked> <span id="references-text">May generate reference pictures to study, and share one</span></label>
       <label id="token-field" hidden>Launch token<input id="token" type="password" autocomplete="off"></label>
       <button id="submit" class="primary" type="submit" disabled>Spawn</button>
       <div id="message" role="status" aria-live="polite"></div>
     </form>
   </section>
   <section aria-labelledby="messages-title"><h2 id="messages-title">Messages and broadcasts</h2><p class="muted" style="font-size:12px;margin-top:-4px">Messages, judges' notes among them, are painted where they were written, so paint can cover them. Broadcasts reach every agent, with where the sender was. Click one to find it.</p><div id="messages" class="msgs"></div></section>
+  <section id="references-section" aria-labelledby="references-title" hidden><h2 id="references-title">Reference pictures</h2><p class="muted" style="font-size:12px;margin-top:-4px">Pictures Pi agents made to study before painting. They never land on the canvas. A shared one went to every agent with a broadcast. Click a picture to open it.</p><div id="references-list" class="refs"></div></section>
   <section aria-labelledby="agents-title"><h2 id="agents-title">Agents</h2><div id="agents" class="agents"><p class="muted">None yet.</p></div></section>
 </aside>
 </main>
@@ -173,7 +181,7 @@ const LIVE = ["queued", "starting", "running"];
 const color = (id, a=1) => `hsla(${hue(id)},62%,44%,${a})`;
 
 // ---- state ----------------------------------------------------------------------------------------------
-const S = {cid:null, canvas:null, size:512, seq:0, heads:new Map(), agents:[], messages:[], broadcasts:[], catalog:null, options:null,
+const S = {cid:null, canvas:null, size:512, seq:0, heads:new Map(), agents:[], messages:[], broadcasts:[], references:[], catalog:null, options:null,
   sketches:[], erased:new Map(), pending:[], pen:false, drawing:null, space:false,
   mode:"live", history:null, byTile:null, tracks:null, idx:0, playing:false, lastFrame:0,
   cam:{x:-64, y:-64, z:1}, spawn:null, timer:null, canLaunch:false};
@@ -369,7 +377,8 @@ async function poll(){
     if(cid !== S.cid) return;
     for(const [tx, ty, seq] of r.heads) S.heads.set(`${tx},${ty}`, seq);
     S.seq = r.seq; S.agents = r.agents; S.messages = r.since ? S.messages.concat(r.messages) : r.messages;
-    S.broadcasts = r.since ? S.broadcasts.concat(r.broadcasts) : r.broadcasts; S.canvas = r.canvas; S.size = r.canvas.config.viewport;
+    S.broadcasts = r.since ? S.broadcasts.concat(r.broadcasts) : r.broadcasts; S.canvas = r.canvas;
+    S.references = r.since ? S.references.concat(r.references) : r.references; S.size = r.canvas.config.viewport;
     if(!r.since){ S.sketches = []; S.erased = new Map(); }
     const have = new Set(S.sketches.map(l => l.seq));  // a line this page drew is already in
     S.sketches = S.sketches.concat(r.sketches.filter(l => !have.has(l.seq)));
@@ -379,13 +388,13 @@ async function poll(){
     $("task-bar").hidden = !r.canvas.config.task; $("task-text").textContent = r.canvas.config.task || "";
     const option = [...$("canvas-select").options].find(o => o.value === cid);
     if(option) option.textContent = `${r.canvas.name} · ${S.size}px${r.canvas.config.frame ? ` · ${r.canvas.config.frame[2]}×${r.canvas.config.frame[3]} frame` : ""} · ${S.agents.length} agents`;
-    renderAgents(); renderMessages(); counts(); emptyState(); draw();
+    renderAgents(); renderMessages(); renderReferences(); counts(); emptyState(); draw();
   }catch(e){ $("message").textContent = `Couldn't refresh: ${e.message}`; }
   if(cid === S.cid) S.timer = setTimeout(poll, S.mode === "live" ? 2000 : 6000);
 }
 function counts(){
   const running = S.agents.filter(a => LIVE.includes(a.status)).length;
-  $("counts").textContent = `${S.agents.length} agents · ${running} painting · ${S.messages.length} messages · ${S.broadcasts.length} broadcasts${S.sketches.length ? ` · ${sketchLines().length} sketch lines` : ""} · ${S.seq ? S.seq.toLocaleString() : 0} ops`;
+  $("counts").textContent = `${S.agents.length} agents · ${running} painting · ${S.messages.length} messages · ${S.broadcasts.length} broadcasts${S.references.length ? ` · ${S.references.length} reference pictures` : ""}${S.sketches.length ? ` · ${sketchLines().length} sketch lines` : ""} · ${S.seq ? S.seq.toLocaleString() : 0} ops`;
 }
 function emptyState(){
   $("empty").hidden = Boolean(S.heads.size || S.agents.length) || !S.cid;
@@ -398,7 +407,7 @@ function renderAgents(){
     const c = a.config || {}, live = LIVE.includes(a.status), pct = Math.round(100 * a.calls_used / a.max_calls);
     const model = [c.harness === "pi" ? `pi · ${c.provider}` : "claude", c.model, c.effort].filter(Boolean).join(" · ");
     return `<div class="agent" style="--c:${color(a.id)}"><div class="top"><b title="${esc(a.name)}">${esc(a.name)}</b><span class="status ${live ? "running" : ""}">${esc(a.status.replace("_", " "))}</span></div>
-      <div class="meta">${esc(model)}${c.generation > 1 ? ` · session ${c.generation}, from ${esc(agentName(c.parent_id))}` : ""}${c.viewport && c.viewport !== S.size ? ` · ${c.viewport} px viewport` : ""}${c.successors === false ? " · no successors" : ""}${c.random ? " · painter drawn at random" : ""}</div>
+      <div class="meta">${esc(model)}${c.generation > 1 ? ` · session ${c.generation}, from ${esc(agentName(c.parent_id))}` : ""}${c.viewport && c.viewport !== S.size ? ` · ${c.viewport} px viewport` : ""}${c.successors === false ? " · no successors" : ""}${c.references ? " · reference pictures" : ""}${c.random ? " · painter drawn at random" : ""}</div>
       ${a.status === "handed_off" ? `<div class="meta">Handed off to ${esc(S.agents.filter(x => x.config?.parent_id === a.id).map(x => x.name).join(", ") || "a successor")}</div>` : ""}
       ${c.agent_task ? `<div class="meta clamp" title="${esc(c.agent_task)}"><b>Task:</b> ${esc(c.agent_task)}</div>` : ""}
       ${c.kind === "judge" ? `<div class="meta"><b>Judge</b>: leaves notes, doesn't paint${c.auto ? ` · started by itself at ${Number(c.at_ops).toLocaleString()} ops` : ""}</div>` : `<div class="meta clamp" title="${esc(c.instrument_label)}">Instrument: ${esc(c.instrument_label)}</div>
@@ -410,8 +419,17 @@ function renderAgents(){
 }
 function renderMessages(){
   const items = [...S.messages, ...S.broadcasts.map(b => ({...b, broadcast:true}))].sort((a, b) => a.seq - b.seq);
-  $("messages").innerHTML = items.length ? items.slice(-40).reverse().map(m => `<button class="msg" style="--c:${color(m.agent_id)}" data-at="${m.x},${m.y}"><span class="muted">${m.broadcast ? "<b>broadcast</b> · " : ""}${esc(agentName(m.agent_id))} · ${new Date(m.ts * 1000).toLocaleTimeString()}</span><q>${esc(m.text)}</q></button>`).join("") : `<p class="muted">None yet.</p>`;
+  $("messages").innerHTML = items.length ? items.slice(-40).reverse().map(m => `<button class="msg" style="--c:${color(m.agent_id)}" data-at="${m.x},${m.y}"><span class="muted">${m.broadcast ? "<b>broadcast</b> · " : ""}${esc(agentName(m.agent_id))} · ${new Date(m.ts * 1000).toLocaleTimeString()}</span><q>${esc(m.text)}</q>${m.image ? `<img loading="lazy" src="/artifacts/${encodeURIComponent(m.image)}" alt="The reference picture sent with it">` : ""}</button>`).join("") : `<p class="muted">None yet.</p>`;
 }
+function renderReferences(){
+  $("references-section").hidden = !S.references.length;
+  const shared = new Set(S.broadcasts.map(b => b.image).filter(Boolean));
+  $("references-list").innerHTML = S.references.slice(-60).reverse().map(r => `<figure class="ref" style="--c:${color(r.agent_id)}">
+    <a href="/artifacts/${encodeURIComponent(r.image)}" target="_blank" rel="noopener"><img loading="lazy" src="/artifacts/${encodeURIComponent(r.image)}" alt="${esc(r.prompt)}"></a>
+    <figcaption title="${esc(r.prompt)}">${shared.has(r.image) ? `<span class="shared">Shared</span> · ` : ""}${esc(agentName(r.agent_id))}${r.from_view ? " · from its view" : ""}: ${esc(r.prompt)}</figcaption>
+    <button type="button" data-at="${r.x},${r.y}">Find</button></figure>`).join("");
+}
+$("references-list").onclick = e => { const b = e.target.closest("button[data-at]"); if(b){ const [x, y] = b.dataset.at.split(",").map(Number); centerOn(x, y, Math.max(S.cam.z, .5)); } };
 $("agents").onclick = async e => {
   const find = e.target.closest("[data-find]"), stop = e.target.closest("[data-stop]");
   if(find){ const a = S.agents.find(a => a.id === find.dataset.find); if(a) centerOn(a.x + sizeOf(a) / 2, a.y + sizeOf(a) / 2, Math.max(S.cam.z, .5)); }
@@ -529,11 +547,14 @@ $("painter").onchange = showChoice;
 $("random").onchange = () => { $("choice").hidden = $("random").checked || judging(); updateSubmit(); };
 $("kind").onchange = () => {  // a judge has no painter, a fixed viewport, and nothing to batch or hand off
   for(const el of document.querySelectorAll(".painter-only")) el.hidden = judging();
-  $("judge-note").hidden = !judging(); $("choice").hidden = $("random").checked || judging(); updateSubmit(); draw();
+  $("judge-note").hidden = !judging(); $("choice").hidden = $("random").checked || judging(); fillHarness(); updateSubmit(); draw();
 };
 function fillHarness(){
   const o = S.options, kind = $("harness").value;
   $("provider-field").hidden = kind !== "pi";
+  const refs = o?.harnesses?.pi?.references;  // pictures come through Pi's OpenAI Codex login
+  $("references-field").hidden = kind !== "pi" || judging(); $("references").disabled = !refs; if(!refs) $("references").checked = false;
+  $("references-text").textContent = refs ? "May generate reference pictures to study, and share one" : "Reference pictures need the OpenAI Codex login: run conveyor auth login openai";
   if(o?.models){ const models = kind === "pi" ? (o.models.pi[$("provider").value] || []) : o.models.claude; $("models").innerHTML = models.map(m => `<option value="${esc(m)}">`).join(""); }
 }
 $("harness").onchange = $("provider").onchange = fillHarness;
@@ -546,7 +567,7 @@ $("spawn").onsubmit = async e => {
     cap:Number($("cap").value) || 5, name:$("name").value.trim() || null, viewport:Number($("viewport").value) || null, task:$("agent-task").value.trim() || null, paint_batch:$("batch").checked,
     successors:$("successors").checked};
   if(judging()){ body.kind = "judge"; for(const k of ["pair_id", "viewport", "paint_batch", "successors"]) delete body[k]; }
-  if(body.harness === "pi") body.provider = $("provider").value;
+  if(body.harness === "pi"){ body.provider = $("provider").value; if(!judging()) body.references = $("references").checked && !$("references").disabled; }
   try{ const a = await api(`/api/canvases/${encodeURIComponent(S.cid)}/agents`, "POST", body); $("message").textContent = a.painter ? `Spawned ${a.name || a.id} at (${a.x}, ${a.y})${a.painter.random ? ", drawn at random" : ""}: ${a.painter.instrument} / ${a.painter.prompt}.` : `Spawned the judge ${a.name || a.id} at (${a.x}, ${a.y}).`; S.spawn = null; await poll(); }
   catch(err){ $("message").textContent = err.message; }
   updateSubmit();

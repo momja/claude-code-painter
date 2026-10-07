@@ -38,9 +38,12 @@ from pathlib import Path
 
 from conveyor.commons import catalog as catalog_module
 from conveyor.commons import prompts
+from conveyor.commons.references import available as references_available
+from conveyor.commons.server import CANVAS_SHARED
 from conveyor.commons.server import HARNESS_TOOLS
 from conveyor.commons.server import JUDGE_TOOLS
 from conveyor.commons.server import MAX_BROADCAST
+from conveyor.commons.server import MAX_REFERENCES
 from conveyor.commons.server import SUCCESSOR_WINDOW
 from conveyor.commons.tiles import MOVE_SHARE
 from conveyor.commons.tiles import VIEWPORT_RANGE
@@ -87,7 +90,7 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued", e
     from conveyor.pi import PROVIDERS
 
     allowed = {"kind", "pair_id", "harness", "model", "effort", "provider", "x", "y", "name", "cap",
-               "paint_batch", "successors", "task", "viewport"}
+               "paint_batch", "successors", "task", "viewport", "references"}
     if not isinstance(body, dict) or set(body) - allowed:
         raise LaunchError("Expected " + ", ".join(sorted(allowed)) + ".")
     kind = body.get("kind") or "painter"
@@ -120,10 +123,12 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued", e
     if not 0.01 <= cap <= 100:
         raise LaunchError("cap must be between 0.01 and 100 dollars.")
     paint_batch, successors = body.get("paint_batch", True), body.get("successors", True)
-    if not isinstance(paint_batch, bool) or not isinstance(successors, bool):
-        raise LaunchError("paint_batch and successors must be on or off.")
+    references = body.get("references", True)
+    if not isinstance(paint_batch, bool) or not isinstance(successors, bool) or not isinstance(references, bool):
+        raise LaunchError("paint_batch, successors and references must be on or off.")
     if judge:  # a judge has nothing to batch, and its work ends with its budget
         paint_batch = successors = False
+    references = references and harness == "pi" and not judge  # pictures come through Pi's Codex login
     init_db(db)
     conn = connect(db)
     try:
@@ -148,7 +153,8 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued", e
             raise LaunchError(f"That painter's instrument has a tool named {', '.join(sorted(clash))}, which the canvas uses.")
         config = {**(painter(pair, drawn) if pair else {}), "kind": kind, "harness": harness, "model": model, "effort": effort,
                   "provider": provider if harness == "pi" else None, "cap": cap, "paint_batch": paint_batch,
-                  "successors": successors, "agent_task": agent_task, "start": [x, y], "generation": 1}
+                  "successors": successors, "references": references, "agent_task": agent_task, "start": [x, y],
+                  "generation": 1}
         config.update(extra or {})
         agent_id = new_id()
         name = name or f"{'judge ' if judge else ''}{re.sub(r'^claude-', '', model.split('/')[-1])} {agent_id[:4]}"
@@ -335,6 +341,8 @@ def system_prompt(config: dict, size: int, x: int, y: int, max_calls: int, task:
         area_cap=Canvas(size, size).area_cap, share=CALL_AREA_SHARE, max_move=int(MOVE_SHARE * size),
         max_calls=max_calls, batch=prompts.BATCH_RULE.format(max_calls=max_calls) if config.get("paint_batch", True) else "",
         views=prompts.VIEWS_RULE if inst.spec.views else "", reference=inst.reference(size, size),
+        references=prompts.REFERENCES_RULE.format(max_references=MAX_REFERENCES, canvas_shared=CANVAS_SHARED)
+        if config.get("references") else "",
         successor=prompts.SUCCESSOR_RULE.format(max_calls=max_calls, window=SUCCESSOR_WINDOW) if config.get("successors") else "")
     return config["prompt"].strip() + "\n\n" + prompts.STRATEGY_BRIDGE + "\n\n" + rules
 
@@ -365,6 +373,9 @@ def run_agent(db: Path, agent_id: str) -> None:
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         canvas.update_agent(agent_id, status="running", last_ts=time.time())
+        # Asked for at spawn, and only if this host can make them now: a tool that always fails wastes calls.
+        config["references"] = bool(config.get("references")) and config["harness"] == "pi" and not judge \
+            and references_available()
         args = _args(config, db)
         harness = _harness(config["harness"], config["model"], config["effort"], args, store,
                            Meter(max_usage=args.max_usage), {})
@@ -377,7 +388,8 @@ def run_agent(db: Path, agent_id: str) -> None:
             "db": str(db), "canvas_id": row["canvas_id"], "agent_id": agent_id, "source": config.get("source"),
             "kind": config.get("kind", "painter"),
             "x": x, "y": y, "viewport": size, "max_calls": max_calls, "paint_batch": config.get("paint_batch", True),
-            "successors": bool(config.get("successors")), "seed": random.randrange(1 << 30)}))
+            "successors": bool(config.get("successors")), "references": config["references"],
+            "seed": random.randrange(1 << 30)}))
         view = gridded_png(canvas.overlay(canvas.read(x, y, size, size).image(), x, y, x + size, y + size))
         if judge:
             first, last = prompts.JUDGE_FIRST_MESSAGE
@@ -397,6 +409,8 @@ def run_agent(db: Path, agent_id: str) -> None:
             tools.append("paint_batch")
         if config.get("successors"):
             tools.append("spawn_successor")
+        if config["references"]:
+            tools.append("generate_reference")
         ingest = _Ingest(store, d)
         tool_uses = [0]
 
