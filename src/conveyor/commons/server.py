@@ -334,9 +334,10 @@ class CommonsServer(StdioServer):
                 }, "required": ["calls"], "additionalProperties": False},
             })
         if self.s.successors:
-            tools.append({"name": "spawn_successor", "description": "End your session now and start a new session "
-                          f"of you where your viewport is, with {self.s.max_calls} fresh tool calls. It sees only the "
-                          "canvas, nothing of this conversation. Use it to keep working past your budget.",
+            tools.append({"name": "spawn_successor", "description": "End your session now and start a new painter "
+                          f"where your viewport is, with {self.s.max_calls} fresh tool calls and a randomly drawn "
+                          "instrument and instructions. It sees only the canvas, nothing of this conversation. Use it "
+                          "to keep the work going past your budget.",
                           "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}})
         return tools + [
             {"name": "look", "description": "See your viewport as it is now, gridded in viewport pixels. Others "

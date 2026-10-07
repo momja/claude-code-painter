@@ -12,8 +12,10 @@ An agent's model sessions are recorded under `canvas-<canvas id>` instead of a r
 drawer shows its transcript and replays its viewport, and the run list doesn't fill up with agents.
 
 An agent may call `spawn_successor`, which ends its session. This process then queues a new agent with the same
-settings where the viewport stopped, one generation on, and the launcher starts it. A successor starts exactly like
-an agent spawned by hand at that spot: no note, and nothing in its prompt says it is one. A
+settings where the viewport stopped, one generation on, and the launcher starts it. Its painter is drawn at random,
+like a random spawn's, so a chain changes instrument and prompt at every hand-off; the harness, model and the rest
+carry over. A successor starts exactly like an agent spawned by hand at that spot: no note, and nothing in its
+prompt says it is one. A
 successor only queues while the session's usage windows are under `--max-usage`, so a chain of agents stops
 itself before it eats the rest of a plan's window.
 """
@@ -103,20 +105,16 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued") -
         if canvas is None:
             raise LaunchError("Canvas not found.")
         drawn = body.get("pair_id") == RANDOM
-        if drawn:  # every painter the canvas can run is equally likely, scored or not
-            usable = [p for p in catalog_module.catalog(conn)["pairs"] if not _clash(p)]
-            pair = random.choice(usable) if usable else None
+        if drawn:
+            pair = draw_pair(conn)
         else:
             pair = catalog_module.entry(conn, body["pair_id"]) if isinstance(body.get("pair_id"), str) else None
         if pair is None:
             raise LaunchError("Choose a painter from the catalog.")
-        inst, prompt = pair["instrument"], pair["prompt"]
         clash = _clash(pair)
         if clash:
             raise LaunchError(f"That painter's instrument has a tool named {', '.join(sorted(clash))}, which the canvas uses.")
-        config = {"pair_id": pair["id"], "instrument_label": inst["label"], "prompt_label": prompt["label"],
-                  "source": inst["text"], "prompt": prompt["text"], "sheet": inst["sheet"],
-                  "best_score": pair["best_score"], "random": drawn, "harness": harness, "model": model, "effort": effort,
+        config = {**painter(pair, drawn), "harness": harness, "model": model, "effort": effort,
                   "provider": provider if harness == "pi" else None, "cap": cap, "paint_batch": paint_batch,
                   "successors": successors, "start": [x, y], "generation": 1}
         agent_id = new_id()
@@ -128,17 +126,33 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued") -
                      (agent_id, canvas_id, name, time.time(), status, dumps(config), x, y, max_calls))
         conn.commit()
         return {"id": agent_id, "canvas_id": canvas_id, "name": name, "x": x, "y": y, "max_calls": max_calls,
-                "painter": {"id": pair["id"], "random": drawn, "instrument": inst["label"], "prompt": prompt["label"],
-                            "best_score": pair["best_score"]}}
+                "painter": {"id": pair["id"], "random": drawn, "instrument": config["instrument_label"],
+                            "prompt": config["prompt_label"], "best_score": pair["best_score"]}}
     finally:
         conn.close()
 
 
+def draw_pair(conn) -> dict | None:
+    """A painter drawn at random: every pair in the catalog the canvas can run is equally likely, scored or not."""
+    usable = [p for p in catalog_module.catalog(conn)["pairs"] if not _clash(p)]
+    return random.choice(usable) if usable else None
+
+
+def painter(pair: dict, drawn: bool) -> dict:
+    """The part of an agent's settings that is its painter, saved in full so later catalog changes never alter it."""
+    inst, prompt = pair["instrument"], pair["prompt"]
+    return {"pair_id": pair["id"], "instrument_label": inst["label"], "prompt_label": prompt["label"],
+            "source": inst["text"], "prompt": prompt["text"], "sheet": inst["sheet"], "best_score": pair["best_score"],
+            "random": drawn}
+
+
 def queue_successor(canvas: SharedCanvas, row: dict, config: dict, x: int, y: int) -> dict:
-    """The agent that carries on from `row`: its settings, one generation on, starting where it stopped."""
+    """The agent that carries on from `row`: its settings with a newly drawn painter, one generation on, starting
+    where it stopped. With nothing in the catalog to draw, it keeps its predecessor's painter."""
     generation = int(config.get("generation", 1)) + 1
     base = config.get("base_name") or row["name"]
-    child = {**config, "generation": generation, "parent_id": row["id"], "lineage": config.get("lineage") or row["id"],
+    pair = draw_pair(canvas.conn)
+    child = {**config, **(painter(pair, True) if pair else {}), "generation": generation, "parent_id": row["id"], "lineage": config.get("lineage") or row["id"],
              "base_name": base, "start": [x, y]}
     agent_id, name = new_id(), f"{base} #{generation}"
     canvas.conn.execute("INSERT INTO canvas_agents (id, canvas_id, name, created, status, config, x, y, calls_used, "

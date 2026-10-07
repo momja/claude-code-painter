@@ -2,6 +2,7 @@
 spawning, a whole agent driven by the fake CLI, and the HTTP routes."""
 
 import base64
+import copy
 import io
 import json
 import threading
@@ -407,6 +408,15 @@ def test_a_handed_off_agent_queues_its_successor_with_only_the_canvas(tmp_path, 
     monkeypatch.setenv("FAKE_CLAUDE_HANDOFF", str(flag))
     db = seeded_db(tmp_path)
     row = create_canvas(db, "C", viewport=256, max_calls=20)
+    offered = []
+
+    def choice(pairs):  # the test catalog has one usable painter; hand the successor a different prompt
+        offered.extend(p["id"] for p in pairs)
+        pair = copy.deepcopy(pairs[0])
+        pair["id"], pair["prompt"]["text"] = "c-drawn", "Paint small."
+        return pair
+
+    monkeypatch.setattr("conveyor.commons.agent.random.choice", choice)
     first = create_agent(db, row["id"], {"pair_id": PAIR, "name": "Ada", "x": 5, "y": 7})
     run_agent(db, first["id"])
     agents = views.canvas(connect(db, readonly=True), row["id"])["agents"]
@@ -416,7 +426,8 @@ def test_a_handed_off_agent_queues_its_successor_with_only_the_canvas(tmp_path, 
     assert (child["x"], child["y"]) == (parent["x"], parent["y"]) == (5 + 192, 7)
     c = child["config"]
     assert (c["generation"], c["parent_id"], c["lineage"]) == (2, parent["id"], parent["id"])
-    assert "handoff_note" not in c and c["pair_id"] == parent["config"]["pair_id"] == PAIR
+    assert "handoff_note" not in c and parent["config"]["pair_id"] == PAIR and offered == [PAIR]
+    assert c["pair_id"] == "c-drawn" and c["random"] and c["model"] == parent["config"]["model"]  # a new painter
     run_agent(db, child["id"])  # the flag is gone, so this one paints to the end of its budget
     conn = connect(db, readonly=True)
     done = views.canvas(conn, row["id"])["agents"][1]
@@ -424,7 +435,8 @@ def test_a_handed_off_agent_queues_its_successor_with_only_the_canvas(tmp_path, 
     request = json.loads(conn.execute("SELECT request FROM sessions WHERE id=?", (done["session_id"],)).fetchone()[0])
     # It starts like an agent spawned by hand at that spot: the same prompt, and nothing saying it's a successor.
     first = json.loads(conn.execute("SELECT request FROM sessions WHERE id=?", (parent["session_id"],)).fetchone()[0])
-    assert request["system"].replace("(197, 7)", "(5, 7)") == first["system"]
+    assert "Paint small." in request["system"] and "Paint big." not in request["system"]
+    assert request["system"].replace("(197, 7)", "(5, 7)").replace("Paint small.", "Paint big.") == first["system"]
     assert request["content"][0]["text"] == "Your viewport as it is now, top-left corner at canvas (197, 7):"
     assert not any("session" in b.get("text", "") for b in request["content"])
     assert "spawn_successor" in request["system"] and "spawn_successor" in request["tools"]
