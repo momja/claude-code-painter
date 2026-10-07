@@ -216,6 +216,44 @@ def test_lettering_is_outlined_so_dark_ink_reads_on_dark_paint():
     assert small.max() > 0.1  # shrunk for an overview, the text still shows
 
 
+def test_the_overview_shows_the_region_around_the_viewport_and_how_far_the_paint_reaches(canvas, tmp_path):
+    db, row = canvas
+    near, far = agent(db, row, tmp_path, name="near"), agent(db, row, tmp_path, x=3000, y=1000, name="far")
+    shared = SharedCanvas(db, row["id"])
+    assert shared.extent() is None
+    first = tool(near, "overview")
+    assert "Nothing is painted anywhere yet" in text_of(first)
+    tool(near, "stroke", stroke(10, 10))
+    tool(far, "stroke", stroke(10, 10, color="#2040a0"))
+    assert shared.extent() == (0, 0, 24 * TILE, 8 * TILE)
+    # A 256 px viewport at (0, 0): the region is four viewports across, centred on it, at half size.
+    img = shared.shrunk((-384, -384, 640, 640), 0.5)
+    assert img.shape == (512, 512, 3)
+    red = (img[..., 0].astype(int) - img[..., 2] > 60).nonzero()
+    # near's stroke starts at canvas (10, 10), which is (197, 197) at half size from the region's corner at -384
+    assert 185 <= red[0].min() and red[0].max() <= 215 and 180 <= red[1].min() and red[1].max() <= 230
+    assert not (img[..., 2].astype(int) - img[..., 0] > 60).any()  # far's is outside the region
+    result = tool(near, "overview")
+    said = text_of(result)
+    assert not result["isError"] and "x -384 to 640 and y -384 to 640" in said and "4 viewports across" in said
+    assert "2 moves out" in said and "reaches from x 0 to 3072 and y 0 to 1024" in said
+    with Image.open(io.BytesIO(base64.b64decode(result["content"][1]["data"]))) as pic:
+        arr = np.asarray(pic.convert("RGB")).astype(int)
+    magenta = ((arr[..., 0] > 200) & (arr[..., 1] < 60) & (arr[..., 2] > 130)).nonzero()
+    assert pic.width / 3 < magenta[1].mean() < pic.width * 2 / 3  # its own viewport, in the middle
+    assert "17 left" in said  # it costs a call like any other: three made
+    assert views.history(connect(db, readonly=True), row["id"])["ops"][-1][2] == "overview"
+
+
+def test_a_canvas_task_reaches_every_agent_word_for_word(tmp_path):
+    config = {"source": ROUND, "prompt": "Paint big."}
+    task = "A lighthouse on a cliff at night,\nits beam crossing the whole sky."
+    with_task, without = system_prompt(config, 256, 0, 0, 20, task), system_prompt(config, 256, 0, 0, 20)
+    assert task in with_task and prompts.NO_TASK not in with_task and "far beyond your viewport" in with_task
+    assert prompts.NO_TASK in without and "same task" not in without and "far beyond" not in without
+    assert "`overview`" in with_task and "`overview`" in without
+
+
 def test_the_pen_keeps_its_state_across_calls(canvas, tmp_path):
     db, row = canvas
     server = agent(db, row, tmp_path, source=PEN)
@@ -401,6 +439,19 @@ def test_spawning_a_successor_ends_the_session_where_it_stands(canvas, tmp_path)
     assert server.s.calls_used == 4  # the refused call after the hand-off doesn't count
 
 
+def test_a_successor_can_only_be_spawned_in_the_last_ten_calls(canvas, tmp_path):
+    db, row = canvas
+    server = agent(db, row, tmp_path, max_calls=20, successors=True)
+    early = tool(server, "spawn_successor", {})
+    assert early["isError"] and "last 10" in text_of(early) and "19 left" in text_of(early)
+    assert not server.s.handed_off and not (server.s.dir / "successor.json").exists()
+    for _ in range(8):
+        tool(server, "look")
+    assert tool(server, "spawn_successor", {})["isError"]  # call 10: ten left after it, still too early
+    result = tool(server, "spawn_successor", {})  # call 11, the first of the last ten
+    assert not result["isError"] and server.s.handed_off and server.s.calls_used == 11
+
+
 def test_a_handed_off_agent_queues_its_successor_with_only_the_canvas(tmp_path, fake_claude, monkeypatch):
     monkeypatch.setenv("PATH", f"{fake_claude.parent}:{__import__('os').environ['PATH']}")
     flag = tmp_path / "handoff"
@@ -421,7 +472,7 @@ def test_a_handed_off_agent_queues_its_successor_with_only_the_canvas(tmp_path, 
     run_agent(db, first["id"])
     agents = views.canvas(connect(db, readonly=True), row["id"])["agents"]
     parent, child = agents
-    assert parent["status"] == "handed_off" and parent["calls_used"] == 7 and parent["error"] is None
+    assert parent["status"] == "handed_off" and parent["calls_used"] == 11 and parent["error"] is None
     assert child["status"] == "queued" and child["name"] == "Ada #2"
     assert (child["x"], child["y"]) == (parent["x"], parent["y"]) == (5 + 192, 7)
     c = child["config"]

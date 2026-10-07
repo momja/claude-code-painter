@@ -26,8 +26,9 @@ early and says so.
 Your tools:
 - The instrument's paint tools, described below, put paint down.
 - `look` shows your viewport as it is now. Others may have painted in it since you last looked.
-- `overview` shows the whole canvas: everything anyone has painted, shrunk to at most {overview_side} pixels a \
-side, labelled in canvas coordinates, with your viewport outlined in magenta.
+- `overview` shows the canvas around you, {region} viewports across with yours outlined in magenta in the \
+middle, shrunk to {overview_side} pixels and labelled in canvas coordinates. It reaches two moves out in every \
+direction, and says how far the paint on the whole canvas reaches.
 - `move_viewport` slides the viewport `distance` pixels toward `angle` degrees (0 is right/east, 90 is \
 down/south, 180 left, 270 up). One move goes at most {max_move} pixels, three quarters of the viewport, so the new \
 view always overlaps the one you left. It shows you the new view. Move to find room, to follow something \
@@ -74,8 +75,8 @@ FIRST_MESSAGE = ("Your viewport as it is now, top-left corner at canvas ({x}, {y
 SUCCESSOR_RULE = """
 - `spawn_successor` ends your session at once and starts a new painter where your viewport is now, with a \
 fresh {max_calls} tool calls and an instrument and instructions drawn at random, which may not be yours. It sees \
-only the canvas: nothing of this conversation goes with it. It counts as one call, so making it your last call \
-costs you nothing. Use it if you want the work to go on after your budget runs out. Your successor gets the same \
+only the canvas: nothing of this conversation goes with it. It only works in your last {window} calls; earlier \
+it is refused and the refusal counts. It counts as one call, so making it your last call costs you nothing. Use it if you want the work to go on after your budget runs out. Your successor gets the same \
 choice."""
 
 SUCCESSOR_REMINDER = "To keep the work going past your budget, spend one of them on spawn_successor."

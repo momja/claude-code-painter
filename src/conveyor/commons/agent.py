@@ -36,6 +36,7 @@ from conveyor.commons import catalog as catalog_module
 from conveyor.commons import prompts
 from conveyor.commons.lettering import draw_messages
 from conveyor.commons.server import HARNESS_TOOLS
+from conveyor.commons.server import SUCCESSOR_WINDOW
 from conveyor.commons.tiles import MOVE_SHARE
 from conveyor.commons.tiles import SharedCanvas
 from conveyor.launch import LaunchError
@@ -186,16 +187,16 @@ def _args(config: dict, db: Path) -> argparse.Namespace:
 
 
 def system_prompt(config: dict, size: int, x: int, y: int, max_calls: int, task: str | None = None) -> str:
-    from conveyor.commons.overview import OVERVIEW_SIDE
+    from conveyor.commons.overview import OVERVIEW_SIDE, REGION
     from conveyor.painting.canvas import CALL_AREA_SHARE, Canvas
     from conveyor.painting.instrument import Instrument
 
     inst = Instrument(config["source"])
     rules = prompts.AGENT_RULES.format(
-        purpose=prompts.TASK.format(task=task.strip()) if task else prompts.NO_TASK, overview_side=OVERVIEW_SIDE, s=size, x=x, y=y, area_cap=Canvas(size, size).area_cap, share=CALL_AREA_SHARE, max_move=int(MOVE_SHARE * size),
+        purpose=prompts.TASK.format(task=task.strip()) if task else prompts.NO_TASK, overview_side=OVERVIEW_SIDE, region=REGION, s=size, x=x, y=y, area_cap=Canvas(size, size).area_cap, share=CALL_AREA_SHARE, max_move=int(MOVE_SHARE * size),
         max_calls=max_calls, batch=prompts.BATCH_RULE.format(max_calls=max_calls) if config.get("paint_batch", True) else "",
         views=prompts.VIEWS_RULE if inst.spec.views else "", reference=inst.reference(size, size),
-        successor=prompts.SUCCESSOR_RULE.format(max_calls=max_calls) if config.get("successors") else "")
+        successor=prompts.SUCCESSOR_RULE.format(max_calls=max_calls, window=SUCCESSOR_WINDOW) if config.get("successors") else "")
     return config["prompt"].strip() + "\n\n" + prompts.STRATEGY_BRIDGE + "\n\n" + rules
 
 

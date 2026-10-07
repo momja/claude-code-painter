@@ -39,7 +39,9 @@ from conveyor.commons.lettering import draw_messages
 from conveyor.commons.lettering import text_mask
 from conveyor.commons.lettering import wrap
 from conveyor.commons.overview import OVERVIEW_SIDE
+from conveyor.commons.overview import REGION
 from conveyor.commons.overview import overview_png
+from conveyor.commons.overview import region
 from conveyor.commons.tiles import DEFAULT_INK
 from conveyor.commons.tiles import MOVE_SHARE
 from conveyor.commons.tiles import SharedCanvas
@@ -59,6 +61,7 @@ from conveyor.painting.instrument import ToolError
 from conveyor.painting.paintserver import MAX_BATCH_CALLS
 from conveyor.painting.paintserver import batch_calls
 
+SUCCESSOR_WINDOW = 10  # spawn_successor works only in an agent's last this-many calls, so a session stays put
 HARNESS_TOOLS = ("look", "overview", "move_viewport", "write_message", "paint_batch", "spawn_successor")
 
 
@@ -178,13 +181,20 @@ class AgentSession:
 
     def overview(self, tool_use_id: str | None = None) -> list[dict]:
         viewport = (self.x, self.y, self.x + self.size, self.y + self.size)
-        img, (x0, y0, x1, y1), scale = self.canvas.overview(viewport, OVERVIEW_SIDE)
-        img = to_uint8(draw_messages(img.astype(np.float32) / 255.0, x0, y0, self.canvas.messages(x0, y0, x1, y1), scale))
+        window, scale = region(self.x, self.y, self.size)
+        x0, y0, x1, y1 = window
+        img = self.canvas.shrunk(window, scale).astype(np.float32) / 255.0
+        img = to_uint8(draw_messages(img, x0, y0, self.canvas.messages(x0, y0, x1, y1), scale))
         self._op("overview", "view", {}, f"x {x0} to {x1}, y {y0} to {y1}", tool_use_id=tool_use_id)
-        size = "at full size" if scale >= 1 else f"shrunk so one picture pixel is {1 / scale:.3g} canvas pixels"
-        return [text(f"The whole canvas, x {x0} to {x1} and y {y0} to {y1}: everything painted so far and your "
-                     f"viewport, {size}. The labels are canvas coordinates. Your viewport is the magenta box."),
-                image(overview_png(img, (x0, y0, x1, y1), scale, viewport))]
+        extent = self.canvas.extent()
+        reach = (f"Paint on the whole canvas reaches from x {extent[0]} to {extent[2]} and y {extent[1]} to {extent[3]}."
+                 if extent else "Nothing is painted anywhere yet.")
+        moves = (REGION - 1) / 2 / MOVE_SHARE
+        return [text(f"The canvas around you, x {x0} to {x1} and y {y0} to {y1}: {REGION} viewports across, with "
+                     f"yours, the magenta box, in the middle, shrunk so one picture pixel is {1 / scale:g} canvas "
+                     f"pixels. It reaches {moves:g} moves out in every direction. The labels are canvas coordinates. "
+                     f"{reach}"),
+                image(overview_png(img, window, scale, viewport))]
 
     def move(self, args: dict, tool_use_id: str | None = None) -> list[dict]:
         limit = MOVE_SHARE * self.size
@@ -266,6 +276,12 @@ class AgentSession:
         return summary
 
     def spawn_successor(self, args: dict, tool_use_id: str | None = None) -> str:
+        # Agents handed off after a handful of calls, each session painting one viewport and moving on, so the
+        # canvas filled with small repeats. Holding the hand-off to the end keeps a session working one region.
+        if self.calls_left >= SUCCESSOR_WINDOW:
+            self._op("spawn_successor", "rejected", {}, "before the last calls", tool_use_id=tool_use_id)
+            raise ToolFailure(f"spawn_successor only works in your last {SUCCESSOR_WINDOW} tool calls, and you have "
+                              f"{self.calls_left} left. Keep working until then. Your session goes on.")
         # No note: a successor inherits only the canvas, so what it should know has to be there for anyone to see.
         (self.dir / "successor.json").write_text(json.dumps({"x": self.x, "y": self.y, "at": time.time()}))
         self.handed_off = True
@@ -337,14 +353,16 @@ class CommonsServer(StdioServer):
             tools.append({"name": "spawn_successor", "description": "End your session now and start a new painter "
                           f"where your viewport is, with {self.s.max_calls} fresh tool calls and a randomly drawn "
                           "instrument and instructions. It sees only the canvas, nothing of this conversation. Use it "
-                          "to keep the work going past your budget.",
+                          f"to keep the work going past your budget. It only works in your last {SUCCESSOR_WINDOW} "
+                          "tool calls.",
                           "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}})
         return tools + [
             {"name": "look", "description": "See your viewport as it is now, gridded in viewport pixels. Others "
              "may have painted in it since you last looked.", "inputSchema": {"type": "object", "properties": {}}},
-            {"name": "overview", "description": f"See the whole canvas, everything anyone has painted, shrunk to "
-             f"at most {OVERVIEW_SIDE} px a side and labelled in canvas coordinates, with your viewport outlined in "
-             "magenta.", "inputSchema": {"type": "object", "properties": {}}},
+            {"name": "overview", "description": f"See the canvas around you, {REGION} viewports across with yours "
+             f"outlined in magenta in the middle, shrunk to {OVERVIEW_SIDE} px and labelled in canvas coordinates. "
+             "It also says how far the paint on the whole canvas reaches.",
+             "inputSchema": {"type": "object", "properties": {}}},
             {"name": "move_viewport", "description": f"Slide your viewport `distance` px toward `angle` degrees "
              f"(0 right, 90 down, 180 left, 270 up), at most {int(MOVE_SHARE * s)} px, so the new view overlaps the "
              "old. Shows you the new view.",

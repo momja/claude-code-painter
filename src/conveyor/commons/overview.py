@@ -1,7 +1,9 @@
 """
-The whole-canvas picture an agent gets from `overview`: everything painted so far, shrunk to fit, with a grid
-labelled in canvas coordinates and the agent's own viewport outlined. Nothing else is marked, so other agents
-stay unseen except through their paint.
+The picture an agent gets from `overview`: the canvas around its viewport, REGION viewports across with its own
+in the middle, shrunk to OVERVIEW_SIDE pixels, with a grid labelled in canvas coordinates and the viewport
+outlined. At four viewports and moves of three quarters of one, it reaches two moves out in every direction. The
+scale is fixed, so neighbouring work stays legible however large the canvas grows; how far the paint reaches
+overall is reported as text. Nothing else is marked, so other agents stay unseen except through their paint.
 """
 
 from __future__ import annotations
@@ -15,7 +17,14 @@ from PIL import ImageDraw
 from conveyor.commons.tiles import TILE
 from conveyor.painting.canvas import _font
 
-OVERVIEW_SIDE = 512  # the longer side of the picture, in pixels, however big the canvas grows
+OVERVIEW_SIDE = 512  # the picture's side, in pixels
+REGION = 4  # viewports across the region an overview shows
+
+
+def region(x: int, y: int, size: int) -> tuple[tuple[int, int, int, int], float]:
+    """The window an overview shows for a viewport at (x, y), and the scale that fits it into OVERVIEW_SIDE."""
+    half, cx, cy = REGION * size // 2, x + size // 2, y + size // 2
+    return (cx - half, cy - half, cx + half, cy + half), OVERVIEW_SIDE / (REGION * size)
 BOX_COLOR = (230, 0, 160)  # magenta: the agent's viewport
 
 

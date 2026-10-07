@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -188,29 +189,32 @@ class SharedCanvas:
                  for ty in range(ty0, ty1 + 1) for tx in range(tx0, tx1 + 1)}
         return Region(x, y, w, h, tiles)
 
-    def overview(self, box: tuple[int, int, int, int], side: int) -> tuple[np.ndarray, tuple[int, int, int, int], float]:
-        """Everything painted, plus `box` (x0, y0, x1, y1), shrunk so the longer side is at most `side` pixels.
-        Returns the picture as uint8 RGB, the canvas window it shows, and its scale (picture px per canvas px,
-        never above 1). Tiles are shrunk one at a time, so a big canvas is never held at full size."""
+    def extent(self) -> tuple[int, int, int, int] | None:
+        """How far the paint reaches, tile-aligned (x0, y0, x1, y1), or None on blank paper."""
         lo = self.conn.execute("SELECT min(tx), min(ty), max(tx), max(ty) FROM canvas_heads WHERE canvas_id=?",
                                (self.canvas_id,)).fetchone()
-        x0, y0, x1, y1 = box
-        if lo[0] is not None:
-            x0, y0 = min(x0, lo[0] * TILE), min(y0, lo[1] * TILE)
-            x1, y1 = max(x1, (lo[2] + 1) * TILE), max(y1, (lo[3] + 1) * TILE)
-        scale = min(1.0, side / max(x1 - x0, y1 - y0))
+        return None if lo[0] is None else (lo[0] * TILE, lo[1] * TILE, (lo[2] + 1) * TILE, (lo[3] + 1) * TILE)
+
+    def shrunk(self, window: tuple[int, int, int, int], scale: float) -> np.ndarray:
+        """The window x0..x1, y0..y1 at `scale` picture px per canvas px (at most 1), as uint8 RGB. Tiles are
+        shrunk one at a time, so a wide window is never held at full size."""
+        x0, y0, x1, y1 = window
         w, h = max(1, round((x1 - x0) * scale)), max(1, round((y1 - y0) * scale))
         out = np.broadcast_to(PAPER_RGB, (h, w, 3)).copy()
         for row in self.conn.execute(
                 "SELECT t.tx, t.ty, t.data FROM canvas_heads h JOIN canvas_tiles t ON t.canvas_id=h.canvas_id "
-                "AND t.tx=h.tx AND t.ty=h.ty AND t.seq=h.seq WHERE h.canvas_id=?", (self.canvas_id,)):
-            left, top = int((row["tx"] * TILE - x0) * scale), int((row["ty"] * TILE - y0) * scale)
-            right, bottom = int(((row["tx"] + 1) * TILE - x0) * scale), int(((row["ty"] + 1) * TILE - y0) * scale)
-            right, bottom = min(w, max(right, left + 1)), min(h, max(bottom, top + 1))
+                "AND t.tx=h.tx AND t.ty=h.ty AND t.seq=h.seq WHERE h.canvas_id=? AND h.tx BETWEEN ? AND ? "
+                "AND h.ty BETWEEN ? AND ?", (self.canvas_id, x0 // TILE, (x1 - 1) // TILE, y0 // TILE, (y1 - 1) // TILE)):
+            left, top = math.floor((row["tx"] * TILE - x0) * scale), math.floor((row["ty"] * TILE - y0) * scale)
+            right = max(left + 1, math.floor(((row["tx"] + 1) * TILE - x0) * scale))
+            bottom = max(top + 1, math.floor(((row["ty"] + 1) * TILE - y0) * scale))
+            ys, xs = slice(max(0, top), min(h, bottom)), slice(max(0, left), min(w, right))
+            if ys.start >= ys.stop or xs.start >= xs.stop:
+                continue
             with Image.open(io.BytesIO(row["data"])) as im:
-                small = im.convert("RGB").resize((right - left, bottom - top), Image.Resampling.BOX)
-            out[top:bottom, left:right] = np.asarray(small, dtype=np.uint8)
-        return out, (x0, y0, x1, y1), scale
+                small = np.asarray(im.convert("RGB").resize((right - left, bottom - top), Image.Resampling.BOX))
+            out[ys, xs] = small[ys.start - top:ys.stop - top, xs.start - left:xs.stop - left]
+        return out
 
     def messages(self, x0: int, y0: int, x1: int, y1: int) -> list[dict]:
         """Every message that reaches into the window x0..x1, y0..y1, oldest first. A message is an op, not

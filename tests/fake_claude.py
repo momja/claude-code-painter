@@ -20,6 +20,7 @@ Everything it does comes back on stdout as the CLI would print it, so the host's
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -168,6 +169,11 @@ if cfg:
         handoff = os.environ.get("FAKE_CLAUDE_HANDOFF")
         if handoff and os.path.exists(handoff) and "spawn_successor" in names:
             os.remove(handoff)
+            while i < 300:  # a hand-off only works in the last ten calls: look until then
+                i += 1
+                said = "".join(b.get("text", "") for b in call(server, i, "look", {})["content"])
+                if int(re.search(r"(\d+) left", said).group(1)) <= 10:
+                    break
             i += 1
             call(server, i, "spawn_successor", {})
             i = 300  # and stop, the way a model told its session is over would
