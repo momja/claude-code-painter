@@ -385,6 +385,7 @@ def cmd_serve(args) -> None:
         pass
     elif args.host in LOOPBACK or token:
         launcher = Launcher(db, build_parser, token=token)
+        launcher.watch_canvas()  # starts the successors canvas agents queue when they hand off
     else:
         print(f"Starting runs from the dashboard is off: it would let anyone who can reach {args.host} spend your "
               "model budget. Serve on 127.0.0.1, or set CONVEYOR_LAUNCH_TOKEN (or --launch-token) so that starting "

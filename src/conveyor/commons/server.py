@@ -4,9 +4,13 @@ One agent on the shared canvas, as an MCP server in its own process.
     python -m conveyor.commons.server <session_dir>
 
 The session directory holds `job.json`: the database, the canvas and agent ids, the instrument's source, the
-viewport's starting corner, and whether batches are on. The server gives the agent the instrument's tools on its
-viewport, plus `look`, `move_viewport`, `write_message` and `paint_batch`, and counts every call it receives
-against the canvas's tool-call budget, refused calls included. Past the budget every call is refused.
+viewport's starting corner, and whether batches and successors are on. The server gives the agent the
+instrument's tools on its viewport, plus `look`, `overview`, `move_viewport`, `write_message`, `paint_batch`
+and `spawn_successor`, and counts every call it receives against the canvas's tool-call budget, refused calls
+included. Past the budget, or once the agent has handed off to a successor, every call is refused.
+
+`spawn_successor` only writes `successor.json` with the agent's note and where its viewport stands. The host
+process queues the successor once the session has closed (see agent.py).
 
 Each call reads the viewport fresh from the database, so the agent sees what others painted since its last call.
 A call that paints runs inside one write transaction (see tiles.py). The instrument sees the viewport as its
@@ -33,6 +37,8 @@ from conveyor.commons.lettering import MAX_MESSAGE
 from conveyor.commons.lettering import MAX_SCALE
 from conveyor.commons.lettering import text_mask
 from conveyor.commons.lettering import wrap
+from conveyor.commons.overview import OVERVIEW_SIDE
+from conveyor.commons.overview import overview_png
 from conveyor.commons.tiles import MOVE_SHARE
 from conveyor.commons.tiles import SharedCanvas
 from conveyor.commons.tiles import encode_tile
@@ -51,7 +57,8 @@ from conveyor.painting.instrument import ToolError
 from conveyor.painting.paintserver import MAX_BATCH_CALLS
 from conveyor.painting.paintserver import batch_calls
 
-HARNESS_TOOLS = ("look", "move_viewport", "write_message", "paint_batch")
+HARNESS_TOOLS = ("look", "overview", "move_viewport", "write_message", "paint_batch", "spawn_successor")
+MAX_NOTE = 2000
 
 
 class AgentSession:
@@ -68,6 +75,8 @@ class AgentSession:
         if taken:
             raise ValueError(f"the instrument's tool names clash with the canvas's: {sorted(taken)}")
         self.batch_enabled = bool(job.get("paint_batch", True))
+        self.successors = bool(job.get("successors", False))
+        self.handed_off = False
         self.pen = self.inst.new_state()
         self.rng = np.random.default_rng(job.get("seed", 0))
         self.calls_used = 0
@@ -88,9 +97,17 @@ class AgentSession:
     def status(self) -> str:
         where = (f"Your viewport is x {self.x} to {self.x + self.size}, y {self.y} to {self.y + self.size} "
                  "on the shared canvas.")
+        if self.handed_off:
+            return prompts.HANDED_OFF
         if not self.calls_left:
             return prompts.LAST_CALL + " " + where
-        return f"{self.calls_used} of {self.max_calls} tool calls used, {self.calls_left} left. {where}"
+        reminder = " " + prompts.SUCCESSOR_REMINDER if self.successors and self.calls_left <= 3 else ""
+        return f"{self.calls_used} of {self.max_calls} tool calls used, {self.calls_left} left.{reminder} {where}"
+
+    @property
+    def over(self) -> bool:
+        """No more calls: the budget is spent, or the work went to a successor."""
+        return self.handed_off or self.calls_used >= self.max_calls
 
     def _op(self, tool: str, status: str, args: dict | None, note: str = "", tiles=None,
             snapshot: np.ndarray | None = None, tool_use_id: str | None = None, **extra) -> None:
@@ -115,6 +132,8 @@ class AgentSession:
 
     def call(self, name: str, args: dict, tool_use_id: str | None = None) -> list[dict]:
         """Run one tool call against the budget. Every call counts, including the ones refused."""
+        if self.handed_off:
+            raise ToolFailure(prompts.HANDED_OFF)
         if self.calls_used >= self.max_calls:
             raise ToolFailure(prompts.OUT_OF_CALLS.format(max_calls=self.max_calls))
         self.calls_used += 1
@@ -128,10 +147,14 @@ class AgentSession:
     def _dispatch(self, name: str, args: dict, tool_use_id: str | None) -> list[dict]:
         if name == "look":
             return self.look(tool_use_id)
+        if name == "overview":
+            return self.overview(tool_use_id)
         if name == "move_viewport":
             return self.move(args, tool_use_id)
         if name == "write_message":
             return [text(self.write_message(args, tool_use_id))]
+        if name == "spawn_successor" and self.successors:
+            return [text(self.spawn_successor(args, tool_use_id))]
         if name == "paint_batch" and self.batch_enabled:
             return [text(self.batch(args, tool_use_id))]
         if name in {v.name for v in self.inst.spec.views}:
@@ -145,6 +168,15 @@ class AgentSession:
         img = self.canvas.read(self.x, self.y, self.size, self.size).image()
         self._op("look", "view", {}, tool_use_id=tool_use_id)
         return [text("Your viewport as it is now, labelled in viewport pixels."), image(gridded_png(img))]
+
+    def overview(self, tool_use_id: str | None = None) -> list[dict]:
+        viewport = (self.x, self.y, self.x + self.size, self.y + self.size)
+        img, (x0, y0, x1, y1), scale = self.canvas.overview(viewport, OVERVIEW_SIDE)
+        self._op("overview", "view", {}, f"x {x0} to {x1}, y {y0} to {y1}", tool_use_id=tool_use_id)
+        size = "at full size" if scale >= 1 else f"shrunk so one picture pixel is {1 / scale:.3g} canvas pixels"
+        return [text(f"The whole canvas, x {x0} to {x1} and y {y0} to {y1}: everything painted so far and your "
+                     f"viewport, {size}. The labels are canvas coordinates. Your viewport is the magenta box."),
+                image(overview_png(img, (x0, y0, x1, y1), scale, viewport))]
 
     def move(self, args: dict, tool_use_id: str | None = None) -> list[dict]:
         limit = MOVE_SHARE * self.size
@@ -225,6 +257,19 @@ class AgentSession:
             raise ToolFailure(f"{error} The calls before it stay painted. {summary}")
         return summary
 
+    def spawn_successor(self, args: dict, tool_use_id: str | None = None) -> str:
+        # A long note is cut rather than refused: notes grow as each session copies its predecessor's, and a
+        # refusal on an agent's last call would end the chain without a word.
+        note = str(args.get("note") or "")
+        cut = len(note) > MAX_NOTE
+        note = note[:MAX_NOTE]
+        (self.dir / "successor.json").write_text(json.dumps({"note": note, "x": self.x, "y": self.y, "at": time.time()}))
+        self.handed_off = True
+        self._op("spawn_successor", "handed_off", {"note": note}, note, tool_use_id=tool_use_id)
+        return (f"Your successor starts here, with its viewport at canvas ({self.x}, {self.y}), {self.max_calls} fresh "
+                "tool calls and your note, once this session closes."
+                + (f" Your note was cut to its first {MAX_NOTE} characters." if cut else ""))
+
     def write_message(self, args: dict, tool_use_id: str | None = None) -> str:
         try:
             message = args.get("text")
@@ -291,9 +336,21 @@ class CommonsServer(StdioServer):
                     ]}},
                 }, "required": ["calls"], "additionalProperties": False},
             })
+        if self.s.successors:
+            tools.append({"name": "spawn_successor", "description": "End your session now and start a new session "
+                          f"of you where your viewport is, with {self.s.max_calls} fresh tool calls. It sees the canvas "
+                          "and your note, not this conversation. Use it to keep working past your budget.",
+                          "inputSchema": {"type": "object", "properties": {
+                              "note": {"type": "string", "maxLength": MAX_NOTE,
+                                       "description": "What your successor needs to carry on: what you were making, "
+                                       f"where, and what's left. At most {MAX_NOTE} characters; past that it's cut."}},
+                              "required": ["note"], "additionalProperties": False}})
         return tools + [
             {"name": "look", "description": "See your viewport as it is now, gridded in viewport pixels. Others "
              "may have painted in it since you last looked.", "inputSchema": {"type": "object", "properties": {}}},
+            {"name": "overview", "description": f"See the whole canvas, everything anyone has painted, shrunk to "
+             f"at most {OVERVIEW_SIDE} px a side and labelled in canvas coordinates, with your viewport outlined in "
+             "magenta.", "inputSchema": {"type": "object", "properties": {}}},
             {"name": "move_viewport", "description": f"Slide your viewport `distance` px toward `angle` degrees "
              f"(0 right, 90 down, 180 left, 270 up), at most {int(MOVE_SHARE * s)} px, so the new view overlaps the "
              "old. Shows you the new view.",
@@ -317,7 +374,7 @@ class CommonsServer(StdioServer):
 
     def structured_content(self, meta: dict) -> dict | None:
         # The Pi sidecar ends the session on this, so it doesn't spend a turn on a call that would be refused.
-        return {"stop": True} if self.s.calls_used >= self.s.max_calls else None
+        return {"stop": True} if self.s.over else None
 
     def call(self, name: str, args: dict, meta: dict) -> list[dict]:
         return self.s.call(name, args, meta.get("claudecode/toolUseId"))

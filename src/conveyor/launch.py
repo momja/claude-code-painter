@@ -125,6 +125,7 @@ class Launcher:
         self._targets = targets
         self._launches: dict[str, Launch] = {}
         self._agents: dict[str, tuple[str, Launch]] = {}  # canvas agent id -> (its canvas, its process)
+        self._watching = threading.Event()  # set while the canvas watcher runs; cleared to stop it
         self._lock = threading.Lock()
         self._probe: tuple[float, dict] | None = None
 
@@ -312,10 +313,13 @@ class Launcher:
     # ---- the shared canvas --------------------------------------------------------------------------------
 
     def create_canvas(self, body: dict) -> dict:
-        from conveyor.commons.tiles import DEFAULT_MAX_CALLS, DEFAULT_VIEWPORT, VIEWPORT_RANGE, create_canvas
+        from conveyor.commons.tiles import DEFAULT_MAX_CALLS, DEFAULT_VIEWPORT, MAX_TASK, VIEWPORT_RANGE, create_canvas
 
-        if not isinstance(body, dict) or set(body) - {"name", "viewport", "max_calls"}:
-            raise LaunchError("Expected name, viewport and max_calls.")
+        if not isinstance(body, dict) or set(body) - {"name", "viewport", "max_calls", "task"}:
+            raise LaunchError("Expected name, viewport, max_calls and task.")
+        task = body.get("task") or None
+        if task is not None and (not isinstance(task, str) or len(task) > MAX_TASK):
+            raise LaunchError(f"task must be text, at most {MAX_TASK} characters.")
         name = body.get("name") or "Commons"
         if not isinstance(name, str) or not name.strip() or len(name) > 60 or "\n" in name:
             raise LaunchError("name must be a line of text, at most 60 characters.")
@@ -325,28 +329,73 @@ class Launcher:
         max_calls = self._number("max_calls", body.get("max_calls", DEFAULT_MAX_CALLS), int)
         if not 1 <= max_calls <= 1000:
             raise LaunchError("max_calls must be between 1 and 1000.")
-        return create_canvas(self.db, name.strip(), viewport, max_calls)
+        return create_canvas(self.db, name.strip(), viewport, max_calls, (task or "").strip() or None)
 
     def start_agent(self, canvas_id: str, body: dict) -> dict:
         from conveyor.commons.agent import create_agent
 
-        agent = create_agent(self.db, canvas_id, body)
-        argv = ["canvas agent", agent["id"]]
+        agent = create_agent(self.db, canvas_id, body, status="starting")
+        return {**agent, "launch": self._spawn_agent(canvas_id, agent["id"], agent["name"])}
+
+    def _spawn_agent(self, canvas_id: str, agent_id: str, name: str | None) -> dict:
+        """Start the process for an agent already marked `starting`."""
+        argv = ["canvas agent", agent_id]
         try:
-            proc = subprocess.Popen([self.python, "-m", "conveyor.commons.agent", str(self.db), agent["id"]],
+            proc = subprocess.Popen([self.python, "-m", "conveyor.commons.agent", str(self.db), agent_id],
                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True, bufsize=1, env={**os.environ, "PYTHONUNBUFFERED": "1"},
                                     start_new_session=True)
         except OSError as error:
-            self._close_agent(agent["id"], "failed", f"Could not start the agent: {error}")
+            self._close_agent(agent_id, "failed", f"Could not start the agent: {error}")
             raise LaunchError(f"Could not start the agent: {error}") from error
-        launch = Launch(argv, f"Canvas agent {agent['name'] or agent['id']}", proc)
+        launch = Launch(argv, f"Canvas agent {name or agent_id}", proc)
         with self._lock:
             self._launches[launch.id] = launch
-            self._agents[agent["id"]] = (canvas_id, launch)
-        threading.Thread(target=self._read_agent, args=(launch, agent["id"]), name=f"agent-{agent['id']}",
+            self._agents[agent_id] = (canvas_id, launch)
+        threading.Thread(target=self._read_agent, args=(launch, agent_id), name=f"agent-{agent_id}",
                          daemon=True).start()
-        return {**agent, "launch": launch.view(log=False)}
+        return launch.view(log=False)
+
+    def watch_canvas(self, interval: float = 2.0) -> None:
+        """Start agents that wait in the database: the successors agents queue when they hand off."""
+        if self._watching.is_set():
+            return
+        self._watching.set()
+
+        def loop() -> None:
+            while self._watching.is_set():
+                try:
+                    self.start_queued()
+                except Exception as e:  # noqa: BLE001 - a bad pass must not end the watcher
+                    print(f"[canvas] couldn't start queued agents: {e}", flush=True)
+                time.sleep(interval)
+
+        threading.Thread(target=loop, name="canvas-watcher", daemon=True).start()
+
+    def start_queued(self) -> list[str]:
+        """One pass: claim each queued agent (queued -> starting, so only one claim wins) and start it."""
+        from conveyor.store import connect
+
+        conn = connect(self.db)
+        try:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvas_agents'").fetchone() is None:
+                return []
+            queued = conn.execute("SELECT id, canvas_id, name FROM canvas_agents WHERE status='queued' "
+                                  "ORDER BY created").fetchall()
+            claimed = []
+            for row in queued:
+                cur = conn.execute("UPDATE canvas_agents SET status='starting' WHERE id=? AND status='queued'", (row["id"],))
+                conn.commit()
+                if cur.rowcount == 1:
+                    claimed.append(row)
+        finally:
+            conn.close()
+        for row in claimed:
+            try:
+                self._spawn_agent(row["canvas_id"], row["id"], row["name"])
+            except LaunchError:
+                pass  # _spawn_agent has marked it failed
+        return [row["id"] for row in claimed]
 
     def _read_agent(self, launch: Launch, agent_id: str) -> None:
         launch._read()
@@ -359,7 +408,7 @@ class Launcher:
 
         conn = connect(self.db)
         try:
-            conn.execute("UPDATE canvas_agents SET status=?, ended=?, error=? WHERE id=? AND status IN ('queued', 'running')",
+            conn.execute("UPDATE canvas_agents SET status=?, ended=?, error=? WHERE id=? AND status IN ('queued', 'starting', 'running')",
                          (status, time.time(), error.strip()[:2000], agent_id))
             conn.commit()
         finally:
@@ -367,7 +416,18 @@ class Launcher:
 
     def stop_agent(self, canvas_id: str, agent_id: str) -> dict | None:
         canvas, launch = self._agents.get(agent_id, (None, None))
-        if launch is None or canvas != canvas_id:
+        if launch is None:  # a successor still waiting for the watcher: it just never starts
+            from conveyor.store import connect
+
+            conn = connect(self.db)
+            try:
+                cur = conn.execute("UPDATE canvas_agents SET status='stopped', ended=?, error='Stopped before it started' "
+                                   "WHERE id=? AND canvas_id=? AND status='queued'", (time.time(), agent_id, canvas_id))
+                conn.commit()
+            finally:
+                conn.close()
+            return {"id": agent_id, "state": "stopped"} if cur.rowcount else None
+        if canvas != canvas_id:
             return None
         return self.stop(launch.id)
 
@@ -412,6 +472,7 @@ class Launcher:
 
     def shutdown(self, grace: float = 30.0) -> None:
         """The server is going away; stop its runs rather than leave them spending in the background."""
+        self._watching.clear()
         live = [x for x in self._launches.values() if x.proc.poll() is None]
         if live:
             print(f"Stopping {len(live)} run{'s' if len(live) > 1 else ''} started from the dashboard...")

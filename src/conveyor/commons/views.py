@@ -8,13 +8,14 @@ import time
 
 STALE_SECONDS = 20 * 60  # an agent marked running with no call for this long died without closing its row
 RECENT_MESSAGES = 40
+LIVE = ("queued", "starting", "running")
 
 
 def _agent(row: sqlite3.Row) -> dict:
     agent = dict(row)
     config = json.loads(agent.pop("config") or "{}")
     agent["config"] = {k: v for k, v in config.items() if k not in ("source", "prompt")}  # the text is in the catalog
-    if agent["status"] in ("queued", "running") and time.time() - (agent["last_ts"] or agent["created"]) > STALE_SECONDS:
+    if agent["status"] in LIVE and time.time() - (agent["last_ts"] or agent["created"]) > STALE_SECONDS:
         agent["status"] = "interrupted"
     return agent
 
@@ -27,7 +28,7 @@ def canvases(conn: sqlite3.Connection) -> list[dict]:
     for row in conn.execute("SELECT * FROM canvases ORDER BY created DESC"):
         c = dict(row)
         c["config"] = json.loads(c["config"])
-        stats = conn.execute("SELECT count(*) AS agents, sum(status IN ('queued','running')) AS running "
+        stats = conn.execute("SELECT count(*) AS agents, sum(status IN ('queued','starting','running')) AS running "
                              "FROM canvas_agents WHERE canvas_id=?", (c["id"],)).fetchone()
         ops = conn.execute("SELECT count(*) AS n, max(ts) AS last FROM canvas_ops WHERE canvas_id=?", (c["id"],)).fetchone()
         c.update(agents=stats["agents"], running=stats["running"] or 0, ops=ops["n"], last_ts=ops["last"])

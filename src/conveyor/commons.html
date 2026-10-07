@@ -21,6 +21,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 380px;height:calc(100dvh -
 .toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 16px;border-bottom:1px solid var(--line)}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}.seg button{border:0;border-radius:0}.seg button[aria-pressed=true]{background:var(--accent);color:var(--surface)}
 #where{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;min-width:150px;text-align:right}
+#task-bar{padding:8px 16px;border-bottom:1px solid var(--line);background:var(--surface);font-size:13px;white-space:pre-wrap;max-height:6.5em;overflow:auto}
 #wrap{position:relative;flex:1;min-height:0;background:var(--paper);overflow:hidden;cursor:grab;touch-action:none}
 #wrap.dragging{cursor:grabbing}
 #view{position:absolute;inset:0;width:100%;height:100%}
@@ -35,7 +36,9 @@ label{display:grid;gap:4px;margin-bottom:11px;font-size:12px;font-weight:600}
 label select,label input,label textarea{font-weight:400;font-size:14px;width:100%}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
 .check{display:flex;align-items:center;gap:8px;font-weight:400;font-size:13px}.check input{width:auto}
-.sheet{display:block;width:100%;max-height:170px;object-fit:contain;background:var(--bg);border-radius:6px;margin:-4px 0 10px}
+.previews{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:-4px 0 6px}.previews figure{margin:0;min-width:0}
+.previews img{display:block;width:100%;height:130px;object-fit:contain;background:var(--bg);border-radius:6px}
+.previews figcaption{font-size:11px;color:var(--muted);margin-top:2px}.pair{font-size:12px;margin:0 0 10px;color:var(--muted)}.pair b{color:var(--ink);font-weight:600}
 details{margin:-4px 0 11px;font-size:12px}details summary{cursor:pointer;color:var(--muted)}
 pre{font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--code);padding:10px;border-radius:6px;max-height:220px;overflow:auto;margin:6px 0 0}
 #message{white-space:pre-wrap;font-size:13px;margin-top:10px}
@@ -71,6 +74,7 @@ dialog::backdrop{background:#0006}
     <label class="check" style="margin:0"><input id="show-agents" type="checkbox" checked> Viewports</label>
     <span class="spacer"></span><span id="where" class="muted"></span>
   </div>
+  <div id="task-bar" hidden><b>Task</b> <span id="task-text"></span></div>
   <div id="wrap"><canvas id="view" aria-label="The shared canvas. Drag to pan, scroll to zoom, click to set where a new agent starts."></canvas>
     <div id="empty" hidden></div>
     <div id="hint">Drag to pan · scroll to zoom · click to place a new agent</div></div>
@@ -86,11 +90,15 @@ dialog::backdrop{background:#0006}
   <section aria-labelledby="spawn-title">
     <h2 id="spawn-title">Spawn an agent</h2>
     <form id="spawn">
-      <label>Instrument<select id="instrument" required></select></label>
-      <img id="sheet" class="sheet" alt="The instrument's demo sheet" hidden>
-      <details id="instrument-details"><summary>Tools and source</summary><pre id="instrument-source"></pre></details>
-      <label>Painter prompt<select id="prompt" required></select></label>
+      <label class="check"><input id="random" type="checkbox" checked> Random painter: an instrument and its prompt, drawn from each run's top 5</label>
+      <div id="choice" hidden>
+      <label>Painter<select id="painter"></select></label>
+      <div class="previews"><figure id="painting-fig"><img id="painting" alt="This painter's best painting"><figcaption>Best painting</figcaption></figure>
+        <figure id="sheet-fig"><img id="sheet" alt="The instrument's demo sheet"><figcaption>What its tools draw</figcaption></figure></div>
+      <p id="pair-summary" class="pair"></p>
+      <details><summary>Instrument source</summary><pre id="instrument-source"></pre></details>
       <details><summary>Prompt text</summary><pre id="prompt-text"></pre></details>
+      </div>
       <div class="row"><label>Harness<select id="harness"><option value="claude">Claude Code</option><option value="pi">Pi</option></select></label>
         <label>Effort<select id="effort"><option>low</option><option>medium</option><option selected>high</option><option>xhigh</option><option>max</option></select></label></div>
       <label id="provider-field" hidden>Provider<select id="provider"></select></label>
@@ -98,6 +106,7 @@ dialog::backdrop{background:#0006}
       <div class="row3"><label>Start x<input id="x" type="number" step="1" value="0"></label><label>Start y<input id="y" type="number" step="1" value="0"></label><label>Cap, $<input id="cap" type="number" step="any" min="0.01" max="100" value="5"></label></div>
       <label>Name<input id="name" maxlength="60" placeholder="Model name"></label>
       <label class="check"><input id="batch" type="checkbox" checked> Offer paint_batch (40 strokes for one call)</label>
+      <label class="check"><input id="successors" type="checkbox" checked> May spawn a successor to keep working</label>
       <label id="token-field" hidden>Launch token<input id="token" type="password" autocomplete="off"></label>
       <button id="submit" class="primary" type="submit" disabled>Spawn</button>
       <div id="message" role="status" aria-live="polite"></div>
@@ -111,7 +120,8 @@ dialog::backdrop{background:#0006}
   <h2>New canvas</h2>
   <label>Name<input id="canvas-name" maxlength="60" value="Commons" required></label>
   <div class="row"><label>Viewport, px<input id="canvas-viewport" type="number" min="128" max="1024" step="1" value="512"></label><label>Calls per agent<input id="canvas-calls" type="number" min="1" max="1000" value="100"></label></div>
-  <p class="muted" style="font-size:12px">Every agent on this canvas sees a square viewport this size and gets this many tool calls.</p>
+  <label>Task, optional<textarea id="canvas-task" rows="3" maxlength="2000" placeholder="One image every agent works on together. Leave it empty for no goal."></textarea></label>
+  <p class="muted" style="font-size:12px">Every agent on this canvas sees a square viewport this size, gets this many tool calls, and is given the task word for word, with no other instructions about it. It can't be changed later.</p>
   <div id="canvas-error" class="bad"></div>
   <div style="display:flex;gap:8px;justify-content:flex-end"><button value="cancel" formnovalidate>Cancel</button><button id="canvas-create" class="primary" value="ok">Create</button></div>
 </form></dialog>
@@ -130,6 +140,7 @@ async function api(path, method="GET", body){
   return out;
 }
 const hue = id => { let h = 0; for(const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 360; };
+const LIVE = ["queued", "starting", "running"];
 const color = (id, a=1) => `hsla(${hue(id)},62%,44%,${a})`;
 
 // ---- state ----------------------------------------------------------------------------------------------
@@ -213,7 +224,7 @@ function frame(x, y, stroke, label, dashed){
 // Where each agent's viewport is: live, its last known corner; in replay, its corner as of the replayed op.
 function viewports(){
   const name = id => S.agents.find(a => a.id === id)?.name || String(id).slice(0, 6);
-  if(S.mode === "live") return S.agents.filter(a => ["queued","running"].includes(a.status)).map(a => ({id:a.id, x:a.x, y:a.y, label:a.name, active:true}));
+  if(S.mode === "live") return S.agents.filter(a => LIVE.includes(a.status)).map(a => ({id:a.id, x:a.x, y:a.y, label:a.name, active:true}));
   const at = S.history.ops[S.idx]?.[0] ?? 0, out = [];
   for(const [id, track] of S.tracks){
     if(track[0][0] > at) continue;
@@ -271,6 +282,7 @@ async function poll(){
     if(cid !== S.cid) return;
     for(const [tx, ty, seq] of r.heads) S.heads.set(`${tx},${ty}`, seq);
     S.seq = r.seq; S.agents = r.agents; S.messages = r.messages; S.canvas = r.canvas; S.size = r.canvas.config.viewport;
+    $("task-bar").hidden = !r.canvas.config.task; $("task-text").textContent = r.canvas.config.task || "";
     const option = [...$("canvas-select").options].find(o => o.value === cid);
     if(option) option.textContent = `${r.canvas.name} · ${S.size}px · ${S.agents.length} agents`;
     renderAgents(); renderMessages(); counts(); emptyState(); draw();
@@ -278,7 +290,7 @@ async function poll(){
   if(cid === S.cid) S.timer = setTimeout(poll, S.mode === "live" ? 2000 : 6000);
 }
 function counts(){
-  const running = S.agents.filter(a => ["queued","running"].includes(a.status)).length;
+  const running = S.agents.filter(a => LIVE.includes(a.status)).length;
   $("counts").textContent = `${S.agents.length} agents · ${running} painting · ${S.seq ? S.seq.toLocaleString() : 0} ops`;
 }
 function emptyState(){
@@ -289,12 +301,13 @@ function agentName(id){ return S.agents.find(a => a.id === id)?.name || String(i
 function renderAgents(){
   if(!S.agents.length){ $("agents").innerHTML = `<p class="muted">None yet.</p>`; return; }
   $("agents").innerHTML = [...S.agents].reverse().map(a => {
-    const c = a.config || {}, live = ["queued","running"].includes(a.status), pct = Math.round(100 * a.calls_used / a.max_calls);
+    const c = a.config || {}, live = LIVE.includes(a.status), pct = Math.round(100 * a.calls_used / a.max_calls);
     const model = [c.harness === "pi" ? `pi · ${c.provider}` : "claude", c.model, c.effort].filter(Boolean).join(" · ");
-    return `<div class="agent" style="--c:${color(a.id)}"><div class="top"><b title="${esc(a.name)}">${esc(a.name)}</b><span class="status ${live ? "running" : ""}">${esc(a.status)}</span></div>
-      <div class="meta">${esc(model)}</div>
-      <div class="meta clamp" title="${esc(c.instrument_label)}">Instrument: ${esc(c.instrument_label || c.instrument_id)}</div>
-      <div class="meta clamp" title="${esc(c.prompt_label)}">Prompt: ${esc(c.prompt_label || c.prompt_id)}</div>
+    return `<div class="agent" style="--c:${color(a.id)}"><div class="top"><b title="${esc(a.name)}">${esc(a.name)}</b><span class="status ${live ? "running" : ""}">${esc(a.status.replace("_", " "))}</span></div>
+      <div class="meta">${esc(model)}${c.generation > 1 ? ` · session ${c.generation}, from ${esc(agentName(c.parent_id))}` : ""}${c.successors === false ? " · no successors" : ""}${c.random ? " · painter drawn at random" : ""}</div>
+      ${a.status === "handed_off" ? `<div class="meta">Handed off to ${esc(S.agents.filter(x => x.config?.parent_id === a.id).map(x => x.name).join(", ") || "a successor")}</div>` : ""}
+      <div class="meta clamp" title="${esc(c.instrument_label)}">Instrument: ${esc(c.instrument_label)}</div>
+      <div class="meta clamp" title="${esc(c.prompt_label)}">Prompt: ${esc(c.prompt_label)}</div>
       <div class="bar" title="${a.calls_used} of ${a.max_calls} tool calls"><i style="width:${pct}%"></i></div>
       <div class="meta">${a.calls_used}/${a.max_calls} calls · at (${a.x}, ${a.y})${a.error ? ` · <span class="bad">${esc(a.error)}</span>` : ""}</div>
       <div class="acts"><button data-find="${esc(a.id)}">Find</button>${live && S.canLaunch ? `<button data-stop="${esc(a.id)}">Stop</button>` : ""}${a.session_id ? `<a href="/#session=${encodeURIComponent(a.session_id)}" target="_blank" rel="noopener">Transcript</a>` : ""}</div></div>`;
@@ -350,34 +363,40 @@ $("mode-replay").onclick = () => { if(S.mode !== "replay" && S.cid) enterReplay(
 $("mode-live").onclick = () => { if(S.mode !== "live") leaveReplay(); };
 
 // ---- spawning -------------------------------------------------------------------------------------------
+// A painter is an instrument and the prompt it painted with; the catalog only offers pairs that painted together.
 function fillCatalog(){
-  const opt = e => `<option value="${esc(e.id)}">${esc(e.label || e.summary)}${e.best_score != null ? ` · best ${e.best_score.toFixed(3)}` : ""}${e.origins.length ? ` · ${new Set(e.origins.map(o => o.run_id)).size} run${new Set(e.origins.map(o => o.run_id)).size > 1 ? "s" : ""}` : ""}</option>`;
-  $("instrument").innerHTML = S.catalog.instruments.map(opt).join(""); $("prompt").innerHTML = S.catalog.prompts.map(opt).join("");
+  const short = (t, n) => t.length > n ? t.slice(0, n - 1) + "…" : t;
+  $("painter").innerHTML = S.catalog.pairs.map(p => `<option value="${esc(p.id)}">${p.best_score != null ? p.best_score.toFixed(3) : p.paintings ? "unscored" : "seed"} · ${esc(p.instrument.tools.join(", "))} · ${esc(short(p.instrument.label, 40))} / ${esc(short(p.prompt.label, 40))}</option>`).join("");
   showChoice();
 }
 function showChoice(){
-  const inst = S.catalog.instruments.find(e => e.id === $("instrument").value), prompt = S.catalog.prompts.find(e => e.id === $("prompt").value);
-  $("sheet").hidden = !inst?.sheet; if(inst?.sheet) $("sheet").src = `/artifacts/${encodeURIComponent(inst.sheet)}`;
-  $("instrument-source").textContent = inst ? `Tools: ${inst.tools.join(", ") || "none"}${inst.views.length ? `\nViews: ${inst.views.join(", ")}` : ""}\n\n${inst.text}` : "";
-  $("prompt-text").textContent = prompt?.text || "";
+  const p = S.catalog.pairs.find(e => e.id === $("painter").value);
+  const art = (id, name) => { $(`${id}-fig`).hidden = !name; if(name) $(id).src = `/artifacts/${encodeURIComponent(name)}`; };
+  art("painting", p?.painting); art("sheet", p?.instrument.sheet);
+  if(p){
+    $("pair-summary").innerHTML = `<b>Instrument</b> ${esc(p.instrument.label)} · tools ${esc(p.instrument.tools.join(", ") || "none")}${p.instrument.views.length ? ` · views ${esc(p.instrument.views.join(", "))}` : ""}<br><b>Prompt</b> ${esc(p.prompt.label)}<br>${p.ranks.length ? `${p.ranks.slice(0, 3).map(r => `#${r.place} in ${esc(r.run)} (${esc(String(r.run_id).slice(0, 6))})`).join(", ")}${p.ranks.length > 3 ? ` and ${p.ranks.length - 3} more runs` : ""} · ${p.paintings} painting${p.paintings > 1 ? "s" : ""}, best ${p.best_score.toFixed(3)}` : "A seed pair, offered because no run here has a scored painting yet."}`;
+  }
+  $("instrument-source").textContent = p?.instrument.text || ""; $("prompt-text").textContent = p?.prompt.text || "";
   updateSubmit();
 }
-$("instrument").onchange = $("prompt").onchange = showChoice;
+$("painter").onchange = showChoice;
+$("random").onchange = () => { $("choice").hidden = $("random").checked; updateSubmit(); };
 function fillHarness(){
   const o = S.options, kind = $("harness").value;
   $("provider-field").hidden = kind !== "pi";
   if(o?.models){ const models = kind === "pi" ? (o.models.pi[$("provider").value] || []) : o.models.claude; $("models").innerHTML = models.map(m => `<option value="${esc(m)}">`).join(""); }
 }
 $("harness").onchange = $("provider").onchange = fillHarness;
-function updateSubmit(){ $("submit").disabled = !S.canLaunch || !S.cid || !$("instrument").value || !$("prompt").value; }
+function updateSubmit(){ $("submit").disabled = !S.canLaunch || !S.cid || (!$("random").checked && !$("painter").value); }
 $("spawn").onsubmit = async e => {
   e.preventDefault(); if($("token").value) token.set($("token").value);
   $("submit").disabled = true; $("message").textContent = "Spawning…";
-  const body = {instrument_id:$("instrument").value, prompt_id:$("prompt").value, harness:$("harness").value, effort:$("effort").value,
+  const body = {pair_id:$("random").checked ? "random" : $("painter").value, harness:$("harness").value, effort:$("effort").value,
     model:$("model").value.trim() || null, x:Math.round(Number($("x").value) || 0), y:Math.round(Number($("y").value) || 0),
-    cap:Number($("cap").value) || 5, name:$("name").value.trim() || null, paint_batch:$("batch").checked};
+    cap:Number($("cap").value) || 5, name:$("name").value.trim() || null, paint_batch:$("batch").checked,
+    successors:$("successors").checked};
   if(body.harness === "pi") body.provider = $("provider").value;
-  try{ const a = await api(`/api/canvases/${encodeURIComponent(S.cid)}/agents`, "POST", body); $("message").textContent = `Spawned ${a.name || a.id} at (${a.x}, ${a.y}).`; S.spawn = null; await poll(); }
+  try{ const a = await api(`/api/canvases/${encodeURIComponent(S.cid)}/agents`, "POST", body); $("message").textContent = `Spawned ${a.name || a.id} at (${a.x}, ${a.y})${a.painter.random ? ", drawn at random" : ""}: ${a.painter.instrument} / ${a.painter.prompt}.`; S.spawn = null; await poll(); }
   catch(err){ $("message").textContent = err.message; }
   updateSubmit();
 };
@@ -393,6 +412,7 @@ async function loadCanvases(want){
 }
 async function choose(id){
   if(S.mode === "replay") leaveReplay();
+  $("task-bar").hidden = true;
   S.cid = id; S.seq = 0; S.heads = new Map(); S.agents = []; S.spawn = null; shown.clear();
   history.replaceState(null, "", `/canvas?canvas=${encodeURIComponent(id)}`);
   await poll(); fit(); updateSubmit();
@@ -402,7 +422,7 @@ $("new-canvas").onclick = () => { $("canvas-error").textContent = ""; $("canvas-
 $("canvas-form").onsubmit = async e => {
   if(e.submitter?.value !== "ok") return;
   e.preventDefault();
-  try{ const c = await api("/api/canvases", "POST", {name:$("canvas-name").value.trim(), viewport:Number($("canvas-viewport").value), max_calls:Number($("canvas-calls").value)});
+  try{ const c = await api("/api/canvases", "POST", {name:$("canvas-name").value.trim(), viewport:Number($("canvas-viewport").value), max_calls:Number($("canvas-calls").value), task:$("canvas-task").value.trim() || null});
     $("canvas-dialog").close(); await loadCanvases(c.id); }
   catch(err){ $("canvas-error").textContent = err.message; }
 };

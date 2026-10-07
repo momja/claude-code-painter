@@ -42,6 +42,7 @@ PAPER_RGB = np.asarray([round(c * 255) for c in PAPER], dtype=np.uint8)
 DEFAULT_VIEWPORT = 512
 DEFAULT_MAX_CALLS = 100
 VIEWPORT_RANGE = (128, 1024)
+MAX_TASK = 2000  # characters in a canvas's task
 MOVE_SHARE = 0.75  # the farthest one move goes, as a share of the viewport side; consecutive views always overlap
 
 
@@ -65,10 +66,13 @@ def blank_tile() -> np.ndarray:
 
 
 def create_canvas(db: str | Path, name: str, viewport: int = DEFAULT_VIEWPORT,
-                  max_calls: int = DEFAULT_MAX_CALLS) -> dict:
+                  max_calls: int = DEFAULT_MAX_CALLS, task: str | None = None) -> dict:
+    """A new canvas. `task`, when given, is the one image every agent on it is told to make together."""
     init_db(db)
     row = {"id": new_id(), "name": name, "created": time.time(),
            "config": {"viewport": int(viewport), "max_calls": int(max_calls), "tile": TILE}}
+    if task:
+        row["config"]["task"] = task
     conn = sqlite3.connect(db, timeout=BUSY_TIMEOUT)
     try:
         conn.execute("INSERT INTO canvases (id, name, created, config) VALUES (?, ?, ?, ?)",
@@ -166,6 +170,30 @@ class SharedCanvas:
         tiles = {(tx, ty): found.get((tx, ty)) if (tx, ty) in found else blank_tile()
                  for ty in range(ty0, ty1 + 1) for tx in range(tx0, tx1 + 1)}
         return Region(x, y, w, h, tiles)
+
+    def overview(self, box: tuple[int, int, int, int], side: int) -> tuple[np.ndarray, tuple[int, int, int, int], float]:
+        """Everything painted, plus `box` (x0, y0, x1, y1), shrunk so the longer side is at most `side` pixels.
+        Returns the picture as uint8 RGB, the canvas window it shows, and its scale (picture px per canvas px,
+        never above 1). Tiles are shrunk one at a time, so a big canvas is never held at full size."""
+        lo = self.conn.execute("SELECT min(tx), min(ty), max(tx), max(ty) FROM canvas_heads WHERE canvas_id=?",
+                               (self.canvas_id,)).fetchone()
+        x0, y0, x1, y1 = box
+        if lo[0] is not None:
+            x0, y0 = min(x0, lo[0] * TILE), min(y0, lo[1] * TILE)
+            x1, y1 = max(x1, (lo[2] + 1) * TILE), max(y1, (lo[3] + 1) * TILE)
+        scale = min(1.0, side / max(x1 - x0, y1 - y0))
+        w, h = max(1, round((x1 - x0) * scale)), max(1, round((y1 - y0) * scale))
+        out = np.broadcast_to(PAPER_RGB, (h, w, 3)).copy()
+        for row in self.conn.execute(
+                "SELECT t.tx, t.ty, t.data FROM canvas_heads h JOIN canvas_tiles t ON t.canvas_id=h.canvas_id "
+                "AND t.tx=h.tx AND t.ty=h.ty AND t.seq=h.seq WHERE h.canvas_id=?", (self.canvas_id,)):
+            left, top = int((row["tx"] * TILE - x0) * scale), int((row["ty"] * TILE - y0) * scale)
+            right, bottom = int(((row["tx"] + 1) * TILE - x0) * scale), int(((row["ty"] + 1) * TILE - y0) * scale)
+            right, bottom = min(w, max(right, left + 1)), min(h, max(bottom, top + 1))
+            with Image.open(io.BytesIO(row["data"])) as im:
+                small = im.convert("RGB").resize((right - left, bottom - top), Image.Resampling.BOX)
+            out[top:bottom, left:right] = np.asarray(small, dtype=np.uint8)
+        return out, (x0, y0, x1, y1), scale
 
     def record(self, *, agent_id: str | None, tool: str, status: str, x: int, y: int, args: dict | None = None,
                note: str = "", tiles: dict[tuple[int, int], np.ndarray] | None = None) -> int:

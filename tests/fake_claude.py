@@ -3,7 +3,9 @@ A stand-in for the `claude` CLI, speaking the same stream-json protocol, for tes
 
 It reads the first user message from stdin, launches the MCP server named in --mcp-config, and drives it:
   - the canvas server: calls each instrument tool once with arguments built from its schema, then look and finish
-  - the shared canvas: looks, paints, writes a message, moves, batches, then looks until its budget runs out
+  - the shared canvas: looks, paints, writes a message, moves, batches, takes an overview, then looks until its
+    budget runs out;
+    if FAKE_CLAUDE_HANDOFF names a file that exists, it deletes it and calls spawn_successor instead of looking
   - the workbench: submits the source in FAKE_CLAUDE_SUBMIT (or tries it, then submits)
   - no server and --json-schema: returns FAKE_CLAUDE_STRUCTURED as the structured output
   - FAKE_CLAUDE_CUT_OFF names a file: if it exists, the painter deletes it and hits the usage limit after its
@@ -159,9 +161,16 @@ if cfg:
                   ("move_viewport", {"angle": 0, "distance": 10_000})]
         if "paint_batch" in names:
             script.append(("paint_batch", {"tool": paint["name"], "calls": [arguments, arguments]}))
+        script.append(("overview", {}))
         for name, arguments in script:
             i += 1
             call(server, i, name, arguments)
+        handoff = os.environ.get("FAKE_CLAUDE_HANDOFF")
+        if handoff and os.path.exists(handoff) and "spawn_successor" in names:
+            os.remove(handoff)
+            i += 1
+            call(server, i, "spawn_successor", {"note": "Finish the red line to the east."})
+            i = 300  # and stop, the way a model told its session is over would
         while i < 300:
             i += 1
             if call(server, i, "look", {}).get("isError"):
