@@ -216,10 +216,15 @@ function draw(){
   const frm = S.canvas?.config?.frame;
   if(frm){  // nothing exists outside the frame: dim it and draw the edge
     const [fx0, fy0] = toScreen(frm[0], frm[1]), [fx1, fy1] = toScreen(frm[2], frm[3]);
-    ctx.fillStyle = "rgba(20,20,26,.28)";
+    ctx.fillStyle = "rgba(20,20,26,.55)";
     ctx.fillRect(0, 0, w, Math.max(0, fy0)); ctx.fillRect(0, fy1, w, Math.max(0, h - fy1));
     ctx.fillRect(0, fy0, Math.max(0, fx0), fy1 - fy0); ctx.fillRect(fx1, fy0, Math.max(0, w - fx1), fy1 - fy0);
-    ctx.strokeStyle = "rgba(31,35,40,.7)"; ctx.lineWidth = 2; ctx.strokeRect(fx0, fy0, fx1 - fx0, fy1 - fy0); ctx.lineWidth = 1;
+    ctx.save(); ctx.lineWidth = 4; ctx.strokeStyle = "#1f2328"; ctx.strokeRect(fx0 - 2, fy0 - 2, fx1 - fx0 + 4, fy1 - fy0 + 4);
+    ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.8)"; ctx.strokeRect(fx0 - 4.5, fy0 - 4.5, fx1 - fx0 + 9, fy1 - fy0 + 9);
+    const label = `frame ${frm[2] - frm[0]} × ${frm[3] - frm[1]}`;  // above its top-left corner, or just inside when that's off screen
+    ctx.font = "600 12px -apple-system,system-ui,sans-serif"; const lw = ctx.measureText(label).width + 12;
+    const lx = Math.max(4, fx0 - 4), ly = fy0 - 26 >= 0 ? fy0 - 26 : Math.max(4, fy0 + 6);
+    ctx.fillStyle = "#1f2328"; ctx.fillRect(lx, ly, lw, 20); ctx.fillStyle = "#fff"; ctx.fillText(label, lx + 6, ly + 14); ctx.restore();
   }
   const [ox, oy] = toScreen(0, 0); ctx.strokeStyle = "rgba(47,75,143,.35)"; ctx.beginPath(); ctx.moveTo(ox - 8, oy); ctx.lineTo(ox + 8, oy); ctx.moveTo(ox, oy - 8); ctx.lineTo(ox, oy + 8); ctx.stroke();
   if($("show-text").checked) drawText();
