@@ -565,11 +565,27 @@ def test_the_pen_keeps_its_state_across_calls(canvas, tmp_path):
     assert img[20, 50, 0] - img[20, 50, 2] > 0.2
 
 
-def test_an_instrument_with_a_canvas_tool_name_is_refused(canvas, tmp_path):
+def test_an_instrument_tool_named_like_a_canvas_tool_is_renamed(canvas, tmp_path):
     db, row = canvas
     clash = ROUND.replace("stroke", "move_viewport")
-    with pytest.raises(ValueError, match="clash"):
-        agent(db, row, tmp_path, source=clash)
+    server = agent(db, row, tmp_path, source=clash)
+    names = [t["name"] for t in server.tools()]
+    assert names.count("move_viewport") == 1 and "instrument_move_viewport" in names
+    batch = next(t for t in server.tools() if t["name"] == "paint_batch")
+    assert "instrument_move_viewport" in batch["inputSchema"]["properties"]["tool"]["enum"]
+    painted = tool(server, "instrument_move_viewport", stroke(20, 20))
+    assert not painted["isError"], text_of(painted)
+    moved = tool(server, "move_viewport", {"angle": 0, "distance": 50})  # the canvas's own, still
+    assert not moved["isError"] and "moved by 50 in x" in text_of(moved)
+    for name in ("instrument_move_viewport", "move_viewport"):  # a batch takes either name
+        done = tool(server, "paint_batch", {"tool": name, "calls": [stroke(30, 60), stroke(30, 90)]})
+        assert not done["isError"] and "Applied 2 of 2" in text_of(done), text_of(done)
+        mixed = tool(server, "paint_batch", {"calls": [[name, stroke(30, 120)]]})
+        assert not mixed["isError"], text_of(mixed)
+    prompt = system_prompt({"source": clash, "prompt": "Paint big."}, 256, 0, 0, 20)
+    assert ("the instrument's `move_viewport` is called `instrument_move_viewport`, because the canvas has its own "
+            "`move_viewport`.") in " ".join(prompt.split())
+    assert "renamed" not in system_prompt({"source": ROUND, "prompt": "Paint big."}, 256, 0, 0, 20)
 
 
 # ---- the catalog and spawning ---------------------------------------------------------------------------------
@@ -678,7 +694,7 @@ def test_a_random_painter_is_drawn_from_every_pair_the_canvas_can_run(tmp_path, 
     monkeypatch.setattr("conveyor.commons.agent.random.choice", choice)
     spawned = create_agent(db, row["id"], {"pair_id": "random"})
     everything = {p["id"] for p in catalog.catalog(connect(db, readonly=True))["pairs"]}
-    assert set(offered) == everything - {catalog.pair_key(CLASH, "Paint big.")}  # all but the one that clashes
+    assert set(offered) == everything  # one that clashes too: its tool is renamed
     assert spawned["painter"]["random"] and spawned["painter"]["id"] == offered[-1]
     config = views.canvas(connect(db, readonly=True), row["id"])["agents"][0]["config"]
     assert config["random"] and config["pair_id"] == offered[-1]
@@ -709,7 +725,7 @@ def test_a_canvas_draws_only_from_the_painters_chosen_for_it(tmp_path, monkeypat
 
     monkeypatch.setattr("conveyor.commons.agent.random.choice", choice)
     first = create_agent(db, row["id"], {"pair_id": "random"})
-    assert set(offered) == {PAIR, other}  # every painter the canvas can run
+    assert set(offered) == {PAIR, other, catalog.pair_key(CLASH, "Paint big.")}  # every painter in the catalog
     assert launcher.set_painters(row["id"], {"pair_ids": [other, other]}) == {"id": row["id"], "pairs": [other]}
     create_agent(db, row["id"], {"pair_id": "random"})
     assert offered == [other]
@@ -723,18 +739,21 @@ def test_a_canvas_draws_only_from_the_painters_chosen_for_it(tmp_path, monkeypat
         with pytest.raises(LaunchError):
             launcher.set_painters(row["id"], body)
     assert launcher.set_painters("nope", {"pair_ids": None}) is None
-    launcher.set_painters(row["id"], {"pair_ids": [catalog.pair_key(CLASH, "Paint big.")]})  # only one it can't run
+    conn = connect(db)  # a painter chosen once that has since left the catalog
+    conn.execute("UPDATE canvases SET config=json_set(config, '$.pairs', json('[\"c-gone\"]')) WHERE id=?", (row["id"],))
+    conn.commit()
+    conn.close()
     with pytest.raises(LaunchError, match="Choose its painters again"):
         create_agent(db, row["id"], {"pair_id": "random"})
     assert launcher.set_painters(row["id"], {"pair_ids": None}) == {"id": row["id"], "pairs": None}
     assert "pairs" not in views.canvas(connect(db, readonly=True), row["id"])["canvas"]["config"]
 
 
-def test_spawning_refuses_an_instrument_whose_tools_clash(tmp_path):
+def test_spawning_takes_an_instrument_whose_tool_names_clash(tmp_path):
     db = seeded_db(tmp_path)
     row = create_canvas(db, "C")
-    with pytest.raises(LaunchError, match="write_message"):
-        create_agent(db, row["id"], {"pair_id": catalog.pair_key(CLASH, "Paint big.")})
+    made = create_agent(db, row["id"], {"pair_id": catalog.pair_key(CLASH, "Paint big.")})
+    assert made["painter"]["id"] == catalog.pair_key(CLASH, "Paint big.")
 
 
 def test_an_agent_runs_to_the_end_of_its_budget(tmp_path, fake_claude, monkeypatch):
@@ -916,7 +935,8 @@ def test_a_handed_off_agent_queues_its_successor_with_only_the_canvas(tmp_path, 
     assert (child["x"], child["y"]) == (parent["x"], parent["y"]) == (5 + 192, 7)
     c = child["config"]
     assert (c["generation"], c["parent_id"], c["lineage"]) == (2, parent["id"], parent["id"])
-    assert "handoff_note" not in c and parent["config"]["pair_id"] == PAIR and offered == [PAIR]
+    assert "handoff_note" not in c and parent["config"]["pair_id"] == PAIR
+    assert offered == [PAIR, catalog.pair_key(CLASH, "Paint big.")]  # the whole catalog
     assert c["pair_id"] == "c-drawn" and c["random"] and c["model"] == parent["config"]["model"]  # a new painter
     run_agent(db, child["id"])  # the flag is gone, so this one paints to the end of its budget
     conn = connect(db, readonly=True)

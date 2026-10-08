@@ -85,6 +85,13 @@ SHARED_SHOWN = 2  # the most shared pictures one result carries; the newest are 
 JUDGE_TOOLS = ("look", "overview", "move_viewport", "write_message")  # a judge looks, moves and writes; it never paints
 HARNESS_TOOLS = ("look", "overview", "move_viewport", "write_message", "broadcast", "paint_batch", "spawn_successor",
                  "generate_reference")
+RENAMED = "instrument_"  # put before an instrument tool's name when the canvas has a tool of that name
+
+
+def agent_name(name: str) -> str:
+    """What an agent calls an instrument's tool: its own name, or with RENAMED before it if the canvas has a tool
+    called that. Six painters in the catalog had a view called `overview` and couldn't be spawned before this."""
+    return RENAMED + name if name in HARNESS_TOOLS else name
 
 
 class AgentSession:
@@ -99,9 +106,9 @@ class AgentSession:
         self.x, self.y = clamp_to_frame(self.frame, int(job["x"]), int(job["y"]), self.size)
         self.judge = job.get("kind") == "judge"
         self.inst = None if self.judge else Instrument(job["source"])
-        taken = {t.name for t in [*self.inst.spec.tools, *self.inst.spec.views]} & set(HARNESS_TOOLS) if self.inst else set()
-        if taken:
-            raise ValueError(f"the instrument's tool names clash with the canvas's: {sorted(taken)}")
+        # The instrument's tools whose names the canvas uses, under the names the agent calls them by.
+        own = [t.name for t in [*self.inst.spec.tools, *self.inst.spec.views]] if self.inst else []
+        self.renamed = {agent_name(n): n for n in own if agent_name(n) != n}
         self.batch_enabled = bool(job.get("paint_batch", True)) and not self.judge  # a judge has nothing to batch
         self.successors = bool(job.get("successors", False)) and not self.judge
         self.references = bool(job.get("references", False)) and not self.judge
@@ -244,6 +251,8 @@ class AgentSession:
                 f"y {round(min(b[1] for b in box))} to {round(max(b[3] for b in box))}.")
 
     def _dispatch(self, name: str, args: dict, tool_use_id: str | None) -> list[dict]:
+        if name in self.renamed:
+            return self._instrument(self.renamed[name], args, tool_use_id)
         if name == "look":
             return self.look(tool_use_id)
         if name == "overview":
@@ -260,6 +269,13 @@ class AgentSession:
             return [text(self.spawn_successor(args, tool_use_id))]
         if name == "paint_batch" and self.batch_enabled:
             return [text(self.batch(args, tool_use_id))]
+        if name not in HARNESS_TOOLS:  # a canvas tool this agent hasn't got isn't the instrument's
+            return self._instrument(name, args, tool_use_id)
+        self._op(name, "rejected", args, "no such tool", tool_use_id=tool_use_id)
+        raise ToolFailure(f"No tool named {name}.")
+
+    def _instrument(self, name: str, args: dict, tool_use_id: str | None) -> list[dict]:
+        """One of the instrument's own tools, by the instrument's name for it."""
         if self.inst and name in {v.name for v in self.inst.spec.views}:
             return self.view(name, args, tool_use_id)
         if self.inst and name in {t.name for t in self.inst.spec.tools}:
@@ -356,6 +372,14 @@ class AgentSession:
             (note + ". " if note else "") + "Nothing visible changed.")
 
     def batch(self, args: dict, tool_use_id: str | None = None) -> str:
+        if self.renamed:  # a batch may name a renamed tool either way
+            back = lambda t: self.renamed.get(t, t) if isinstance(t, str) else t  # noqa: E731
+            calls = args.get("calls")
+            args = {**args, "tool": back(args.get("tool")),
+                    "calls": [[back(c[0]), c[1]] if isinstance(c, list) and len(c) == 2 else c for c in calls]
+                    if isinstance(calls, list) else calls}
+            if args["tool"] is None:
+                del args["tool"]
         try:
             prepared = batch_calls(self.inst, args)
         except ToolFailure as e:
@@ -525,7 +549,8 @@ class CommonsServer(StdioServer):
 
     def tools(self) -> list[dict]:
         s = self.s.size
-        tools = self.s.inst.mcp_tools(s, s) + self.s.inst.mcp_views(s, s) if self.s.inst else []
+        tools = [{**t, "name": agent_name(t["name"])} for t in self.s.inst.mcp_tools(s, s) + self.s.inst.mcp_views(s, s)] \
+            if self.s.inst else []
         if self.s.batch_enabled:
             tools.append({
                 "name": "paint_batch",
@@ -534,7 +559,7 @@ class CommonsServer(StdioServer):
                 "to mix tools. Shared defaults apply only to matching parameters; each call overrides them. Stops "
                 "at the first failure; earlier calls stay painted.",
                 "inputSchema": {"type": "object", "properties": {
-                    "tool": {"type": "string", "enum": [t.name for t in self.s.inst.spec.tools]},
+                    "tool": {"type": "string", "enum": [agent_name(t.name) for t in self.s.inst.spec.tools]},
                     "defaults": {"type": "object", "description": "Shared instrument arguments, overridden per call."},
                     "calls": {"type": "array", "minItems": 1, "maxItems": MAX_BATCH_CALLS, "items": {"anyOf": [
                         {"type": "object"},

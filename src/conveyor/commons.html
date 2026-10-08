@@ -496,8 +496,6 @@ $("mode-live").onclick = () => { if(S.mode !== "live") leaveReplay(); };
 
 // ---- spawning -------------------------------------------------------------------------------------------
 // A painter is an instrument and the prompt it painted with; the catalog only offers pairs that painted together.
-const CANVAS_TOOLS = ["look", "overview", "move_viewport", "write_message", "broadcast", "paint_batch", "spawn_successor"];
-const runnable = p => ![...p.instrument.tools, ...p.instrument.views].some(t => CANVAS_TOOLS.includes(t));
 const chosenIds = () => S.canvas?.config?.pairs || null;  // null: every painter
 const artUrl = name => `/artifacts/${encodeURIComponent(name)}`;
 const closeupUrl = name => `/api/canvas-catalog/closeup/${encodeURIComponent(name)}`;  // the sheet cropped to its marks
@@ -521,7 +519,7 @@ $("viewer").onclick = e => { if(e.target === $("viewer")) $("viewer").close(); }
 const offered = () => { const ids = chosenIds(); return S.catalog.pairs.filter(p => !ids || ids.includes(p.id)); };
 function fillCatalog(){
   const short = (t, n) => t.length > n ? t.slice(0, n - 1) + "…" : t;
-  const ids = chosenIds(), usable = S.catalog.pairs.filter(runnable).length, picked = offered().filter(runnable).length;
+  const ids = chosenIds(), usable = S.catalog.pairs.length, picked = offered().length;
   $("palette-text").innerHTML = ids ? `Drawn from <b>${picked} of ${usable}</b> painters chosen for this canvas.` : `Drawn from <b>all ${usable}</b> painters.`;
   const keep = $("painter").value;
   $("painter").innerHTML = offered().map(p => `<option value="${esc(p.id)}">${p.best_score != null ? p.best_score.toFixed(3) : p.paintings ? "unscored" : "seed"} · ${esc(p.instrument.tools.join(", "))} · ${esc(short(p.instrument.label, 40))} / ${esc(short(p.prompt.label, 40))}</option>`).join("");
@@ -536,20 +534,20 @@ function paintersShown(){
 }
 function renderPainters(){
   const art = (url, which, alt) => url ? `<img loading="lazy" src="${url}" data-view="${which}" alt="${alt}"${which === "closeup" ? ` class="closeup"` : ""}>` : "";
-  $("painters-grid").innerHTML = paintersShown().map(p => { const ok = runnable(p), on = ok && picking.has(p.id);
-    return `<label class="pcard ${on ? "on" : ""} ${ok ? "" : "off"}" data-pair="${esc(p.id)}">
-      <div class="head"><input type="checkbox" ${on ? "checked" : ""} ${ok ? "" : "disabled"}><b>${p.best_score != null ? p.best_score.toFixed(3) : p.paintings ? "unscored" : "seed"}</b><span class="muted">${p.paintings} painting${p.paintings === 1 ? "" : "s"}</span></div>
+  $("painters-grid").innerHTML = paintersShown().map(p => { const on = picking.has(p.id);
+    return `<label class="pcard ${on ? "on" : ""}" data-pair="${esc(p.id)}">
+      <div class="head"><input type="checkbox" ${on ? "checked" : ""}><b>${p.best_score != null ? p.best_score.toFixed(3) : p.paintings ? "unscored" : "seed"}</b><span class="muted">${p.paintings} painting${p.paintings === 1 ? "" : "s"}</span></div>
       <div class="imgs">${art(p.painting && artUrl(p.painting), "painting", "Best painting")}${art(p.instrument.sheet && closeupUrl(p.instrument.sheet), "closeup", "What its tools draw, close up")}</div>
       <div class="clamp" title="${esc(p.instrument.label)}"><b>Instrument</b> ${esc(p.instrument.label)}</div>
       <div class="muted">${esc(p.instrument.tools.join(", ") || "no tools")}</div>
       <div class="clamp" title="${esc(p.prompt.label)}"><b>Prompt</b> ${esc(p.prompt.label)}</div>
-      <div class="muted clamp">${ok ? (p.ranks.length ? p.ranks.slice(0, 3).map(r => `#${r.place} in ${esc(r.run)}`).join(", ") + (p.ranks.length > 3 ? ` and ${p.ranks.length - 3} more` : "") : "seed pair") : "Can't run here: a tool name clashes with the canvas's."}</div></label>`; }).join("") || `<p class="muted">No painter matches.</p>`;
-  const usable = S.catalog.pairs.filter(runnable).length;
+      <div class="muted clamp">${p.ranks.length ? p.ranks.slice(0, 3).map(r => `#${r.place} in ${esc(r.run)}`).join(", ") + (p.ranks.length > 3 ? ` and ${p.ranks.length - 3} more` : "") : "seed pair"}</div></label>`; }).join("") || `<p class="muted">No painter matches.</p>`;
+  const usable = S.catalog.pairs.length;
   $("painters-count").textContent = `${[...picking].length} of ${usable} painters ticked`;
 }
 $("choose-painters").onclick = () => {
   if(!S.cid) return;
-  const ids = chosenIds(); picking = new Set(ids || S.catalog.pairs.filter(runnable).map(p => p.id));
+  const ids = chosenIds(); picking = new Set(ids || S.catalog.pairs.map(p => p.id));
   $("painters-search").value = ""; $("painters-error").textContent = ""; renderPainters(); $("painters-dialog").showModal();
 };
 $("painters-grid").onclick = e => {
@@ -559,13 +557,13 @@ $("painters-grid").onclick = e => {
   e.preventDefault(); const id = card.dataset.pair; picking.has(id) ? picking.delete(id) : picking.add(id); renderPainters();
 };
 $("painters-search").oninput = renderPainters;
-$("painters-shown").onclick = () => { for(const p of paintersShown().filter(runnable)) picking.add(p.id); renderPainters(); };
+$("painters-shown").onclick = () => { for(const p of paintersShown()) picking.add(p.id); renderPainters(); };
 $("painters-unshown").onclick = () => { for(const p of paintersShown()) picking.delete(p.id); renderPainters(); };
-$("painters-all").onclick = () => { picking = new Set(S.catalog.pairs.filter(runnable).map(p => p.id)); renderPainters(); };
+$("painters-all").onclick = () => { picking = new Set(S.catalog.pairs.map(p => p.id)); renderPainters(); };
 $("painters-cancel").onclick = () => $("painters-dialog").close();
 $("painters-save").onclick = async () => {
   if(!picking.size){ $("painters-error").textContent = "Tick at least one painter."; return; }
-  const every = S.catalog.pairs.filter(runnable).every(p => picking.has(p.id));  // all of them: follow the catalog as it grows
+  const every = S.catalog.pairs.every(p => picking.has(p.id));  // all of them: follow the catalog as it grows
   try{ const r = await api(`/api/canvases/${encodeURIComponent(S.cid)}/painters`, "POST", {pair_ids: every ? null : [...picking]});
     if(r.pairs) S.canvas.config.pairs = r.pairs; else delete S.canvas.config.pairs;
     S.pairsKey = JSON.stringify(r.pairs); $("painters-dialog").close(); fillCatalog(); }

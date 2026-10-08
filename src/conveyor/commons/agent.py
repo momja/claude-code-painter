@@ -40,11 +40,11 @@ from conveyor.commons import catalog as catalog_module
 from conveyor.commons import prompts
 from conveyor.commons.references import available as references_available
 from conveyor.commons.server import CANVAS_SHARED
-from conveyor.commons.server import HARNESS_TOOLS
 from conveyor.commons.server import JUDGE_TOOLS
 from conveyor.commons.server import MAX_BROADCAST
 from conveyor.commons.server import MAX_REFERENCES
 from conveyor.commons.server import SUCCESSOR_WINDOW
+from conveyor.commons.server import agent_name
 from conveyor.commons.tiles import MOVE_SHARE
 from conveyor.commons.tiles import VIEWPORT_RANGE
 from conveyor.commons.tiles import clamp_to_frame
@@ -148,9 +148,6 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued", e
             pair = catalog_module.entry(conn, body["pair_id"]) if isinstance(body.get("pair_id"), str) else None
         if pair is None and not judge:
             raise LaunchError("Choose a painter from the catalog.")
-        clash = _clash(pair) if pair else set()
-        if clash:
-            raise LaunchError(f"That painter's instrument has a tool named {', '.join(sorted(clash))}, which the canvas uses.")
         config = {**(painter(pair, drawn) if pair else {}), "kind": kind, "harness": harness, "model": model, "effort": effort,
                   "provider": provider if harness == "pi" else None, "cap": cap, "paint_batch": paint_batch,
                   "successors": successors, "references": references, "agent_task": agent_task, "start": [x, y],
@@ -268,7 +265,7 @@ def judge_prompt(config: dict, size: int, x: int, y: int, max_calls: int, task: 
 def draw_pair(conn, chosen: list[str] | None = None) -> dict | None:
     """A painter drawn at random: every pair in the catalog the canvas can run is equally likely, scored or not.
     `chosen`, the painters picked for a canvas, narrows the draw to those."""
-    usable = [p for p in catalog_module.catalog(conn)["pairs"] if not _clash(p) and (chosen is None or p["id"] in chosen)]
+    usable = [p for p in catalog_module.catalog(conn)["pairs"] if chosen is None or p["id"] in chosen]
     return random.choice(usable) if usable else None
 
 
@@ -295,11 +292,6 @@ def queue_successor(canvas: SharedCanvas, row: dict, config: dict, x: int, y: in
                         "max_calls) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, 0, ?)",
                         (agent_id, row["canvas_id"], name, time.time(), dumps(child), x, y, row["max_calls"]))
     return {"id": agent_id, "name": name, "generation": generation}
-
-
-def _clash(pair: dict) -> set[str]:
-    """The canvas's tool names that the pair's instrument also uses; an agent can't have both."""
-    return set(pair["instrument"]["tools"] + pair["instrument"]["views"]) & set(HARNESS_TOOLS)
 
 
 def default_model(harness: str, provider: str) -> str:
@@ -340,11 +332,23 @@ def system_prompt(config: dict, size: int, x: int, y: int, max_calls: int, task:
         frame_rule=prompts.FRAME_RULE.format(w=w, h=h) if frame else "", overview_side=OVERVIEW_SIDE, region=REGION, max_broadcast=MAX_BROADCAST, s=size, x=x, y=y,
         area_cap=Canvas(size, size).area_cap, share=CALL_AREA_SHARE, max_move=int(MOVE_SHARE * size),
         max_calls=max_calls, batch=prompts.BATCH_RULE.format(max_calls=max_calls) if config.get("paint_batch", True) else "",
-        views=prompts.VIEWS_RULE if inst.spec.views else "", reference=inst.reference(size, size),
+        views=prompts.VIEWS_RULE if inst.spec.views else "", reference=inst.reference(size, size) + _renamed(inst),
         references=prompts.REFERENCES_RULE.format(max_references=MAX_REFERENCES, canvas_shared=CANVAS_SHARED)
         if config.get("references") else "",
         successor=prompts.SUCCESSOR_RULE.format(max_calls=max_calls, window=SUCCESSOR_WINDOW) if config.get("successors") else "")
     return config["prompt"].strip() + "\n\n" + prompts.STRATEGY_BRIDGE + "\n\n" + rules
+
+
+def _renamed(inst) -> str:
+    """The note on the instrument's tools that go by other names here, or nothing."""
+    names = [t.name for t in [*inst.spec.tools, *inst.spec.views] if agent_name(t.name) != t.name]
+    if not names:
+        return ""
+    def listed(items: list[str]) -> str:
+        return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+    return prompts.RENAMED_RULE.format(renames=listed([f"`{n}` is called `{agent_name(n)}`" for n in names]),
+                                       plain=listed([f"`{n}`" for n in names]))
 
 
 def run_agent(db: Path, agent_id: str) -> None:
@@ -404,7 +408,7 @@ def run_agent(db: Path, agent_id: str) -> None:
                 content += [{"type": "text", "text": second}, {"type": "png", "data": sheet}]
             content.append({"type": "text", "text": third})
             inst = Instrument(config["source"])
-            tools = [t.name for t in [*inst.spec.tools, *inst.spec.views]] + ["look", "overview", "move_viewport", "write_message", "broadcast"]
+            tools = [agent_name(t.name) for t in [*inst.spec.tools, *inst.spec.views]] + ["look", "overview", "move_viewport", "write_message", "broadcast"]
         if config.get("paint_batch", True):
             tools.append("paint_batch")
         if config.get("successors"):

@@ -148,6 +148,12 @@ tools; `defaults` holds arguments the calls share. Each call inside gets its own
 the first call that fails, and the calls before it stay painted. Batches are how a {max_calls}-call budget \
 makes a real painting."""
 
+RENAMED_RULE = """
+
+On this canvas the instrument's {renames}, because the canvas has its own {plain}. Wherever the instrument's \
+description or your strategy names the instrument's {plain}, use the new name. Plain {plain} is the canvas's, \
+described above."""
+
 VIEWS_RULE = """
 - The instrument's viewing tools, listed under "Viewing tools" below, show a window on your viewport at the \
 zoom their designer chose. They change nothing, but each one costs a tool call like any other."""
