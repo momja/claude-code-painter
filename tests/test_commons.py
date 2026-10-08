@@ -288,6 +288,15 @@ def test_a_pi_agent_studies_reference_pictures_that_never_touch_the_canvas(canva
     assert views.canvas(conn, row["id"], since=refs[0]["seq"])["references"] == refs[1:]
 
 
+def test_a_helper_that_crashes_says_why(monkeypatch):
+    from conveyor.commons.references import ReferenceFailed
+    from conveyor.commons.references import generate
+
+    monkeypatch.setenv("CONVEYOR_IMAGE_COMMAND", f"node {Path(__file__).parent / 'missing.mjs'}")
+    with pytest.raises(ReferenceFailed, match=r"Error: Cannot find module .*missing\.mjs"):
+        generate("a hand")
+
+
 def test_a_shared_reference_picture_reaches_every_other_agent_once(canvas, tmp_path, fake_images, monkeypatch):
     db, row = canvas
     sender = agent(db, row, tmp_path, x=1000, y=0, references=True)

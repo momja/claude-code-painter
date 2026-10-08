@@ -29,7 +29,8 @@ COPY pi-agent/package.json pi-agent/package-lock.json ./pi-agent/
 RUN cd pi-agent && npm ci
 
 COPY src ./src
-COPY pi-agent/agent.mjs pi-agent/auth.mjs pi-agent/credentials.mjs pi-agent/painter-context.mjs pi-agent/transient.mjs ./pi-agent/
+# Every module, so a new one can't be left out of the image. The image helper was, once.
+COPY pi-agent/*.mjs ./pi-agent/
 RUN uv sync --frozen
 
 ENV PATH="/app/.venv/bin:$PATH"
@@ -41,6 +42,7 @@ from conveyor.pi import PI_DIR, PI_SCRIPT, available; \
 from conveyor.painting.canvas import TARGETS_DIR; \
 assert PI_SCRIPT.is_file(), PI_SCRIPT; \
 assert (PI_DIR / 'painter-context.mjs').is_file(); \
+assert (PI_DIR / 'image.mjs').is_file(); \
 assert available() is None, available(); \
 from conveyor.claude import available as claude_available; \
 assert claude_available(), 'claude is not on PATH'; \

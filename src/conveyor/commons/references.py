@@ -41,7 +41,8 @@ def available() -> bool:
     from conveyor.pi import available as pi_available
     from conveyor.pi import provider_authenticated
 
-    return pi_available() is None and provider_authenticated(PROVIDERS["openai-codex"])
+    return (pi_available() is None and (PI_DIR / "image.mjs").is_file()
+            and provider_authenticated(PROVIDERS["openai-codex"]))
 
 
 def generate(prompt: str, images: list[bytes] = (), session_id: str | None = None) -> tuple[bytes, str | None]:
@@ -67,11 +68,17 @@ def generate(prompt: str, images: list[bytes] = (), session_id: str | None = Non
     try:
         out = json.loads(lines[-1])
     except (IndexError, json.JSONDecodeError):
-        tail = proc.stderr.decode(errors="replace").strip()[-300:]
-        raise ReferenceFailed(f"The image helper failed{': ' + tail if tail else ''}.") from None
+        raise ReferenceFailed(f"The image helper failed{': ' + why if (why := _why(proc.stderr)) else ''}.") from None
     if not out.get("ok"):
         raise ReferenceFailed(str(out.get("error") or "The image helper failed."))
     return base64.b64decode(out["image"]), out.get("revised_prompt")
+
+
+def _why(stderr: bytes) -> str:
+    """The line of a crash that says what went wrong, not the end of its stack trace."""
+    lines = [line.strip() for line in stderr.decode(errors="replace").splitlines() if line.strip()]
+    said = next((line for line in lines if "Error" in line and not line.startswith("at ")), lines[-1] if lines else "")
+    return said[:300]
 
 
 def shrink(png: bytes, side: int) -> bytes:
