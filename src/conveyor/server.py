@@ -20,6 +20,7 @@ so it works the same during a run and after it, and from another process.
   GET /api/canvases/<id>/ops/<seq>   one op: the call's arguments and result note
   GET /api/canvases/<id>/tiles/<tx>/<ty>/<seq>  one version of one tile (PNG)
   GET /api/canvas-catalog            every instrument and painter prompt in any run, deduplicated, plus the seeds
+  GET /api/canvas-catalog/closeup/<name>  a demo sheet with each panel cropped to its marks (PNG)
 
 With a launcher (`conveyor serve` on a loopback address) it can also start runs:
 
@@ -427,10 +428,16 @@ class Views:
     def canvas_get(self, parts: list[str], q: dict) -> tuple[Any, str] | None:
         """The shared canvas's reads, under /api/canvases and /api/canvas-catalog. (body, content type), or None."""
         from conveyor.commons import catalog
+        from conveyor.commons import samples
         from conveyor.commons import views as canvas_views
 
         if parts == ["api", "canvas-catalog"]:
             return catalog.catalog(self.conn), "json"
+        if len(parts) == 4 and parts[:3] == ["api", "canvas-catalog", "closeup"] and ARTIFACT_RE.match(parts[3]):
+            sheet = self.artifact(parts[3])
+            if sheet is None:
+                raise KeyError(parts[3])
+            return samples.closeup(sheet), "png"
         if parts[:2] != ["api", "canvases"]:
             return None
         if len(parts) == 2:

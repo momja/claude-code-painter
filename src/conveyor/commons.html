@@ -38,8 +38,9 @@ label{display:grid;gap:4px;margin-bottom:11px;font-size:12px;font-weight:600}
 label select,label input,label textarea{font-weight:400;font-size:14px;width:100%}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
 .check{display:flex;align-items:center;gap:8px;font-weight:400;font-size:13px}.check input{width:auto}
-.previews{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:-4px 0 6px}.previews figure{margin:0;min-width:0}
-.previews img{display:block;width:100%;height:130px;object-fit:contain;background:var(--bg);border-radius:6px}
+.previews{display:grid;gap:8px;margin:-4px 0 6px}.previews figure{margin:0;min-width:0}
+.previews img{display:block;width:100%;height:190px;object-fit:contain;background:var(--bg);border-radius:6px;cursor:zoom-in}
+.previews #sheet{height:120px}
 .previews figcaption{font-size:11px;color:var(--muted);margin-top:2px}.pair{font-size:12px;margin:0 0 10px;color:var(--muted)}.pair b{color:var(--ink);font-weight:600}
 details{margin:-4px 0 11px;font-size:12px}details summary{cursor:pointer;color:var(--muted)}
 pre{font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--code);padding:10px;border-radius:6px;max-height:220px;overflow:auto;margin:6px 0 0}
@@ -64,10 +65,14 @@ dialog{border:1px solid var(--line);border-radius:10px;background:var(--surface)
 dialog::backdrop{background:#0006}
 #painters-dialog{width:min(1120px,95vw);max-height:92dvh;display:none;flex-direction:column;gap:10px}#painters-dialog[open]{display:flex}
 #painters-dialog h2{margin:0}.ptools{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.ptools input[type=search]{flex:1;min-width:180px}
-.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;overflow:auto;min-height:0;flex:1;padding:2px}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;overflow:auto;min-height:0;flex:1;padding:2px}
 .pcard{border:1px solid var(--line);border-radius:8px;padding:8px;display:grid;gap:6px;cursor:pointer;font-size:12px;align-content:start;margin:0;font-weight:400}
 .pcard.on{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent)}.pcard.off{opacity:.45;cursor:not-allowed}
-.pcard .imgs{display:grid;grid-template-columns:1fr 1fr;gap:4px}.pcard img{display:block;width:100%;height:110px;object-fit:contain;background:var(--bg);border-radius:5px}
+.pcard .imgs{display:grid;gap:4px}.pcard img{display:block;width:100%;height:180px;object-fit:contain;background:var(--bg);border-radius:5px;cursor:zoom-in}
+.pcard img.closeup{height:130px}
+#viewer{width:min(1400px,96vw);max-height:96dvh}#viewer img{display:block;width:100%;height:76dvh;object-fit:contain;background:var(--bg);border-radius:6px}
+.vhead{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}.vhead b{font-size:14px}
+.vtabs{display:inline-flex;gap:6px;flex-wrap:wrap}.vtabs button[aria-pressed=true]{background:var(--accent);color:var(--surface);border-color:var(--accent)}
 .pcard .head{display:flex;gap:6px;align-items:center}.pcard .head input{width:auto;margin:0}.pcard b{font-size:13px}
 .pcard .clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 [hidden]{display:none!important}
@@ -117,8 +122,8 @@ dialog::backdrop{background:#0006}
       <p id="palette" class="pair painter-only"><span id="palette-text"></span> <button type="button" id="choose-painters" hidden>Choose painters</button></p>
       <div id="choice" hidden>
       <label>Painter<select id="painter"></select></label>
-      <div class="previews"><figure id="painting-fig"><img id="painting" alt="This painter's best painting"><figcaption>Best painting</figcaption></figure>
-        <figure id="sheet-fig"><img id="sheet" alt="The instrument's demo sheet"><figcaption>What its tools draw</figcaption></figure></div>
+      <div class="previews"><figure id="painting-fig"><img id="painting" data-view="painting" alt="This painter's best painting"><figcaption>Best painting · click to enlarge</figcaption></figure>
+        <figure id="sheet-fig"><img id="sheet" data-view="closeup" alt="What the instrument's tools draw, close up"><figcaption>What its tools draw, close up · click to enlarge</figcaption></figure></div>
       <p id="pair-summary" class="pair"></p>
       <details><summary>Instrument source</summary><pre id="instrument-source"></pre></details>
       <details><summary>Prompt text</summary><pre id="prompt-text"></pre></details>
@@ -145,12 +150,16 @@ dialog::backdrop{background:#0006}
 </main>
 <dialog id="painters-dialog" aria-labelledby="painters-title">
   <h2 id="painters-title">Painters for this canvas</h2>
-  <p class="muted" style="font-size:12px;margin:0">Random spawns and successors draw only from the painters ticked here. Agents already painting keep theirs. Each card shows the pair's best painting and what its instrument's tools draw.</p>
+  <p class="muted" style="font-size:12px;margin:0">Random spawns and successors draw only from the painters ticked here. Agents already painting keep theirs. Each card shows the pair's best painting and, under it, what its instrument's tools draw, close up. Click a picture to see it full size; click anywhere else on a card to tick it.</p>
   <div class="ptools"><input id="painters-search" type="search" placeholder="Filter by instrument, prompt, tool or run" aria-label="Filter painters">
     <button type="button" id="painters-shown">Tick shown</button><button type="button" id="painters-unshown">Untick shown</button><button type="button" id="painters-all">Every painter</button></div>
   <div id="painters-grid" class="pgrid"></div>
   <div class="ptools"><span id="painters-count" class="muted"></span><span id="painters-error" class="bad"></span><span class="spacer"></span>
     <button type="button" id="painters-cancel">Cancel</button><button type="button" id="painters-save" class="primary">Save</button></div>
+</dialog>
+<dialog id="viewer" aria-labelledby="viewer-title">
+  <div class="vhead"><b id="viewer-title"></b><span class="spacer"></span><span id="viewer-tabs" class="vtabs"></span><button type="button" id="viewer-close">Close</button></div>
+  <img id="viewer-img" alt=""><p id="viewer-note" class="muted" style="font-size:12px;margin:8px 0 0"></p>
 </dialog>
 <dialog id="canvas-dialog"><form method="dialog" id="canvas-form">
   <h2>New canvas</h2>
@@ -482,6 +491,25 @@ $("mode-live").onclick = () => { if(S.mode !== "live") leaveReplay(); };
 const CANVAS_TOOLS = ["look", "overview", "move_viewport", "write_message", "broadcast", "paint_batch", "spawn_successor"];
 const runnable = p => ![...p.instrument.tools, ...p.instrument.views].some(t => CANVAS_TOOLS.includes(t));
 const chosenIds = () => S.canvas?.config?.pairs || null;  // null: every painter
+const artUrl = name => `/artifacts/${encodeURIComponent(name)}`;
+const closeupUrl = name => `/api/canvas-catalog/closeup/${encodeURIComponent(name)}`;  // the sheet cropped to its marks
+// A painter's pictures full size: its best painting, its demo sheet close up, and the whole sheet.
+function viewPainter(id, which){
+  const p = S.catalog.pairs.find(e => e.id === id); if(!p) return;
+  const views = [["painting", "Best painting", p.painting && artUrl(p.painting), p.best_score != null ? `Its best painting, scored ${p.best_score.toFixed(3)}, from ${p.paintings} painting${p.paintings === 1 ? "" : "s"}.` : "Its newest painting."],
+    ["closeup", "Tools, close up", p.instrument.sheet && closeupUrl(p.instrument.sheet), "Each demo panel cropped to its marks, under the calls that made it."],
+    ["sheet", "Whole demo sheet", p.instrument.sheet && artUrl(p.instrument.sheet), "The instrument's example call sequences, each on a blank canvas the size of a painting."]].filter(v => v[2]);
+  if(!views.length) return;
+  const show = key => { const v = views.find(v => v[0] === key) || views[0];
+    $("viewer-img").src = v[2]; $("viewer-img").alt = v[1]; $("viewer-note").textContent = v[3];
+    for(const b of $("viewer-tabs").children) b.setAttribute("aria-pressed", String(b.dataset.view === v[0])); };
+  $("viewer-title").textContent = `${p.instrument.label} / ${p.prompt.label}`;
+  $("viewer-tabs").innerHTML = views.map(v => `<button type="button" data-view="${v[0]}">${v[1]}</button>`).join("");
+  S.viewerShow = show; show(which); $("viewer").showModal();
+}
+$("viewer-tabs").onclick = e => { const b = e.target.closest("[data-view]"); if(b && S.viewerShow) S.viewerShow(b.dataset.view); };
+$("viewer-close").onclick = () => $("viewer").close();
+$("viewer").onclick = e => { if(e.target === $("viewer")) $("viewer").close(); };  // a click on the backdrop
 const offered = () => { const ids = chosenIds(); return S.catalog.pairs.filter(p => !ids || ids.includes(p.id)); };
 function fillCatalog(){
   const short = (t, n) => t.length > n ? t.slice(0, n - 1) + "…" : t;
@@ -499,11 +527,11 @@ function paintersShown(){
   return S.catalog.pairs.filter(p => !q || [p.instrument.label, p.prompt.label, ...p.instrument.tools, ...p.ranks.map(r => r.run)].join(" ").toLowerCase().includes(q));
 }
 function renderPainters(){
-  const art = name => name ? `<img loading="lazy" src="/artifacts/${encodeURIComponent(name)}" alt="">` : `<img alt="">`;
+  const art = (url, which, alt) => url ? `<img loading="lazy" src="${url}" data-view="${which}" alt="${alt}"${which === "closeup" ? ` class="closeup"` : ""}>` : "";
   $("painters-grid").innerHTML = paintersShown().map(p => { const ok = runnable(p), on = ok && picking.has(p.id);
     return `<label class="pcard ${on ? "on" : ""} ${ok ? "" : "off"}" data-pair="${esc(p.id)}">
       <div class="head"><input type="checkbox" ${on ? "checked" : ""} ${ok ? "" : "disabled"}><b>${p.best_score != null ? p.best_score.toFixed(3) : p.paintings ? "unscored" : "seed"}</b><span class="muted">${p.paintings} painting${p.paintings === 1 ? "" : "s"}</span></div>
-      <div class="imgs">${art(p.painting)}${art(p.instrument.sheet)}</div>
+      <div class="imgs">${art(p.painting && artUrl(p.painting), "painting", "Best painting")}${art(p.instrument.sheet && closeupUrl(p.instrument.sheet), "closeup", "What its tools draw, close up")}</div>
       <div class="clamp" title="${esc(p.instrument.label)}"><b>Instrument</b> ${esc(p.instrument.label)}</div>
       <div class="muted">${esc(p.instrument.tools.join(", ") || "no tools")}</div>
       <div class="clamp" title="${esc(p.prompt.label)}"><b>Prompt</b> ${esc(p.prompt.label)}</div>
@@ -517,7 +545,9 @@ $("choose-painters").onclick = () => {
   $("painters-search").value = ""; $("painters-error").textContent = ""; renderPainters(); $("painters-dialog").showModal();
 };
 $("painters-grid").onclick = e => {
-  const card = e.target.closest("[data-pair]"); if(!card || card.classList.contains("off")) return;
+  const card = e.target.closest("[data-pair]"), pic = e.target.closest("img[data-view]");
+  if(card && pic){ e.preventDefault(); viewPainter(card.dataset.pair, pic.dataset.view); return; }
+  if(!card || card.classList.contains("off")) return;
   e.preventDefault(); const id = card.dataset.pair; picking.has(id) ? picking.delete(id) : picking.add(id); renderPainters();
 };
 $("painters-search").oninput = renderPainters;
@@ -535,8 +565,8 @@ $("painters-save").onclick = async () => {
 };
 function showChoice(){
   const p = S.catalog.pairs.find(e => e.id === $("painter").value);
-  const art = (id, name) => { $(`${id}-fig`).hidden = !name; if(name) $(id).src = `/artifacts/${encodeURIComponent(name)}`; };
-  art("painting", p?.painting); art("sheet", p?.instrument.sheet);
+  const art = (id, url) => { $(`${id}-fig`).hidden = !url; if(url) $(id).src = url; };
+  art("painting", p?.painting && artUrl(p.painting)); art("sheet", p?.instrument.sheet && closeupUrl(p.instrument.sheet));
   if(p){
     $("pair-summary").innerHTML = `<b>Instrument</b> ${esc(p.instrument.label)} · tools ${esc(p.instrument.tools.join(", ") || "none")}${p.instrument.views.length ? ` · views ${esc(p.instrument.views.join(", "))}` : ""}<br><b>Prompt</b> ${esc(p.prompt.label)}<br>${p.ranks.length ? `${p.ranks.slice(0, 3).map(r => `#${r.place} in ${esc(r.run)} (${esc(String(r.run_id).slice(0, 6))})`).join(", ")}${p.ranks.length > 3 ? ` and ${p.ranks.length - 3} more runs` : ""} · ${p.paintings} painting${p.paintings > 1 ? "s" : ""}, best ${p.best_score.toFixed(3)}` : "A seed pair, offered because no run here has a scored painting yet."}`;
   }
@@ -544,6 +574,7 @@ function showChoice(){
   updateSubmit();
 }
 $("painter").onchange = showChoice;
+$("painting").onclick = $("sheet").onclick = e => viewPainter($("painter").value, e.target.dataset.view);
 $("random").onchange = () => { $("choice").hidden = $("random").checked || judging(); updateSubmit(); };
 $("kind").onchange = () => {  // a judge has no painter, a fixed viewport, and nothing to batch or hand off
   for(const el of document.querySelectorAll(".painter-only")) el.hidden = judging();

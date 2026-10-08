@@ -1009,3 +1009,48 @@ def test_spawn_and_stop_over_http(served, monkeypatch):
     assert http(base, "POST", f"/api/canvases/{made['id']}/painters", {"pair_ids": []})[0] == 422
     assert http(base, "POST", "/api/canvases/nope/painters", {"pair_ids": None})[0] == 404
     assert http(base, "POST", "/api/canvases", {"name": "x"}, headers={"Origin": "http://evil.example"})[0] == 403
+
+
+# ---- painter samples -----------------------------------------------------------------------------------------
+
+
+def demo_sheet(marks: list[tuple[int, int, int, int]]) -> bytes:
+    """A demo sheet as the probe makes one: a 300 x 200 panel per mark rectangle, captioned, three to a row."""
+    from conveyor.painting.canvas import PAPER
+    from conveyor.painting.canvas import labelled_sheet
+
+    cells = []
+    for i, (x0, y0, x1, y1) in enumerate(marks, 1):
+        img = np.broadcast_to(np.asarray(PAPER, dtype=np.float32), (200, 300, 3)).copy()
+        img[y0:y1, x0:x1] = (0.2, 0.3, 0.7)
+        cells.append((f"{i}: stroke > scumble", img))
+    return labelled_sheet(cells, scale=1)
+
+
+def test_a_demo_sheet_close_up_crops_each_panel_to_its_marks():
+    from conveyor.commons.samples import closeup
+    from conveyor.commons.samples import panels
+
+    sheet = demo_sheet([(10, 20, 50, 40), (200, 100, 260, 180), (0, 0, 300, 200), (120, 60, 140, 70)])
+    arr = np.asarray(Image.open(io.BytesIO(sheet)).convert("RGB"))
+    assert len(panels(arr)) == 4  # two rows, the second with two blank slots
+    out = Image.open(io.BytesIO(closeup(sheet))).convert("RGB")
+    # crops of 40+28, 60+28, the whole 300 panel, and 20+28 wide, unless a caption is wider
+    assert out.width < arr.shape[1] and out.height < arr.shape[0]
+    blue = (np.asarray(out).astype(int) - (51, 76, 178)).__abs__().max(axis=-1) < 10
+    assert blue.sum() == 40 * 20 + 60 * 80 + 300 * 200 + 20 * 10  # every mark is kept, at full size
+    assert (np.asarray(out)[:30] < 100).any()  # a caption over the crops
+    blank = demo_sheet([])
+    assert closeup(blank) == blank  # nothing to crop: the sheet as it is
+
+
+def test_the_close_up_route_serves_a_sheet_from_the_database(served):
+    base, db, _ = served
+    sheet = demo_sheet([(10, 20, 50, 40)])
+    store = Store(db, run_id="x", check_run=False)
+    name = store.artifact(sheet)
+    store.close()  # it writes on its own thread
+    with urllib.request.urlopen(f"{base}/api/canvas-catalog/closeup/{name}") as r:
+        assert r.headers["Content-Type"] == "image/png"
+        assert Image.open(io.BytesIO(r.read())).width < 200
+    assert http(base, "GET", "/api/canvas-catalog/closeup/" + "0" * 24 + ".png")[0] == 404
