@@ -462,6 +462,7 @@ class AgentSession:
                  "that should guide the whole canvas." if not self.shared else "")
         return [text(f"Reference picture {n}, made from your prompt{' and your viewport' if from_view else ''}. It "
                      "isn't on the canvas and only you see it: paint what you learn from it with your instrument. "
+                     "Before your next call, say in a sentence or two what you take from it. "
                      f"{left} more you may ask for.{share}"),
                 image(shrink(stored, SHOWN_SIDE))]
 

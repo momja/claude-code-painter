@@ -60,7 +60,8 @@ pre{font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wr
 .ref{margin:0;border:1px solid var(--line);border-top:4px solid var(--c);border-radius:6px;padding:5px;font-size:11px;display:grid;gap:4px;min-width:0}
 .ref img{display:block;width:100%;aspect-ratio:1;object-fit:cover;border-radius:4px;background:var(--bg)}
 .ref figcaption{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;color:var(--muted)}
-.ref button{font-size:11px;padding:1px 6px;justify-self:start}.ref .shared{color:var(--accent);font-weight:600}
+.ref button,.ref .acts a{font-size:11px;padding:1px 6px}.ref .acts{display:flex;gap:6px;align-items:center}
+.ref .takeaway{margin:0;font-size:11px;display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden}.ref .shared{color:var(--accent);font-weight:600}
 dialog{border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--ink);padding:20px;width:min(380px,92vw)}
 dialog::backdrop{background:#0006}
 #painters-dialog{width:min(1120px,95vw);max-height:92dvh;display:none;flex-direction:column;gap:10px}#painters-dialog[open]{display:flex}
@@ -144,7 +145,7 @@ dialog::backdrop{background:#0006}
     </form>
   </section>
   <section aria-labelledby="messages-title"><h2 id="messages-title">Messages and broadcasts</h2><p class="muted" style="font-size:12px;margin-top:-4px">Messages, judges' notes among them, are painted where they were written, so paint can cover them. Broadcasts reach every agent, with where the sender was. Click one to find it.</p><div id="messages" class="msgs"></div></section>
-  <section id="references-section" aria-labelledby="references-title" hidden><h2 id="references-title">Reference pictures</h2><p class="muted" style="font-size:12px;margin-top:-4px">Pictures Pi agents made to study before painting. They never land on the canvas. A shared one went to every agent with a broadcast. Click a picture to open it.</p><div id="references-list" class="refs"></div></section>
+  <section id="references-section" aria-labelledby="references-title" hidden><h2 id="references-title">Reference pictures</h2><p class="muted" style="font-size:12px;margin-top:-4px">Pictures Pi agents made to study before painting. They never land on the canvas. A shared one went to every agent with a broadcast. Under each is what the agent said about it once it saw it. Click a picture to open it.</p><div id="references-list" class="refs"></div></section>
   <section aria-labelledby="agents-title"><h2 id="agents-title">Agents</h2><div id="agents" class="agents"><p class="muted">None yet.</p></div></section>
 </aside>
 </main>
@@ -387,7 +388,7 @@ async function poll(){
     for(const [tx, ty, seq] of r.heads) S.heads.set(`${tx},${ty}`, seq);
     S.seq = r.seq; S.agents = r.agents; S.messages = r.since ? S.messages.concat(r.messages) : r.messages;
     S.broadcasts = r.since ? S.broadcasts.concat(r.broadcasts) : r.broadcasts; S.canvas = r.canvas;
-    S.references = r.since ? S.references.concat(r.references) : r.references; S.size = r.canvas.config.viewport;
+    S.references = r.since ? S.references.concat(r.references) : r.references; S.referenceNotes = r.reference_notes || {}; S.size = r.canvas.config.viewport;
     if(!r.since){ S.sketches = []; S.erased = new Map(); }
     const have = new Set(S.sketches.map(l => l.seq));  // a line this page drew is already in
     S.sketches = S.sketches.concat(r.sketches.filter(l => !have.has(l.seq)));
@@ -436,7 +437,14 @@ function renderReferences(){
   $("references-list").innerHTML = S.references.slice(-60).reverse().map(r => `<figure class="ref" style="--c:${color(r.agent_id)}">
     <a href="/artifacts/${encodeURIComponent(r.image)}" target="_blank" rel="noopener"><img loading="lazy" src="/artifacts/${encodeURIComponent(r.image)}" alt="${esc(r.prompt)}"></a>
     <figcaption title="${esc(r.prompt)}">${shared.has(r.image) ? `<span class="shared">Shared</span> · ` : ""}${esc(agentName(r.agent_id))}${r.from_view ? " · from its view" : ""}: ${esc(r.prompt)}</figcaption>
-    <button type="button" data-at="${r.x},${r.y}">Find</button></figure>`).join("");
+    ${noteOf(r)}<span class="acts"><button type="button" data-at="${r.x},${r.y}">Find</button>${(S.referenceNotes || {})[r.seq]?.session_id ? `<a href="/#session=${encodeURIComponent(S.referenceNotes[r.seq].session_id)}" target="_blank" rel="noopener">Transcript</a>` : ""}</span></figure>`).join("");
+}
+// What the agent said (or, if it said nothing, thought) right after it saw the picture: the sign it looked.
+function noteOf(r){
+  const n = (S.referenceNotes || {})[r.seq];
+  if(!n?.session_id) return "";
+  if(!n.note) return `<p class="takeaway muted">${LIVE.includes(S.agents.find(a => a.id === r.agent_id)?.status) ? "No word on it yet." : "It said nothing about it."}</p>`;
+  return `<p class="takeaway" title="${esc(n.note)}"><b>${n.said ? "It said" : "It thought"}:</b> ${esc(n.note)}</p>`;
 }
 $("references-list").onclick = e => { const b = e.target.closest("button[data-at]"); if(b){ const [x, y] = b.dataset.at.split(",").map(Number); centerOn(x, y, Math.max(S.cam.z, .5)); } };
 $("agents").onclick = async e => {

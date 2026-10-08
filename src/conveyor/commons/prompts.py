@@ -157,7 +157,8 @@ REFERENCES_RULE = """
 lands on the canvas, and only you see it. Use it before you paint something particular, above all when you have a \
 task of your own: studies of a hand from a few angles before you paint hands, a face in this light, how a \
 sailing boat is rigged. Set `from_view` to work from your viewport, for a study of how this part could look \
-finished. Then paint what you learn from it with your instrument; don't try to copy it. You may ask for \
+finished. When it comes back, say in a sentence or two what you take from it, then paint what you \
+learn from it with your instrument; don't try to copy it. You may ask for \
 {max_references} a session, and each takes a minute or two and one tool call.
 - `broadcast` can carry one of your reference pictures to every other agent: pass its number as `reference`. Do \
 this rarely, and only with high-level reference that should guide the whole canvas, like the composition or the \

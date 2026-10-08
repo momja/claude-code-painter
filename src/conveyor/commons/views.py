@@ -81,8 +81,39 @@ def canvas(conn: sqlite3.Connection, canvas_id: str, since: int = 0) -> dict:
         else:
             erasures.append([r["seq"], args.get("seqs", [])])
     return {"canvas": meta, "agents": agents, "heads": heads, "seq": seq, "since": since, "messages": messages,
-            "broadcasts": broadcasts, "references": references, "sketches": sketches, "erasures": erasures,
+            "broadcasts": broadcasts, "references": references, "reference_notes": reference_notes(conn, canvas_id), "sketches": sketches, "erasures": erasures,
             "now": time.time()}
+
+
+def reference_notes(conn: sqlite3.Connection, canvas_id: str) -> dict[int, dict]:
+    """What each agent said, or failing that thought, right after it saw each reference picture it made, keyed by
+    the picture's op seq, with its session for the transcript. Sent whole on every poll, since the words come a
+    turn after the picture. The call is found in the agent's session by its prompt."""
+    notes: dict[int, dict] = {}
+    rows = conn.execute("SELECT o.seq, o.args, a.session_id FROM canvas_ops o JOIN canvas_agents a ON a.id=o.agent_id "
+                        "WHERE o.canvas_id=? AND o.tool='generate_reference' AND o.status='generated' "
+                        "AND a.session_id IS NOT NULL ORDER BY o.seq", (canvas_id,)).fetchall()
+    for r in rows:
+        prompt = (json.loads(r["args"] or "{}").get("prompt") or "").strip()
+        notes[r["seq"]] = {"session_id": r["session_id"]}
+        events = conn.execute("SELECT kind, data FROM session_events WHERE session_id=? AND kind IN "
+                              "('tool_use', 'tool_result', 'text', 'thinking') ORDER BY idx", (r["session_id"],))
+        call, said, thought, seen = None, [], [], False
+        for e in events:
+            data = json.loads(e["data"])
+            if e["kind"] == "tool_use" and seen:
+                break  # its next call: whatever it had to say about the picture is said
+            if e["kind"] == "tool_use" and data.get("name") == "generate_reference" \
+                    and str((data.get("input") or {}).get("prompt") or "").strip() == prompt:
+                call = data.get("id")
+            elif e["kind"] == "tool_result" and call and data.get("tool_use_id") == call:
+                seen = True
+            elif seen:
+                (said if e["kind"] == "text" else thought).append(data.get("text") or "")
+        words = " ".join(said or thought).strip()
+        if words:
+            notes[r["seq"]].update(note=words[:600], said=bool(said))
+    return notes
 
 
 def history(conn: sqlite3.Connection, canvas_id: str) -> dict:

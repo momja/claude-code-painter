@@ -297,6 +297,38 @@ def test_a_helper_that_crashes_says_why(monkeypatch):
         generate("a hand")
 
 
+def test_the_page_shows_what_an_agent_said_once_it_saw_its_reference(canvas, tmp_path, fake_images):
+    db, row = canvas
+    server = agent(db, row, tmp_path, references=True)
+    made = tool(server, "generate_reference", {"prompt": "  A gaunt hand, three angles"})
+    assert "say in a sentence or two what you take from it" in text_of(made)
+    seq = views.canvas(connect(db, readonly=True), row["id"])["references"][0]["seq"]
+    store = Store(db, run_id=session_scope(row["id"]), check_run=False)
+    store.start_session("s1", node="canvas", organism_id="a", purpose="canvas agent", model="m", effort="high",
+                        request={}, dir="")
+    for kind, data in [("tool_use", {"id": "t0", "name": "look", "input": {}}),
+                       ("tool_result", {"tool_use_id": "t0", "text": "", "images": []}),
+                       ("text", {"text": "Before the study."}),
+                       ("tool_use", {"id": "t1", "name": "generate_reference", "input": {"prompt": "A gaunt hand, three angles"}}),
+                       ("tool_result", {"tool_use_id": "t1", "text": "Reference picture 1", "images": []})]:
+        store.session_event("s1", kind, data)
+    store.flush()
+    conn = connect(db)
+    conn.execute("UPDATE canvas_agents SET session_id='s1' WHERE id='a'")
+    conn.commit()
+    conn.close()
+    notes = lambda: views.canvas(connect(db, readonly=True), row["id"], since=seq)["reference_notes"]  # noqa: E731
+    assert notes() == {seq: {"session_id": "s1"}}  # it hasn't said anything yet
+    store.session_event("s1", "thinking", {"text": "Knuckles are wider than I drew."})
+    store.flush()
+    assert notes()[seq] == {"session_id": "s1", "note": "Knuckles are wider than I drew.", "said": False}
+    store.session_event("s1", "text", {"text": "I'll keep the bony wrist and the long fingers."})
+    store.session_event("s1", "tool_use", {"id": "t2", "name": "stroke", "input": {}})
+    store.session_event("s1", "text", {"text": "Later talk."})
+    store.close()
+    assert notes()[seq] == {"session_id": "s1", "note": "I'll keep the bony wrist and the long fingers.", "said": True}
+
+
 def test_a_shared_reference_picture_reaches_every_other_agent_once(canvas, tmp_path, fake_images, monkeypatch):
     db, row = canvas
     sender = agent(db, row, tmp_path, x=1000, y=0, references=True)
