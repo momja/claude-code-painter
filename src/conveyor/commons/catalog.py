@@ -6,7 +6,8 @@ Pairs come from what actually painted together (every evaluation and every studi
 each run's best are offered: the TOP_PER_RUN pairs with the highest painting scores in that run. A pair repainted
 to confirm a score takes one place, not several, and an unscored painting (a text-only request) can't place. The
 seed instruments with the starting strategy are offered only when no run has a scored painting, so a new database
-still has painters.
+still has painters. Human-published Brush lab pairs are offered alongside these, without a score gate;
+the human approves their exact instrument and prompt, even if they have never painted together.
 
 Runs copy the same seed into their own organisms and a pair often paints many times, so a pair is keyed by a hash
 of its two texts, `c-<hash>`: the same key in every run, stable as new runs are added. Each pair lists its best
@@ -153,6 +154,16 @@ def catalog(conn: sqlite3.Connection) -> dict:
                             _obj(req["details"]).get("score"),
                             _obj(req["artifacts"]).get("painting"), req["created"] or 0.0,
                             {"run_id": req["run_id"], "run": runs.get(req["run_id"], req["run_id"])})
+    published = set()
+    if "brush_candidates" in tables:
+        for row in conn.execute("SELECT c.*, l.name AS lab_name FROM brush_candidates c "
+                                "JOIN brush_labs l ON l.id=c.lab_id WHERE c.published=1 AND c.status='ready'"):
+            p = pair(row["source"], row["prompt"], {row["source"]: row["summary"] or "Brush lab instrument",
+                     row["prompt"]: "Brush lab painter"}, {row["source"]: row["sheet"]})
+            p["lab"] = {"id": row["lab_id"], "name": row["lab_name"], "candidate_id": row["id"]}
+            p["published"] = True
+            p["last"] = max(p["last"], row["created"])
+            published.add(p["id"])
     by_run: dict[str, list[tuple[float, str]]] = {}
     for k, p in pairs.items():
         for run, score in p["_runs"].items():
@@ -162,7 +173,7 @@ def catalog(conn: sqlite3.Connection) -> dict:
         for place, (score, k) in enumerate(sorted(scored, key=lambda t: (-t[0], t[1]))[:TOP_PER_RUN], 1):
             keep.add(k)
             pairs[k]["ranks"].append({"run_id": run, "run": run_names.get(run, run), "place": place, "score": score})
-    offered = [pairs[k] for k in (keep or seeds)]
+    offered = [pairs[k] for k in ((keep or seeds) | published)]
     for p in offered:
         del p["_seen"], p["_runs"]
         p["ranks"].sort(key=lambda r: (r["place"], -r["score"]))

@@ -88,6 +88,7 @@ dialog::backdrop{background:#0006}
   <select id="canvas-select" aria-label="Canvas"></select>
   <button id="new-canvas" type="button">New canvas</button>
   <a href="/bench">Benchmarks</a>
+  <a href="/brush-lab">Brush lab</a>
   <span class="spacer"></span><a id="bench-tag" class="tag" hidden></a><span id="halted-tag" class="tag bad" hidden title="Stopped: no successor, judge or waiting agent starts here until you spawn one by hand">Stopped</span><span id="counts" class="tag"></span>
   <button id="stop-canvas" class="danger" type="button" hidden title="Stop every agent on this canvas, and let no successor or judge start here">Stop canvas</button>
   <button id="stop-all" class="danger" type="button" hidden title="Kill switch: stop every agent on every canvas, every benchmark, and every run this server started">Stop everything</button>
@@ -536,13 +537,14 @@ function viewPainter(id, which){
 $("viewer-tabs").onclick = e => { const b = e.target.closest("[data-view]"); if(b && S.viewerShow) S.viewerShow(b.dataset.view); };
 $("viewer-close").onclick = () => $("viewer").close();
 $("viewer").onclick = e => { if(e.target === $("viewer")) $("viewer").close(); };  // a click on the backdrop
+const pairBadge = p => p.published ? "Brush lab" : p.best_score != null ? p.best_score.toFixed(3) : p.paintings ? "unscored" : "seed";
 const offered = () => { const ids = chosenIds(); return S.catalog.pairs.filter(p => !ids || ids.includes(p.id)); };
 function fillCatalog(){
   const short = (t, n) => t.length > n ? t.slice(0, n - 1) + "…" : t;
   const ids = chosenIds(), usable = S.catalog.pairs.length, picked = offered().length;
   $("palette-text").innerHTML = ids ? `Drawn from <b>${picked} of ${usable}</b> painters chosen for this canvas.` : `Drawn from <b>all ${usable}</b> painters.`;
   const keep = $("painter").value;
-  $("painter").innerHTML = offered().map(p => `<option value="${esc(p.id)}">${p.best_score != null ? p.best_score.toFixed(3) : p.paintings ? "unscored" : "seed"} · ${esc(p.instrument.tools.join(", "))} · ${esc(short(p.instrument.label, 40))} / ${esc(short(p.prompt.label, 40))}</option>`).join("");
+  $("painter").innerHTML = offered().map(p => `<option value="${esc(p.id)}">${pairBadge(p)} · ${esc(p.instrument.tools.join(", "))} · ${esc(short(p.instrument.label, 40))} / ${esc(short(p.prompt.label, 40))}</option>`).join("");
   if(offered().some(p => p.id === keep)) $("painter").value = keep;
   showChoice();
 }
@@ -550,18 +552,18 @@ function fillCatalog(){
 let picking = null;  // the ids ticked in the open dialog
 function paintersShown(){
   const q = $("painters-search").value.trim().toLowerCase();
-  return S.catalog.pairs.filter(p => !q || [p.instrument.label, p.prompt.label, ...p.instrument.tools, ...p.ranks.map(r => r.run)].join(" ").toLowerCase().includes(q));
+  return S.catalog.pairs.filter(p => !q || [p.instrument.label, p.prompt.label, p.lab?.name || "", ...p.instrument.tools, ...p.ranks.map(r => r.run)].join(" ").toLowerCase().includes(q));
 }
 function renderPainters(){
   const art = (url, which, alt) => url ? `<img loading="lazy" src="${url}" data-view="${which}" alt="${alt}"${which === "closeup" ? ` class="closeup"` : ""}>` : "";
   $("painters-grid").innerHTML = paintersShown().map(p => { const on = picking.has(p.id);
     return `<label class="pcard ${on ? "on" : ""}" data-pair="${esc(p.id)}">
-      <div class="head"><input type="checkbox" ${on ? "checked" : ""}><b>${p.best_score != null ? p.best_score.toFixed(3) : p.paintings ? "unscored" : "seed"}</b><span class="muted">${p.paintings} painting${p.paintings === 1 ? "" : "s"}</span></div>
+      <div class="head"><input type="checkbox" ${on ? "checked" : ""}><b>${pairBadge(p)}</b><span class="muted">${p.paintings} painting${p.paintings === 1 ? "" : "s"}</span></div>
       <div class="imgs">${art(p.painting && artUrl(p.painting), "painting", "Best painting")}${art(p.instrument.sheet && closeupUrl(p.instrument.sheet), "closeup", "What its tools draw, close up")}</div>
       <div class="clamp" title="${esc(p.instrument.label)}"><b>Instrument</b> ${esc(p.instrument.label)}</div>
       <div class="muted">${esc(p.instrument.tools.join(", ") || "no tools")}</div>
       <div class="clamp" title="${esc(p.prompt.label)}"><b>Prompt</b> ${esc(p.prompt.label)}</div>
-      <div class="muted clamp">${p.ranks.length ? p.ranks.slice(0, 3).map(r => `#${r.place} in ${esc(r.run)}`).join(", ") + (p.ranks.length > 3 ? ` and ${p.ranks.length - 3} more` : "") : "seed pair"}</div></label>`; }).join("") || `<p class="muted">No painter matches.</p>`;
+      <div class="muted clamp">${p.ranks.length ? p.ranks.slice(0, 3).map(r => `#${r.place} in ${esc(r.run)}`).join(", ") + (p.ranks.length > 3 ? ` and ${p.ranks.length - 3} more` : "") : p.lab ? `Published in ${esc(p.lab.name)}` : "seed pair"}</div></label>`; }).join("") || `<p class="muted">No painter matches.</p>`;
   const usable = S.catalog.pairs.length;
   $("painters-count").textContent = `${[...picking].length} of ${usable} painters ticked`;
 }
@@ -594,7 +596,7 @@ function showChoice(){
   const art = (id, url) => { $(`${id}-fig`).hidden = !url; if(url) $(id).src = url; };
   art("painting", p?.painting && artUrl(p.painting)); art("sheet", p?.instrument.sheet && closeupUrl(p.instrument.sheet));
   if(p){
-    $("pair-summary").innerHTML = `<b>Instrument</b> ${esc(p.instrument.label)} · tools ${esc(p.instrument.tools.join(", ") || "none")}${p.instrument.views.length ? ` · views ${esc(p.instrument.views.join(", "))}` : ""}<br><b>Prompt</b> ${esc(p.prompt.label)}<br>${p.ranks.length ? `${p.ranks.slice(0, 3).map(r => `#${r.place} in ${esc(r.run)} (${esc(String(r.run_id).slice(0, 6))})`).join(", ")}${p.ranks.length > 3 ? ` and ${p.ranks.length - 3} more runs` : ""} · ${p.paintings} painting${p.paintings > 1 ? "s" : ""}, best ${p.best_score.toFixed(3)}` : "A seed pair, offered because no run here has a scored painting yet."}`;
+    $("pair-summary").innerHTML = `<b>Instrument</b> ${esc(p.instrument.label)} · tools ${esc(p.instrument.tools.join(", ") || "none")}${p.instrument.views.length ? ` · views ${esc(p.instrument.views.join(", "))}` : ""}<br><b>Prompt</b> ${esc(p.prompt.label)}<br>${p.ranks.length ? `${p.ranks.slice(0, 3).map(r => `#${r.place} in ${esc(r.run)} (${esc(String(r.run_id).slice(0, 6))})`).join(", ")}${p.ranks.length > 3 ? ` and ${p.ranks.length - 3} more runs` : ""} · ${p.paintings} painting${p.paintings > 1 ? "s" : ""}, best ${p.best_score.toFixed(3)}` : p.lab ? `Published in <a href="/brush-lab?lab=${encodeURIComponent(p.lab.id)}">${esc(p.lab.name)}</a>. Human-selected, not score-ranked.` : "A seed pair, offered because no run here has a scored painting yet."}`;
   }
   $("instrument-source").textContent = p?.instrument.text || ""; $("prompt-text").textContent = p?.prompt.text || "";
   updateSubmit();

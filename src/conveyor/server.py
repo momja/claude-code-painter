@@ -8,6 +8,9 @@ so it works the same during a run and after it, and from another process.
   GET /api/runs/<run>/history        every evaluation's score over time, and champion changes
   GET /api/runs/<run>/organisms      every organism, newest first (?node=)
   GET /api/runs/<run>/mutators       per node and mutator: tries, children, viable, beat parent, niche hits, cost
+  GET /brush-lab                    human-directed instrument design, examples and painting auditions
+  GET /api/brush-labs               labs and available starting instruments
+  GET /api/brush-labs/<lab>         one lab's candidates, lineage, jobs and auditions
   GET /studio                       painter studio graph and request page
   GET /api/runs/<run>/studio         all prompts, instruments/tools, and unique painting sessions
   GET /api/organisms/<id>            one organism: source, parent's source, evaluations, children, who wrote it
@@ -49,7 +52,12 @@ With a launcher (`conveyor serve` on a loopback address) it can also start runs:
   POST /api/benchmarks               start a benchmark from its spec (see commons/bench.py)
   POST /api/benchmarks/plan          check a spec and show what it would start, starting nothing
   POST /api/benchmarks/<id>/stop     stop a benchmark: every agent on its canvases, and the canvases still waiting
-  POST /api/stop-all                 the kill switch: every benchmark, canvas agent, run and painting started here
+  POST /api/brush-labs              create a named lab with a design brief
+  POST /api/brush-labs/<lab>/design  generate or revise a batch of candidates
+  POST /api/brush-labs/<lab>/audition  paint a text-only study with a candidate
+  POST /api/brush-labs/<lab>/candidates/<id>/publish  publish an exact instrument/prompt pair
+  POST /api/brush-labs/<lab>/jobs/<id>/stop  interrupt this server's lab job
+  POST /api/stop-all                 the kill switch: every benchmark, canvas agent, run, painting and lab job started here
 
 On a loopback address launching needs nothing more. Served to a network, it needs a token: the launcher is given
 one, and then these endpoints answer only to a request carrying it in X-Conveyor-Token. The dashboard's reads stay
@@ -84,6 +92,7 @@ DASHBOARD = Path(__file__).parent / "dashboard.html"
 STUDIO = Path(__file__).parent / "studio.html"
 COMMONS = Path(__file__).parent / "commons.html"
 BENCH = Path(__file__).parent / "bench.html"
+BRUSH_LAB = Path(__file__).parent / "brushlab.html"
 ARTIFACT_RE = re.compile(r"^[0-9a-f]{24}\.(png|jpg)$")
 JSON_COLS = {"data", "config", "genome", "traits", "details", "artifacts", "usage", "request"}
 STALL_ITERATIONS = 4
@@ -547,8 +556,9 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                 target_post = parts == ["api", "targets"]
                 bench_post = parts[:2] == ["api", "benchmarks"]
                 kill_post = parts == ["api", "stop-all"]
+                brush_post = parts[:2] == ["api", "brush-labs"]
                 if launcher is None or (parts[:2] != ["api", "launches"] and not painting_post and not canvas_post
-                                        and not target_post and not bench_post and not kill_post):
+                                        and not target_post and not bench_post and not kill_post and not brush_post):
                     return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 if (why := self._guard_post()) is not None:
                     return self._json({"error": why}, HTTPStatus.FORBIDDEN)
@@ -573,6 +583,24 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                         self._json({"error": str(e)}, HTTPStatus.UNPROCESSABLE_ENTITY)
                 elif kill_post:
                     self._json(launcher.stop_everything())
+                elif brush_post:
+                    from conveyor import brushlab
+
+                    try:
+                        if len(parts) == 2:
+                            self._json(brushlab.create_lab(launcher.db, body), HTTPStatus.CREATED)
+                        elif len(parts) == 4 and parts[3] in ("design", "audition"):
+                            self._json(launcher.start_brush_job(parts[2], parts[3], body), HTTPStatus.CREATED)
+                        elif len(parts) == 6 and parts[3] == "candidates" and parts[5] == "publish":
+                            self._json(brushlab.publish(launcher.db, parts[2], parts[4], body))
+                        elif len(parts) == 6 and parts[3] == "jobs" and parts[5] == "stop":
+                            stopped = launcher.stop_brush_job(parts[2], parts[4])
+                            self._json(stopped or {"error": "Job not owned by this server."},
+                                       HTTPStatus.OK if stopped else HTTPStatus.NOT_FOUND)
+                        else:
+                            self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+                    except LaunchError as e:
+                        self._json({"error": str(e)}, HTTPStatus.UNPROCESSABLE_ENTITY)
                 elif bench_post:
                     try:
                         if len(parts) == 2:
@@ -637,6 +665,15 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                     self._send(200, COMMONS.read_bytes(), "text/html; charset=utf-8")
                 elif parts == ["bench"]:
                     self._send(200, BENCH.read_bytes(), "text/html; charset=utf-8")
+                elif parts == ["brush-lab"]:
+                    self._send(200, BRUSH_LAB.read_bytes(), "text/html; charset=utf-8")
+                elif parts[:2] == ["api", "brush-labs"] and len(parts) in (2, 3):
+                    from conveyor import brushlab
+
+                    if len(parts) == 2:
+                        self._json({"labs": brushlab.listing(views.conn), "sources": brushlab.sources(views.conn)})
+                    else:
+                        self._json(brushlab.detail(views.conn, parts[2]))
                 elif (found := views.canvas_get(parts, q) or views.bench_get(parts, q)) is not None:
                     body, kind = found
                     if kind == "png":

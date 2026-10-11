@@ -101,6 +101,21 @@ CREATE TABLE IF NOT EXISTS canvas_heads (
     PRIMARY KEY (canvas_id, tx, ty)
 );
 CREATE INDEX IF NOT EXISTS canvas_heads_seq ON canvas_heads(canvas_id, seq);
+CREATE TABLE IF NOT EXISTS brush_labs (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, brief TEXT NOT NULL, created REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS brush_jobs (
+    id TEXT PRIMARY KEY, lab_id TEXT NOT NULL, kind TEXT NOT NULL, created REAL NOT NULL, ended REAL,
+    status TEXT NOT NULL, config TEXT NOT NULL, request TEXT NOT NULL, result TEXT, error TEXT, worker_pid INTEGER
+);
+CREATE INDEX IF NOT EXISTS brush_jobs_lab ON brush_jobs(lab_id, created);
+CREATE TABLE IF NOT EXISTS brush_candidates (
+    id TEXT PRIMARY KEY, lab_id TEXT NOT NULL, job_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
+    parent_id TEXT, parent2_id TEXT, created REAL NOT NULL, status TEXT NOT NULL,
+    source TEXT, summary TEXT, sheet TEXT, report TEXT, session_id TEXT, error TEXT,
+    prompt TEXT NOT NULL, published INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS brush_candidates_lab ON brush_candidates(lab_id, created);
 CREATE TABLE IF NOT EXISTS benchmarks (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, created REAL NOT NULL, ended REAL, status TEXT NOT NULL,
     config TEXT NOT NULL
@@ -152,7 +167,8 @@ class Store:
     def __init__(self, path: str | Path, run_name: str | None = None, config: dict | None = None,
                  *, run_id: str | None = None, check_run: bool = True) -> None:
         """`check_run=False` records under a `run_id` that has no row in `runs`: a shared canvas's agents keep
-        their sessions under the canvas, which is not a run and shouldn't be listed as one."""
+        their sessions under the canvas, which is not a run and shouldn't be listed as one. Brush lab
+        jobs use the same separation."""
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.run_id = run_id or new_id()

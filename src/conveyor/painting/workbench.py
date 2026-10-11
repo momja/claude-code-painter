@@ -56,6 +56,7 @@ class Workbench(StdioServer):
         self.width, self.height = int(self.job["width"]), int(self.job["height"])
         self.tries_left = int(self.job.get("max_tries", 8))
         self.wanted = self.job.get("wanted_niche")
+        self.locked_interface = self.job.get("locked_interface")
         self.n = 0
         self.submitted = False
         (self.dir / "tries").mkdir(exist_ok=True)
@@ -81,6 +82,13 @@ class Workbench(StdioServer):
         stem = self.dir / "tries" / f"{self.n:02d}_{kind}"
         stem.with_suffix(".py").write_text(source)
         report = probe(source, self.width, self.height)
+        if report["ok"] and self.locked_interface is not None:
+            from conveyor.brushlab import interface_contract
+
+            if interface_contract(source) != self.locked_interface:
+                report["ok"] = False
+                report["errors"].append("Interface lock: preserve TOOLS and VIEWS names and parameter declarations. "
+                                        "Only their documentation and implementation may change.")
         sheet = report.pop("sheet")
         if sheet:
             stem.with_suffix(".png").write_bytes(sheet)

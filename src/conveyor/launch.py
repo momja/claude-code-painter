@@ -165,9 +165,13 @@ class Launcher:
         self.targets_dir = self.db.parent / f"{self.db.stem}-targets"  # imported images, beside the database
         self._launches: dict[str, Launch] = {}
         self._agents: dict[str, tuple[str, Launch]] = {}  # canvas agent id -> (its canvas, its process)
+        self._brush_jobs: dict[str, tuple[str, Launch]] = {}  # job id -> lab id and process
         self._watching = threading.Event()  # set while the canvas watcher runs; cleared to stop it
         self._lock = threading.Lock()
         self._probe: tuple[float, dict] | None = None
+        from conveyor.brushlab import recover_jobs
+
+        recover_jobs(self.db)
 
     def authorized(self, presented: str | None) -> bool:
         return not self.token or hmac.compare_digest((presented or "").encode(), self.token.encode())
@@ -397,6 +401,52 @@ class Launcher:
             store.update_painting_request(request_id, status="stopped" if launch.stop_requested else "failed",
                                           ended=time.time(), error="Painting process ended before saving its result.")
             store.close()
+
+    # ---- human-directed brush design ----------------------------------------------------------------------
+
+    def start_brush_job(self, lab_id: str, kind: str, body: dict) -> dict:
+        from conveyor.brushlab import close_job, create_job
+
+        job = create_job(self.db, lab_id, kind, body)
+        argv = ["brushlab", str(self.db), job["id"]]
+        try:
+            proc = subprocess.Popen([self.python, "-m", "conveyor.brushlab", str(self.db), job["id"]],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1, env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                                    start_new_session=True)
+        except OSError as error:
+            close_job(self.db, job["id"], "failed", str(error))
+            raise LaunchError(f"Could not start Brush lab job: {error}") from error
+        launch = Launch(argv, "Brush lab " + kind, proc)
+        with self._lock:
+            self._launches[launch.id] = launch
+            self._brush_jobs[job["id"]] = (lab_id, launch)
+        threading.Thread(target=self._read_brush_job, args=(launch, job["id"]), daemon=True).start()
+        return {**job, "launch_id": launch.id}
+
+    def _read_brush_job(self, launch: Launch, jid: str) -> None:
+        from conveyor.brushlab import close_job
+
+        launch._read()
+        close_job(self.db, jid, "stopped" if launch.stop_requested else "failed",
+                  "Brush lab process ended before saving a result.")
+
+    def stop_brush_job(self, lab_id: str, jid: str) -> dict | None:
+        owned = self._brush_jobs.get(jid)
+        if owned is None:
+            from conveyor.brushlab import recover_jobs
+            from conveyor.store import connect
+
+            recover_jobs(self.db)
+            conn = connect(self.db, readonly=True)
+            try:
+                row = conn.execute("SELECT status FROM brush_jobs WHERE id=? AND lab_id=?", (jid, lab_id)).fetchone()
+                return {"id": jid, "state": row["status"]} if row and row["status"] not in ("queued", "running") else None
+            finally:
+                conn.close()
+        if owned[0] != lab_id:
+            return None
+        return self.stop(owned[1].id)
 
     # ---- the shared canvas --------------------------------------------------------------------------------
 
