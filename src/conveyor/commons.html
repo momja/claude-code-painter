@@ -14,6 +14,8 @@ button,input,select,textarea{font:inherit;color:var(--ink);background:var(--surf
 button{cursor:pointer}button:disabled{cursor:default;opacity:.55}button:hover:not(:disabled){border-color:var(--accent)}
 button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .primary{background:var(--accent);color:var(--surface);border-color:var(--accent)}
+.danger{color:var(--warn);border-color:var(--warn)}.danger.armed{background:var(--warn);color:var(--surface)}
+a.tag{text-decoration:none}
 .muted{color:var(--muted)}.bad{color:var(--warn)}.spacer{flex:1}
 .tag{font-size:12px;border:1px solid var(--line);border-radius:12px;padding:2px 9px;white-space:nowrap}
 main{display:grid;grid-template-columns:minmax(0,1fr) 380px;height:calc(100dvh - 58px);min-height:520px}
@@ -52,7 +54,7 @@ pre{font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wr
 .agent .acts{display:flex;gap:6px;flex-wrap:wrap}.agent .acts button,.agent .acts a{font-size:12px;padding:3px 8px}
 .bar{height:4px;background:var(--line);border-radius:2px;overflow:hidden}.bar i{display:block;height:100%;background:var(--c)}
 .status{font-size:11px;margin-left:auto;border-radius:10px;padding:1px 7px;border:1px solid var(--line)}
-.status.running{color:var(--good);border-color:var(--good)}
+.status.running{color:var(--good);border-color:var(--good)}.status.held{color:var(--muted);border-style:dashed}
 .msgs{display:grid;gap:6px}.msg{font-size:12px;text-align:left;border:1px solid var(--line);border-left:4px solid var(--c);border-radius:6px;padding:6px 8px;background:none;width:100%}
 .msg q{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;quotes:none;display:block;white-space:pre-wrap;overflow-wrap:anywhere}
 .msg img{display:block;max-width:100%;max-height:120px;margin-top:5px;border-radius:4px}
@@ -85,7 +87,10 @@ dialog::backdrop{background:#0006}
   <a id="dashboard" href="/">Conveyor</a><h1>Shared canvas</h1>
   <select id="canvas-select" aria-label="Canvas"></select>
   <button id="new-canvas" type="button">New canvas</button>
-  <span class="spacer"></span><span id="counts" class="tag"></span>
+  <a href="/bench">Benchmarks</a>
+  <span class="spacer"></span><a id="bench-tag" class="tag" hidden></a><span id="halted-tag" class="tag bad" hidden title="Stopped: no successor, judge or waiting agent starts here until you spawn one by hand">Stopped</span><span id="counts" class="tag"></span>
+  <button id="stop-canvas" class="danger" type="button" hidden title="Stop every agent on this canvas, and let no successor or judge start here">Stop canvas</button>
+  <button id="stop-all" class="danger" type="button" hidden title="Kill switch: stop every agent on every canvas, every benchmark, and every run this server started">Stop everything</button>
 </header>
 <main>
 <section class="stage" aria-label="Canvas">
@@ -93,6 +98,8 @@ dialog::backdrop{background:#0006}
     <div class="seg" role="group" aria-label="Mode"><button id="mode-live" aria-pressed="true">Live</button><button id="mode-replay" aria-pressed="false">Replay</button></div>
     <button id="zoom-out" aria-label="Zoom out">−</button><span id="zoom-label" class="muted">100%</span><button id="zoom-in" aria-label="Zoom in">+</button>
     <button id="fit">Fit painting</button><button id="home">Origin</button>
+    <button id="export" title="Download the frame, or the paint's reach, as one PNG; in replay, as it stood at the replayed call">Export PNG</button>
+    <button id="to-bench" hidden title="Make a benchmark from this canvas and the agents spawned on it by hand">Benchmark this</button>
     <label class="check" style="margin:0"><input id="show-agents" type="checkbox" checked> Viewports</label>
     <label class="check" style="margin:0"><input id="show-sketch" type="checkbox" checked> Sketch</label>
     <button id="pen" aria-pressed="false" hidden title="Draw on the canvas: every agent sees your lines above the paint (P)">Pen</button>
@@ -138,14 +145,15 @@ dialog::backdrop{background:#0006}
       <label>Task for this agent, optional<textarea id="agent-task" rows="3" maxlength="1000" placeholder="Its own part of the work. Only this agent reads it; its successors carry it on."></textarea></label>
       <label class="check painter-only"><input id="batch" type="checkbox" checked> Offer paint_batch (40 strokes for one call)</label>
       <label class="check painter-only"><input id="successors" type="checkbox" checked> May spawn a successor to keep working</label>
-      <label id="references-field" class="check" hidden><input id="references" type="checkbox" checked> <span id="references-text">May generate reference pictures to study, and share one</span></label>
+      <label class="painter-only" id="max-successors-field">Most hand-offs in its chain<input id="max-successors" type="number" min="0" max="100" step="1" value="3" placeholder="No cap"></label>
+      <label id="references-field" class="check painter-only"><input id="references" type="checkbox" checked> <span id="references-text">May generate reference pictures to study, and share one</span></label>
       <label id="token-field" hidden>Launch token<input id="token" type="password" autocomplete="off"></label>
       <button id="submit" class="primary" type="submit" disabled>Spawn</button>
       <div id="message" role="status" aria-live="polite"></div>
     </form>
   </section>
   <section aria-labelledby="messages-title"><h2 id="messages-title">Messages and broadcasts</h2><p class="muted" style="font-size:12px;margin-top:-4px">Messages, judges' notes among them, are painted where they were written, so paint can cover them. Broadcasts reach every agent, with where the sender was. Click one to find it.</p><div id="messages" class="msgs"></div></section>
-  <section id="references-section" aria-labelledby="references-title" hidden><h2 id="references-title">Reference pictures</h2><p class="muted" style="font-size:12px;margin-top:-4px">Pictures Pi agents made to study before painting. They never land on the canvas. A shared one went to every agent with a broadcast. Under each is what the agent said about it once it saw it. Click a picture to open it.</p><div id="references-list" class="refs"></div></section>
+  <section id="references-section" aria-labelledby="references-title" hidden><h2 id="references-title">Reference pictures</h2><p class="muted" style="font-size:12px;margin-top:-4px">Pictures agents made to study before painting. They never land on the canvas. A shared one went to every agent with a broadcast. Under each is what the agent said about it once it saw it. Click a picture to open it.</p><div id="references-list" class="refs"></div></section>
   <section aria-labelledby="agents-title"><h2 id="agents-title">Agents</h2><div id="agents" class="agents"><p class="muted">None yet.</p></div></section>
 </aside>
 </main>
@@ -396,6 +404,10 @@ async function poll(){
     const pairsKey = JSON.stringify(r.canvas.config.pairs || null);
     if(pairsKey !== S.pairsKey && S.catalog){ S.pairsKey = pairsKey; fillCatalog(); }
     $("task-bar").hidden = !r.canvas.config.task; $("task-text").textContent = r.canvas.config.task || "";
+    const b = r.canvas.config.benchmark;
+    $("bench-tag").hidden = !b; if(b){ $("bench-tag").textContent = `Benchmark · ${b.label}`; $("bench-tag").href = `/bench?id=${encodeURIComponent(b.id)}`; }
+    $("halted-tag").hidden = !r.canvas.config.halted;
+    $("stop-canvas").hidden = !S.canLaunch || !S.agents.some(a => LIVE.includes(a.status) || a.status === "held");
     const option = [...$("canvas-select").options].find(o => o.value === cid);
     if(option) option.textContent = `${r.canvas.name} · ${S.size}px${r.canvas.config.frame ? ` · ${r.canvas.config.frame[2]}×${r.canvas.config.frame[3]} frame` : ""} · ${S.agents.length} agents`;
     renderAgents(); renderMessages(); renderReferences(); counts(); emptyState(); draw();
@@ -411,13 +423,21 @@ function emptyState(){
   $("empty").textContent = "Blank paper. Click where the first agent should start, then spawn it from the panel.";
 }
 function agentName(id){ return id == null ? "the page" : S.agents.find(a => a.id === id)?.name || String(id).slice(0, 6); }
+// What an agent's chain may still do: hand off freely, a number of times more, or not at all.
+function handOffs(c){
+  if(c.kind === "judge") return "";
+  if(!c.successors) return c.generation > 1 && c.max_successors != null ? " · last of its chain" : " · no successors";
+  if(c.max_successors == null) return "";
+  const left = c.max_successors - ((c.generation || 1) - 1);
+  return ` · ${left} hand-off${left === 1 ? "" : "s"} left`;
+}
 function renderAgents(){
   if(!S.agents.length){ $("agents").innerHTML = `<p class="muted">None yet.</p>`; return; }
   $("agents").innerHTML = [...S.agents].reverse().map(a => {
     const c = a.config || {}, live = LIVE.includes(a.status), pct = Math.round(100 * a.calls_used / a.max_calls);
     const model = [c.harness === "pi" ? `pi · ${c.provider}` : "claude", c.model, c.effort].filter(Boolean).join(" · ");
-    return `<div class="agent" style="--c:${color(a.id)}"><div class="top"><b title="${esc(a.name)}">${esc(a.name)}</b><span class="status ${live ? "running" : ""}">${esc(a.status.replace("_", " "))}</span></div>
-      <div class="meta">${esc(model)}${c.generation > 1 ? ` · session ${c.generation}, from ${esc(agentName(c.parent_id))}` : ""}${c.viewport && c.viewport !== S.size ? ` · ${c.viewport} px viewport` : ""}${c.successors === false ? " · no successors" : ""}${c.references ? " · reference pictures" : ""}${c.random ? " · painter drawn at random" : ""}</div>
+    return `<div class="agent" style="--c:${color(a.id)}"><div class="top"><b title="${esc(a.name)}">${esc(a.name)}</b><span class="status ${live ? "running" : a.status}">${esc(a.status === "held" ? "waiting its turn" : a.status.replace("_", " "))}</span></div>
+      <div class="meta">${c.slot_label ? `<b>${esc(c.slot_label)}</b> · ` : ""}${esc(model)}${c.generation > 1 ? ` · session ${c.generation}, from ${esc(agentName(c.parent_id))}` : ""}${c.viewport && c.viewport !== S.size ? ` · ${c.viewport} px viewport` : ""}${handOffs(c)}${c.references ? " · reference pictures" : ""}${c.random ? " · painter drawn at random" : ""}</div>
       ${a.status === "handed_off" ? `<div class="meta">Handed off to ${esc(S.agents.filter(x => x.config?.parent_id === a.id).map(x => x.name).join(", ") || "a successor")}</div>` : ""}
       ${c.agent_task ? `<div class="meta clamp" title="${esc(c.agent_task)}"><b>Task:</b> ${esc(c.agent_task)}</div>` : ""}
       ${c.kind === "judge" ? `<div class="meta"><b>Judge</b>: leaves notes, doesn't paint${c.auto ? ` · started by itself at ${Number(c.at_ops).toLocaleString()} ops` : ""}</div>` : `<div class="meta clamp" title="${esc(c.instrument_label)}">Instrument: ${esc(c.instrument_label)}</div>
@@ -589,12 +609,13 @@ $("kind").onchange = () => {  // a judge has no painter, a fixed viewport, and n
 function fillHarness(){
   const o = S.options, kind = $("harness").value;
   $("provider-field").hidden = kind !== "pi";
-  const refs = o?.harnesses?.pi?.references;  // pictures come through Pi's OpenAI Codex login
-  $("references-field").hidden = kind !== "pi" || judging(); $("references").disabled = !refs; if(!refs) $("references").checked = false;
+  const refs = o?.harnesses?.references ?? o?.harnesses?.pi?.references;  // through the OpenAI Codex login, on either harness
+  $("references").disabled = !refs; if(!refs) $("references").checked = false;
   $("references-text").textContent = refs ? "May generate reference pictures to study, and share one" : "Reference pictures need the OpenAI Codex login: run conveyor auth login openai";
   if(o?.models){ const models = kind === "pi" ? (o.models.pi[$("provider").value] || []) : o.models.claude; $("models").innerHTML = models.map(m => `<option value="${esc(m)}">`).join(""); }
 }
 $("harness").onchange = $("provider").onchange = fillHarness;
+$("successors").onchange = () => { $("max-successors").disabled = !$("successors").checked; };
 function updateSubmit(){ $("submit").disabled = !S.canLaunch || !S.cid || (!judging() && !$("random").checked && !$("painter").value); }
 $("spawn").onsubmit = async e => {
   e.preventDefault(); if($("token").value) token.set($("token").value);
@@ -602,13 +623,41 @@ $("spawn").onsubmit = async e => {
   const body = {pair_id:$("random").checked ? "random" : $("painter").value, harness:$("harness").value, effort:$("effort").value,
     model:$("model").value.trim() || null, x:Math.round(Number($("x").value) || 0), y:Math.round(Number($("y").value) || 0),
     cap:Number($("cap").value) || 5, name:$("name").value.trim() || null, viewport:Number($("viewport").value) || null, task:$("agent-task").value.trim() || null, paint_batch:$("batch").checked,
-    successors:$("successors").checked};
-  if(judging()){ body.kind = "judge"; for(const k of ["pair_id", "viewport", "paint_batch", "successors"]) delete body[k]; }
-  if(body.harness === "pi"){ body.provider = $("provider").value; if(!judging()) body.references = $("references").checked && !$("references").disabled; }
+    successors:$("successors").checked, max_successors:$("max-successors").value === "" ? null : Math.round(Number($("max-successors").value)),
+    references:$("references").checked && !$("references").disabled};
+  if(judging()){ body.kind = "judge"; for(const k of ["pair_id", "viewport", "paint_batch", "successors", "max_successors", "references"]) delete body[k]; }
+  if(body.harness === "pi") body.provider = $("provider").value;
   try{ const a = await api(`/api/canvases/${encodeURIComponent(S.cid)}/agents`, "POST", body); $("message").textContent = a.painter ? `Spawned ${a.name || a.id} at (${a.x}, ${a.y})${a.painter.random ? ", drawn at random" : ""}: ${a.painter.instrument} / ${a.painter.prompt}.` : `Spawned the judge ${a.name || a.id} at (${a.x}, ${a.y}).`; S.spawn = null; await poll(); }
   catch(err){ $("message").textContent = err.message; }
   updateSubmit();
 };
+
+// ---- export and the kill switch -------------------------------------------------------------------------
+$("export").onclick = () => {  // the paint alone, at full size up to 4096 px; in replay, as of the replayed call
+  if(!S.cid) return;
+  const seq = S.mode === "replay" ? S.history.ops[S.idx]?.[0] : null;
+  const a = document.createElement("a");
+  a.href = `/api/canvases/${encodeURIComponent(S.cid)}/export.png${seq ? `?seq=${seq}` : ""}`; a.download = ""; a.click();
+};
+$("to-bench").onclick = () => { if(S.cid) location.href = `/bench?from=${encodeURIComponent(S.cid)}`; };
+// A button that spends nothing until it's clicked twice within four seconds.
+function armed(button, label, act){
+  let timer = null; const idle = button.textContent;
+  button.onclick = async () => {
+    if(!timer){ button.textContent = label; button.classList.add("armed"); timer = setTimeout(() => { timer = null; button.textContent = idle; button.classList.remove("armed"); }, 4000); return; }
+    clearTimeout(timer); timer = null; button.textContent = idle; button.classList.remove("armed"); button.disabled = true;
+    try{ $("message").textContent = await act(); }catch(err){ $("message").textContent = err.message; }
+    button.disabled = false; poll();
+  };
+}
+armed($("stop-canvas"), "Stop them all?", async () => {
+  const r = await api(`/api/canvases/${encodeURIComponent(S.cid)}/stop`, "POST", {});
+  return `Stopped ${r.interrupted} running and ${r.dropped} waiting agents. No successor or judge starts here until you spawn an agent by hand.`;
+});
+armed($("stop-all"), "Stop everything?", async () => {
+  const r = await api("/api/stop-all", "POST", {});
+  return `Stopped ${r.agents} agents on ${r.canvases} canvases, ${r.benchmarks} benchmarks and ${r.runs} runs or paintings.`;
+});
 
 // ---- the pen --------------------------------------------------------------------------------------------
 // Lines go to the canvas's sketch, which every agent sees over the paint and nothing paints over. Undo and Clear
@@ -668,6 +717,7 @@ async function choose(id){
   $("task-bar").hidden = true;
   S.cid = id; S.seq = 0; S.heads = new Map(); S.agents = []; S.spawn = null; S.sketches = []; S.erased = new Map(); S.pending = []; shown.clear();
   history.replaceState(null, "", `/canvas?canvas=${encodeURIComponent(id)}`);
+  $("to-bench").hidden = false;
   await poll(); fit(); updateSubmit();
 }
 $("canvas-select").onchange = () => choose($("canvas-select").value);
@@ -686,7 +736,7 @@ async function init(){
   try{
     const [options, cat] = await Promise.all([api("/api/options"), api("/api/canvas-catalog")]);
     S.options = options; S.catalog = cat; S.canLaunch = Boolean(options.launch);
-    $("token-field").hidden = !options.locked; $("new-canvas").hidden = !options.launch; $("choose-painters").hidden = !options.launch; $("pen").hidden = !options.launch;
+    $("token-field").hidden = !options.locked; $("new-canvas").hidden = !options.launch; $("stop-all").hidden = !options.launch; $("choose-painters").hidden = !options.launch; $("pen").hidden = !options.launch;
     if(!options.launch) $("message").textContent = "This server is read-only. Run conveyor serve without --no-launch to spawn agents.";
     if(options.harnesses && !options.harnesses.claude?.ok && options.harnesses.pi?.ok) $("harness").value = "pi";
     $("provider").innerHTML = Object.keys(options.models?.pi || {"opencode-go":[]}).map(p => `<option>${esc(p)}</option>`).join("");

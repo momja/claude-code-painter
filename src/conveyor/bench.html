@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Benchmarks · Conveyor</title>
+<style>
+:root{--bg:#f4efe6;--surface:#fbf8f2;--line:#ddd4c4;--ink:#1f2328;--muted:#6a6e75;--accent:#2f4b8f;--warn:#b3401a;--good:#2f7d4f;--code:#efe8db;--paper:#f0e8d6;--outside:#d9d1c2;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--bg:#15171b;--surface:#1d2025;--line:#30343b;--ink:#e7e4dd;--muted:#a0a3a8;--accent:#8fa9e8;--warn:#ec8a64;--good:#6cc08f;--code:#23262c;--outside:#2a2d33;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;color:var(--ink);background:var(--bg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--line)}
+h1{font-size:17px;margin:0}h2{font-size:15px;margin:0 0 10px}h3{font-size:14px;margin:0 0 4px}a{color:var(--accent)}
+button,input,select,textarea{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 9px}
+button{cursor:pointer}button:disabled{cursor:default;opacity:.55}button:hover:not(:disabled){border-color:var(--accent)}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.primary{background:var(--accent);color:var(--surface);border-color:var(--accent)}
+.danger{color:var(--warn);border-color:var(--warn)}.danger.armed{background:var(--warn);color:var(--surface)}
+.muted{color:var(--muted)}.bad{color:var(--warn)}.good{color:var(--good)}.spacer{flex:1}
+.tag{font-size:12px;border:1px solid var(--line);border-radius:12px;padding:2px 9px;white-space:nowrap}
+main{padding:20px;display:grid;gap:22px;max-width:1600px;margin:0 auto}main>*{min-width:0}
+.summary{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:baseline}.summary .task{flex-basis:100%;white-space:pre-wrap}
+.acts{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.acts a.button{display:inline-block;text-decoration:none;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 9px;background:var(--surface)}
+.runs{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+.run{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px;display:grid;gap:8px;align-content:start;min-width:0}
+.run img{display:block;width:100%;aspect-ratio:4/3;object-fit:contain;background:var(--paper);border-radius:6px}
+.run .top{display:flex;gap:8px;align-items:center}.run b{font-size:15px}
+.state{font-size:11px;margin-left:auto;border-radius:10px;padding:1px 7px;border:1px solid var(--line)}
+.state.running{color:var(--good);border-color:var(--good)}.state.waiting{border-style:dashed;color:var(--muted)}.state.stopped{color:var(--warn);border-color:var(--warn)}
+.run .models{font-size:12px;color:var(--muted)}.run .acts a{font-size:12px}
+.table-wrap{overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:10px}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:6px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:var(--surface)}thead th{font-weight:600}
+td.sub{font-size:12px;color:var(--muted)}
+pre{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--code);padding:10px;border-radius:6px;max-height:340px;overflow:auto;margin:6px 0 0}
+details summary{cursor:pointer;color:var(--muted)}
+.empty{padding:40px;text-align:center;color:var(--muted)}
+[hidden]{display:none!important}
+
+/* the editor */
+#editor{display:grid;gap:16px}
+.ed-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.ed-head h2{margin:0}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}.seg button{border:0;border-radius:0}.seg button[aria-pressed=true]{background:var(--accent);color:var(--surface)}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px;min-width:0}
+.hint{font-size:12px;color:var(--muted);margin:0 0 12px}
+.ed-top{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.5fr);gap:16px}
+.fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px}
+.f{display:grid;gap:4px;font-size:12px;font-weight:600;align-content:start}.f input,.f select,.f textarea{font-weight:400;width:100%}
+.f.wide{grid-column:1/-1}
+.check{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:400}.check input{width:auto;margin:0}
+.radios{display:grid;gap:6px}.radios .check{align-items:flex-start}.radios small{display:block;color:var(--muted);font-size:12px}
+.agents-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(340px,1fr);gap:16px;align-items:start}
+#map-wrap{position:relative}#map{width:100%;display:block;border-radius:8px;cursor:crosshair;touch-action:none;background:var(--outside)}
+#map.over{cursor:grab}#map.dragging{cursor:grabbing}
+.defaults{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+#agent-list{display:grid;gap:8px;max-height:620px;overflow:auto;padding:2px}
+.arow{border:1px solid var(--line);border-left:5px solid var(--c);border-radius:8px;padding:8px 10px;display:grid;gap:7px}
+.arow.sel{box-shadow:0 0 0 2px var(--accent)}
+.line{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.line input[type=number]{width:84px}.line .grow{flex:1;min-width:120px}
+.arow textarea{width:100%;resize:vertical}
+.arow .over{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;margin-top:8px}
+.arow .thumb{width:44px;height:44px;object-fit:cover;border-radius:4px;background:var(--bg)}
+.num{display:inline-grid;place-items:center;min-width:24px;height:24px;border-radius:12px;background:var(--c);color:#fff;font-size:12px;font-weight:700;padding:0 6px}
+.icon{padding:3px 9px}
+.quick{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+#variants{display:grid;gap:10px}
+.variant{border:1px solid var(--line);border-radius:8px;padding:10px 12px;display:grid;gap:8px}
+.variant .slots{display:grid;gap:6px}.variant .slot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.picker{display:inline-flex;gap:6px;flex-wrap:wrap;align-items:center}.picker input{width:220px}
+.ed-foot{position:sticky;bottom:12px;z-index:2;background:var(--surface);border:1px solid var(--accent);border-radius:10px;padding:12px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;box-shadow:0 6px 24px #0003}
+#estimate{font-size:13px}#ed-error{flex-basis:100%;margin:0;white-space:pre-wrap}#ed-error:empty{display:none}
+#spec-text{width:100%;min-height:60dvh;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical}
+#plan table{font-size:12px}#plan th,#plan td{padding:4px 6px}#plan td.painter{text-align:left;white-space:normal}
+#painters-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:4px 12px;max-height:220px;overflow:auto;margin-top:8px}
+@media(max-width:1000px){.ed-top,.agents-grid{grid-template-columns:1fr}header,main{padding-left:14px;padding-right:14px}}
+</style>
+</head>
+<body>
+<header>
+  <a href="/">Conveyor</a><h1>Benchmarks</h1>
+  <select id="bench-select" aria-label="Benchmark" hidden></select>
+  <button id="new" type="button" class="primary" hidden>New benchmark</button>
+  <a href="/canvas">Shared canvas</a>
+  <span class="spacer"></span><span id="status" class="tag" hidden></span>
+  <button id="stop" class="danger" type="button" hidden title="Stop every agent on this benchmark's canvases, and the canvases still waiting their turn">Stop benchmark</button>
+  <button id="stop-all" class="danger" type="button" hidden title="Kill switch: stop every agent on every canvas, every benchmark, and every run this server started">Stop everything</button>
+</header>
+<main>
+  <div id="message" role="status" aria-live="polite" class="muted"></div>
+  <section id="view" hidden>
+    <div class="summary"><h2 id="name" style="margin:0"></h2><span id="facts" class="muted"></span><div id="task" class="task"></div></div>
+    <div class="acts" style="margin-top:10px">
+      <a id="sheet" class="button" target="_blank" rel="noopener">Comparison sheet (PNG)</a>
+      <button id="again" type="button" hidden>Run this setup again</button>
+    </div>
+  </section>
+  <section id="runs" class="runs" aria-label="Runs"></section>
+  <section id="compare" hidden><h2>Side by side</h2><div class="table-wrap"><table id="table"></table></div>
+    <p class="muted" style="font-size:12px">Paint calls are instrument calls and batches that changed pixels. Coverage is the share of the frame's tiles with any paint. Cost is list price; on a subscription it measures rate-limit use, not a bill. Pi sessions report cost from the models.dev catalog, so a model it doesn't list reads $0.</p></section>
+  <section id="spec-section" hidden><details><summary>Spec</summary><pre id="spec"></pre></details></section>
+  <div id="none" class="empty" hidden></div>
+
+  <section id="editor" hidden aria-labelledby="ed-title">
+    <div class="ed-head">
+      <button id="ed-back" type="button">← Back</button><h2 id="ed-title">New benchmark</h2>
+      <label class="check muted" style="margin-left:8px">Start from <select id="ed-from" aria-label="Start from"></select></label>
+      <span class="spacer"></span>
+      <div class="seg" role="group" aria-label="Editor"><button id="tab-form" type="button" aria-pressed="true">Form</button><button id="tab-json" type="button" aria-pressed="false">JSON</button></div>
+    </div>
+    <div id="ed-form">
+      <div class="ed-top">
+        <div class="panel">
+          <h3>Benchmark</h3>
+          <div class="fields">
+            <label class="f wide">Name<input data-k="name" data-t="text" maxlength="60" placeholder="Harbour at dusk"></label>
+            <div class="f wide">Order<div class="radios">
+              <label class="check"><input type="radio" name="order" value="sequential" data-k="order"><span>One model at a time<small>The next canvas starts when the one before is done. You can stop a bad batch after the first.</small></span></label>
+              <label class="check"><input type="radio" name="order" value="parallel" data-k="order"><span>All at once<small>Faster, but every model's rate limit is in use together.</small></span></label>
+            </div></div>
+            <label class="f">Runs of each<input data-k="repeats" data-t="int" type="number" min="1" max="10" title="Repeat each model this many times, to see how much results vary"></label>
+            <label class="f">Seed<input data-k="seed" data-t="int" type="number" min="0" placeholder="random" title="Fixes which painters random slots draw. Check fills it in."></label>
+          </div>
+        </div>
+        <div class="panel">
+          <h3>Canvas</h3>
+          <p class="hint">Every model gets a canvas exactly like this.</p>
+          <div class="fields">
+            <label class="f wide">Task every agent is given<textarea data-k="canvas.task" data-t="text" rows="3" maxlength="2000" placeholder="A harbour at dusk: fishing boats coming in, gulls, lamps on the quay. Leave empty for no shared goal."></textarea></label>
+            <label class="f">Viewport, px<input data-k="canvas.viewport" data-t="int" type="number" min="64" max="1024" data-r="1"></label>
+            <label class="f">Calls per agent<input data-k="canvas.max_calls" data-t="int" type="number" min="1" max="1000"></label>
+            <label class="f" style="grid-column:span 2"><span class="check" style="font-weight:600"><input id="ed-frame" type="checkbox"> Frame, px <span class="muted" style="font-weight:400">(width × height)</span></span><span class="line"><input data-k="canvas.frame.width" data-t="int" type="number" min="64" step="64" aria-label="Frame width" style="width:80px"> × <input data-k="canvas.frame.height" data-t="int" type="number" min="64" step="64" aria-label="Frame height" style="width:80px"></span></label>
+            <div class="f wide">Judges<div class="line">
+              <select data-k="judges" data-r="1" aria-label="Automatic judges"><option value="newest">A judge every 1,000 ops, on the newest agent's model</option><option value="fixed">A judge every 1,000 ops, on this model:</option><option value="off">No automatic judges</option></select>
+              <span id="judge-picker"></span></div></div>
+            <details class="f wide"><summary id="painters-summary">Painters random slots draw from</summary><div class="acts" style="margin-top:8px"><button type="button" id="painters-all" class="icon">All</button><button type="button" id="painters-none" class="icon">None</button></div><div id="painters-list"></div></details>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Agents</h3>
+        <p class="hint">Click the frame to place an agent, drag one to move it. Every model gets these agents in these places, and each slot gets the same painter in every run.</p>
+        <div class="agents-grid">
+          <div><div id="map-wrap"><canvas id="map" aria-label="Where agents start. Click to add an agent, drag to move one."></canvas></div>
+            <div class="defaults"><h3>Every agent, unless it says otherwise</h3>
+              <div class="fields">
+                <label class="f">Cap per session, $<input data-k="defaults.cap" data-t="num" type="number" min="0.01" max="100" step="any" placeholder="5"></label>
+                <label class="f">Effort<select data-k="defaults.effort"><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
+                <label class="f" title="How many times a chain of agents may hand off to a successor">Most hand-offs<select data-k="defaults.max_successors" data-t="maxs" id="def-maxs"></select></label>
+                <label class="check"><input type="checkbox" data-k="defaults.successors" data-t="bool"> May hand off</label>
+                <label class="check"><input type="checkbox" data-k="defaults.paint_batch" data-t="bool"> paint_batch</label>
+                <label class="check" id="def-refs"><input type="checkbox" data-k="defaults.references" data-t="bool"> Reference pictures</label>
+              </div></div></div>
+          <div id="agent-list"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Models to compare</h3>
+        <p class="hint">Each line is one run: a canvas of its own with the agents above. Give every agent one model, or a model per agent for a mix.</p>
+        <div class="quick" id="quick"></div>
+        <div id="variants"></div>
+      </div>
+    </div>
+    <div id="ed-json" hidden class="panel"><p class="hint">The same benchmark as JSON. Switching back to Form reads it.</p><textarea id="spec-text" spellcheck="false" aria-label="Spec as JSON"></textarea></div>
+    <div id="plan" class="panel" hidden></div>
+    <div class="ed-foot">
+      <span id="estimate"></span><span class="spacer"></span>
+      <label id="token-field" class="check" hidden>Launch token <input id="token" type="password" autocomplete="off"></label>
+      <button id="check" type="button" title="Check everything and list what would start. Nothing starts.">Check</button>
+      <button id="start" type="button" class="primary">Start</button>
+      <p id="ed-error" class="bad"></p>
+    </div>
+  </section>
+</main>
+<datalist id="dl-claude"></datalist><datalist id="dl-pi"></datalist>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const token = {get(){try{return localStorage.getItem("conveyor-launch-token") || "";}catch{return "";}},set(v){try{localStorage.setItem("conveyor-launch-token", v);}catch{}}};
+async function api(path, method="GET", body){
+  const headers = token.get() ? {"X-Conveyor-Token": token.get()} : {};
+  if(body !== undefined) headers["Content-Type"] = "application/json";
+  const r = await fetch(path, {method, headers, body: body === undefined ? undefined : JSON.stringify(body)});
+  const out = await r.json();
+  if(!r.ok) throw new Error(out.error || `Request failed (${r.status})`);
+  return out;
+}
+const money = x => x >= 0.1 || x === 0 ? `$${x.toFixed(2)}` : `$${x.toFixed(4)}`;
+const count = n => Number(n || 0).toLocaleString();
+const tokens = n => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n || 0);
+const duration = s => s == null ? "–" : s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
+const S = {id:null, list:[], data:null, example:null, presets:{}, canLaunch:false, timer:null, options:null, catalog:null, references:false};
+
+// ---- results ----------------------------------------------------------------------------------------------
+async function load(want){
+  const r = await api("/api/benchmarks");
+  S.list = r.benchmarks; S.example = r.example; S.presets = r.presets;
+  $("bench-select").innerHTML = S.list.map(b => `<option value="${esc(b.id)}">${esc(b.name)} · ${esc(b.variants.join(", "))} · ${esc(b.status)}</option>`).join("");
+  $("bench-select").hidden = !S.list.length;
+  const id = S.list.find(b => b.id === (want || new URLSearchParams(location.search).get("id")))?.id || S.list[0]?.id;
+  if(!id){ show(null); return; }
+  $("bench-select").value = id; await choose(id);
+}
+async function choose(id){
+  S.id = id; if(!editing()) history.replaceState(null, "", `/bench?id=${encodeURIComponent(id)}`);
+  await poll();
+}
+const editing = () => !$("editor").hidden;
+function show(data){
+  S.data = data;
+  const on = Boolean(data) && !editing();
+  for(const k of ["view", "compare", "spec-section", "runs"]) $(k).hidden = !on;
+  $("status").hidden = !on; $("stop").hidden = !on || !S.canLaunch || data.status !== "running";
+  $("none").hidden = Boolean(data) || editing();
+  if(!data){ $("runs").innerHTML = ""; $("none").innerHTML = S.canLaunch ? `No benchmark yet. Press <b>New benchmark</b>, or <b>Benchmark this</b> on a canvas you set up by hand.` : "No benchmark yet, and this server is read-only."; return; }
+  $("status").textContent = data.status; $("status").className = `tag ${data.status === "running" ? "good" : data.status === "stopped" ? "bad" : ""}`;
+  $("name").textContent = data.name;
+  const variants = [...new Set(data.runs.map(r => r.variant))];
+  $("facts").textContent = `${variants.length} model setup${variants.length === 1 ? "" : "s"} · ${data.runs.length} canvases · ${data.order === "sequential" ? "one at a time" : "all at once"} · seed ${data.seed} · ${money(data.cost)} so far`;
+  $("task").textContent = data.spec.canvas?.task ? `Task: ${data.spec.canvas.task}` : "No task: the agents have no shared goal.";
+  $("sheet").href = `/api/benchmarks/${encodeURIComponent(data.id)}/sheet.png`;
+  $("again").hidden = !S.canLaunch;
+  $("spec").textContent = JSON.stringify(data.spec, null, 2);
+  $("runs").innerHTML = data.runs.map(r => {
+    const img = `/api/canvases/${encodeURIComponent(r.canvas_id)}/export.png?side=900&v=${r.last_op || 0}`;
+    return `<article class="run"><div class="top"><b>${esc(r.label)}</b><span class="state ${esc(r.state)}">${esc(r.state)}</span></div>
+      <a href="/canvas?canvas=${encodeURIComponent(r.canvas_id)}" title="Open this canvas"><img loading="lazy" src="${img}" alt="${esc(r.label)}: the canvas as it is now"></a>
+      <div class="models">${esc([...new Set(r.models)].join(" · "))}</div>
+      <div class="muted" style="font-size:12px">${r.agents} sessions · ${count(r.paints)} paint calls · ${money(r.cost)}${r.coverage != null ? ` · ${Math.round(r.coverage * 100)}% covered` : ""} · ${duration(r.seconds)}</div>
+      <div class="acts"><a href="/canvas?canvas=${encodeURIComponent(r.canvas_id)}">Open canvas</a><a href="/api/canvases/${encodeURIComponent(r.canvas_id)}/export.png" download>Export PNG</a></div></article>`;
+  }).join("");
+  table(data.runs);
+}
+// Every number for every run, a column each, with each model's share under it in a mix.
+function table(runs){
+  const rows = [
+    ["State", r => r.state], ["Sessions", r => r.agents], ["Hand-offs", r => r.handoffs], ["Tool calls", r => count(r.calls)],
+    ["Paint calls", r => count(r.paints)], ["Refused calls", r => count(r.refused)], ["Tiles painted", r => count(r.tiles)],
+    ["Coverage", r => r.coverage == null ? "–" : `${Math.round(r.coverage * 100)}%`], ["Messages", r => r.messages],
+    ["Broadcasts", r => r.broadcasts], ["Reference pictures", r => r.references], ["Failed sessions", r => r.statuses.failed || 0],
+    ["Cost", r => money(r.cost)], ["Tokens in", r => tokens(r.input_tokens)], ["Tokens out", r => tokens(r.output_tokens)],
+    ["Time", r => duration(r.seconds)]];
+  const head = `<thead><tr><th></th>${runs.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr></thead>`;
+  const body = rows.map(([label, f]) => `<tr><td>${label}</td>${runs.map(r => `<td>${esc(f(r))}</td>`).join("")}</tr>`).join("");
+  const per = runs.some(r => r.by_model.length > 1) ? `<tr><td>Per model</td>${runs.map(r => `<td class="sub">${r.by_model.map(m =>
+    `${esc(m.model)}: ${m.sessions} sessions, ${count(m.paints)} paint calls, ${money(m.cost)}`).join("<br>")}</td>`).join("")}</tr>` : "";
+  $("table").innerHTML = head + `<tbody>${body}${per}</tbody>`;
+}
+async function poll(){
+  clearTimeout(S.timer); const id = S.id; if(!id) return;
+  try{
+    const data = await api(`/api/benchmarks/${encodeURIComponent(id)}`);
+    if(id !== S.id) return;
+    show(data);
+  }catch(e){ $("message").textContent = `Couldn't refresh: ${e.message}`; }
+  if(id === S.id && S.data?.status === "running") S.timer = setTimeout(poll, 5000);
+}
+$("bench-select").onchange = () => { closeEditor(); choose($("bench-select").value); };
+
+// ---- the editor: state ----------------------------------------------------------------------------------------
+// The form edits E.st, which maps to and from a spec. A model is {preset} or {harness, provider, model}, with an
+// optional effort; a run ("variant") gives every agent one model, or one per agent.
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+const DRAFT = "conveyor-bench-draft";
+const E = {st:null, sel:null, drag:null, world:null, bg:null, hover:null, mode:"form"};
+const blankRef = (preset = "claude") => ({preset});
+const clean = o => Object.fromEntries(Object.entries(o).filter(([k, v]) => v !== undefined && v !== "" && (v !== null || k === "max_successors")));
+
+function refFromSpec(v, models){
+  if(typeof v === "string") return models[v] ? refFromSpec(models[v], {}) : {preset:v};
+  v = v || {};
+  const harness = v.harness || "claude", provider = harness === "pi" ? v.provider || "opencode-go" : null;
+  const match = Object.entries(S.presets).find(([, p]) => p.harness === harness && (p.provider || null) === provider && p.model === v.model);
+  const ref = match ? {preset:match[0]} : {harness, provider:provider || "opencode-go", model:v.model || ""};
+  if(v.effort) ref.effort = v.effort;
+  return ref;
+}
+function refToSpec(r){
+  if(r.preset) return r.effort ? {...S.presets[r.preset], effort:r.effort} : r.preset;
+  const o = {harness:r.harness || "claude"};
+  if(o.harness === "pi") o.provider = r.provider || "opencode-go";
+  if(r.model) o.model = r.model.trim();
+  if(r.effort) o.effort = r.effort;
+  return o;
+}
+function fromSpec(spec){
+  const c = spec.canvas || {}, models = spec.models || {}, agents = (spec.agents || []).map(a => ({...a}));
+  const variants = Object.entries(spec.variants || {}).map(([name, v]) => Array.isArray(v)
+    ? {name, mode:"each", refs:agents.map((_, i) => refFromSpec(v[i % v.length], models))}
+    : {name, mode:"all", refs:[refFromSpec(v, models)]});
+  return {name:spec.name || "", order:spec.order || "sequential", repeats:spec.repeats || 1, seed:spec.seed ?? undefined,
+    canvas:{viewport:c.viewport ?? 512, max_calls:c.max_calls ?? 100, task:c.task || "", frame:c.frame ? {...c.frame} : null, painters:c.painters || null},
+    judges:c.auto_judges === false ? "off" : spec.judge ? "fixed" : "newest", judge:spec.judge ? refFromSpec(spec.judge, models) : blankRef(),
+    defaults:{effort:"high", max_successors:3, successors:true, paint_batch:true, references:true, ...(spec.defaults || {})}, agents, variants};
+}
+function toSpec(st = E.st){
+  const canvas = {viewport:st.canvas.viewport, max_calls:st.canvas.max_calls};
+  if(st.canvas.task.trim()) canvas.task = st.canvas.task.trim();
+  if(st.canvas.frame) canvas.frame = {...st.canvas.frame};
+  if(st.canvas.painters) canvas.painters = st.canvas.painters;
+  if(st.judges === "off") canvas.auto_judges = false;
+  const spec = {name:st.name.trim() || "Benchmark", order:st.order, repeats:st.repeats || 1, canvas, defaults:clean(st.defaults),
+    agents:st.agents.map(a => clean({...a, label:(a.label || "").trim(), task:(a.task || "").trim()})), variants:{}};
+  if(Number.isInteger(st.seed)) spec.seed = st.seed;
+  if(st.judges === "fixed") spec.judge = refToSpec(st.judge);
+  for(const v of st.variants) spec.variants[v.name.trim()] = v.mode === "all" ? refToSpec(v.refs[0]) : v.refs.map(refToSpec);
+  return spec;
+}
+// Keep the state whole after any change: a run's models match its mode and the number of agents.
+function normalise(){
+  const st = E.st;
+  for(const v of st.variants){
+    if(v.mode === "all") v.refs = [v.refs[0] || blankRef()];
+    else v.refs = st.agents.map((_, i) => v.refs[i] || {...(v.refs[i - 1] || v.refs[0] || blankRef())});
+    for(const r of v.refs){ if(!r.preset){ r.harness ||= "claude"; r.provider ||= "opencode-go"; } }
+  }
+  if(st.judge && !st.judge.preset){ st.judge.harness ||= "claude"; st.judge.provider ||= "opencode-go"; }
+}
+const viewportOf = () => E.st.canvas.viewport || 512;
+const agentSize = a => a.kind === "judge" ? 512 : (a.viewport || viewportOf());
+const slotName = (a, i) => (a.label || "").trim() || `#${i + 1}`;
+const hue = i => (i * 67 + 210) % 360;
+const agentColor = (i, a = 1) => `hsla(${hue(i)},62%,46%,${a})`;
+function saveDraft(){ try{ localStorage.setItem(DRAFT, JSON.stringify(toSpec())); }catch{} }
+
+// ---- the editor: rendering ------------------------------------------------------------------------------------
+const NAMES = {claude:"Claude", sonnet:"Sonnet", haiku:"Haiku", gpt:"GPT", muse:"Muse", glm:"GLM"};
+const nameOf = k => NAMES[k] || k[0].toUpperCase() + k.slice(1);
+function presetLabel(k){ const p = S.presets[k]; return `${nameOf(k)} · ${p.model}${p.harness === "pi" ? ` (${p.provider})` : ""}`; }
+function picker(path, r){
+  const opts = Object.keys(S.presets).map(k => `<option value="${esc(k)}" ${r.preset === k ? "selected" : ""}>${esc(presetLabel(k))}</option>`).join("")
+    + `<option value="" ${!r.preset ? "selected" : ""}>Another model…</option>`;
+  let html = `<span class="picker"><select data-k="${path}.preset" data-r="1" aria-label="Model">${opts}</select>`;
+  if(!r.preset){
+    html += `<select data-k="${path}.harness" data-r="1" aria-label="Harness"><option value="claude" ${r.harness === "claude" ? "selected" : ""}>Claude Code</option><option value="pi" ${r.harness === "pi" ? "selected" : ""}>Pi</option></select>`;
+    if(r.harness === "pi") html += `<select data-k="${path}.provider" aria-label="Provider">${Object.keys(S.options?.models?.pi || {"opencode-go":1}).map(p => `<option ${r.provider === p ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>`;
+    html += `<input data-k="${path}.model" data-t="text" value="${esc(r.model || "")}" list="${r.harness === "pi" ? "dl-pi" : "dl-claude"}" placeholder="model id (empty: the default)" aria-label="Model id">`;
+  }
+  html += `<select data-k="${path}.effort" aria-label="Thinking effort" title="Thinking effort for this model; empty uses each agent's"><option value="">agent's effort</option>${EFFORTS.map(e => `<option ${r.effort === e ? "selected" : ""}>${e}</option>`).join("")}</select></span>`;
+  return html;
+}
+function maxsOptions(value, withDefault){
+  const opts = (withDefault ? [["", "default"]] : []).concat([["none", "no cap"]], [0, 1, 2, 3, 4, 5, 6, 8, 10].map(n => [String(n), String(n)]));
+  const now = value === undefined ? "" : value === null ? "none" : String(value);
+  return opts.map(([v, l]) => `<option value="${v}" ${v === now ? "selected" : ""}>${l}</option>`).join("");
+}
+function tri(path, value, label){
+  const now = value === undefined ? "" : value ? "on" : "off";
+  return `<label class="f">${label}<select data-k="${path}" data-t="tri">${[["", "default"], ["on", "on"], ["off", "off"]].map(([v, l]) => `<option value="${v}" ${v === now ? "selected" : ""}>${l}</option>`).join("")}</select></label>`;
+}
+function painterOptions(selected){
+  const pairs = S.catalog?.pairs || [];
+  const short = (t, n) => t.length > n ? t.slice(0, n - 1) + "…" : t;
+  return `<option value="">Random, the same in every run</option>` + pairs.map(p => `<option value="${esc(p.id)}" ${p.id === selected ? "selected" : ""}>${p.best_score != null ? p.best_score.toFixed(3) : "seed"} · ${esc(short(p.instrument.label, 34))} / ${esc(short(p.prompt.label, 34))}</option>`).join("");
+}
+function renderAgents(){
+  const st = E.st, d = st.defaults;
+  if(!st.agents.length){ $("agent-list").innerHTML = `<p class="muted">No agents yet. Click the frame on the left to place one.</p>`; return; }
+  $("agent-list").innerHTML = st.agents.map((a, i) => {
+    const p = `agents.${i}`, judge = a.kind === "judge", pair = S.catalog?.pairs.find(x => x.id === a.pair_id);
+    const overrides = [a.cap, a.effort, a.viewport, a.max_successors, a.successors, a.paint_batch, a.references].filter(v => v !== undefined).length;
+    return `<div class="arow ${E.sel === i ? "sel" : ""}" style="--c:${agentColor(i)}" data-agent="${i}">
+      <div class="line"><span class="num">${i + 1}</span><input data-k="${p}.label" data-t="text" class="grow" maxlength="40" value="${esc(a.label || "")}" placeholder="Name this slot, e.g. sky" aria-label="Slot name">
+        <select data-k="${p}.kind" data-r="1" aria-label="Kind"><option value="">Painter</option><option value="judge" ${judge ? "selected" : ""}>Judge</option></select>
+        <button type="button" class="icon" data-remove="${i}" aria-label="Remove this agent" title="Remove">×</button></div>
+      <div class="line"><span class="muted" style="font-size:12px">Starts at</span><input data-k="${p}.x" data-t="int" type="number" value="${a.x ?? 0}" aria-label="x">,<input data-k="${p}.y" data-t="int" type="number" value="${a.y ?? 0}" aria-label="y"><span class="muted" style="font-size:12px">${agentSize(a)} px view</span></div>
+      ${judge ? `<p class="hint" style="margin:0">A judge walks the canvas and paints notes where the work needs to improve. It doesn't paint or hand off.</p>` :
+      `<div class="line">${pair?.painting ? `<img class="thumb" src="/artifacts/${encodeURIComponent(pair.painting)}" alt="">` : ""}<select data-k="${p}.pair_id" data-r="1" class="grow" aria-label="Painter">${painterOptions(a.pair_id)}</select></div>`}
+      <textarea data-k="${p}.task" data-t="text" rows="2" maxlength="1000" placeholder="Its own part of the work (optional). Only this agent reads it.">${esc(a.task || "")}</textarea>
+      <details ${overrides ? "open" : ""}><summary>${overrides ? `${overrides} setting${overrides === 1 ? "" : "s"} of its own` : "Settings of its own"}</summary><div class="over">
+        <label class="f">Cap, $<input data-k="${p}.cap" data-t="num" type="number" min="0.01" max="100" step="any" value="${a.cap ?? ""}" placeholder="${d.cap ?? 5}"></label>
+        <label class="f">Effort<select data-k="${p}.effort"><option value="">default</option>${EFFORTS.map(e => `<option ${a.effort === e ? "selected" : ""}>${e}</option>`).join("")}</select></label>
+        ${judge ? "" : `<label class="f">Viewport, px<input data-k="${p}.viewport" data-t="int" type="number" min="64" max="1024" value="${a.viewport ?? ""}" placeholder="${st.canvas.viewport}"></label>
+        <label class="f">Most hand-offs<select data-k="${p}.max_successors" data-t="maxs">${maxsOptions("max_successors" in a ? a.max_successors : undefined, true)}</select></label>
+        ${tri(`${p}.successors`, a.successors, "May hand off")}${tri(`${p}.paint_batch`, a.paint_batch, "paint_batch")}${tri(`${p}.references`, a.references, "References")}`}
+      </div></details></div>`;
+  }).join("");
+}
+function renderVariants(){
+  const st = E.st;
+  $("variants").innerHTML = st.variants.length ? st.variants.map((v, i) => `<div class="variant">
+    <div class="line"><input data-k="variants.${i}.name" data-t="text" maxlength="40" value="${esc(v.name)}" aria-label="Run name" style="width:160px;font-weight:600">
+      <select data-k="variants.${i}.mode" data-r="1" aria-label="How models are given"><option value="all" ${v.mode === "all" ? "selected" : ""}>Every agent on</option><option value="each" ${v.mode === "each" ? "selected" : ""}>A model per agent</option></select>
+      ${v.mode === "all" ? picker(`variants.${i}.refs.0`, v.refs[0]) : ""}<span class="spacer"></span>
+      <button type="button" class="icon" data-copy-variant="${i}" title="Duplicate this run">Copy</button><button type="button" class="icon" data-remove-variant="${i}" aria-label="Remove this run" title="Remove">×</button></div>
+    ${v.mode === "each" ? `<div class="slots">${st.agents.length ? st.agents.map((a, j) => `<div class="slot"><span class="num" style="--c:${agentColor(j)}">${j + 1}</span><span style="min-width:70px">${esc(slotName(a, j))}</span>${picker(`variants.${i}.refs.${j}`, v.refs[j])}</div>`).join("") : `<p class="muted">Place agents first.</p>`}</div>` : ""}
+  </div>`).join("") : `<p class="muted">Add at least one run with the buttons above.</p>`;
+}
+function renderPainters(){
+  const pairs = S.catalog?.pairs || [], chosen = E.st.canvas.painters;
+  $("painters-summary").textContent = `Painters random slots draw from: ${chosen ? `${chosen.length} of ${pairs.length}` : `all ${pairs.length}`}`;
+  $("painters-list").innerHTML = pairs.map(p => `<label class="check"><input type="checkbox" data-pair="${esc(p.id)}" ${!chosen || chosen.includes(p.id) ? "checked" : ""}> ${p.best_score != null ? p.best_score.toFixed(3) : "seed"} · ${esc(p.instrument.label)} / ${esc(p.prompt.label)}</label>`).join("") || `<p class="muted">The catalog is empty.</p>`;
+}
+function renderEditor(){
+  normalise();
+  const st = E.st;
+  for(const el of $("ed-form").querySelectorAll("[data-k]")){  // the fixed fields; the lists render their own
+    if(el.closest("#agent-list, #variants, #judge-picker")) continue;
+    const v = get(el.dataset.k);
+    if(el.type === "radio") el.checked = el.value === v;
+    else if(el.type === "checkbox") el.checked = v !== false;
+    else if(el.dataset.t === "maxs") el.innerHTML = maxsOptions(v, false);
+    else el.value = v ?? "";
+  }
+  $("ed-frame").checked = Boolean(st.canvas.frame);
+  for(const el of document.querySelectorAll('[data-k^="canvas.frame."]')) el.disabled = !st.canvas.frame;
+  $("judge-picker").innerHTML = st.judges === "fixed" ? picker("judge", st.judge) : "";
+  $("def-refs").title = S.references ? "Pictures to study, through the OpenAI Codex login" : "Needs Pi installed and the OpenAI Codex login (conveyor auth login openai); agents get no pictures until then";
+  renderPainters(); renderAgents(); renderVariants(); drawMap(); estimate();
+}
+function get(path){ let o = E.st; for(const k of path.split(".")){ if(o == null) return undefined; o = o[k]; } return o; }
+function setPath(path, value){
+  const keys = path.split("."); let o = E.st;
+  for(const k of keys.slice(0, -1)) o = o[k];
+  const last = keys[keys.length - 1];
+  if(value === undefined) delete o[last]; else o[last] = value;
+}
+function readInput(el){
+  const t = el.dataset.t, v = el.type === "checkbox" ? el.checked : el.value;
+  if(t === "bool" || t === "text") return v;
+  if(t === "num" || t === "int"){ if(v === "") return undefined; const n = Number(v); return Number.isFinite(n) ? (t === "int" ? Math.round(n) : n) : undefined; }
+  if(t === "tri") return v === "" ? undefined : v === "on";
+  if(t === "maxs") return v === "" ? undefined : v === "none" ? null : Number(v);
+  return v === "" ? undefined : v;
+}
+// What the setup can spend at most: each session stops at its cap, and a chain has at most 1 + its hand-offs sessions.
+function estimate(){
+  const st = E.st, d = st.defaults; let per = 0, open = false;
+  for(const a of st.agents){
+    const cap = a.cap ?? d.cap ?? 5;
+    if(a.kind === "judge"){ per += cap; continue; }
+    const handOff = a.successors ?? d.successors ?? true;
+    const most = "max_successors" in a ? a.max_successors : "max_successors" in d ? d.max_successors : 3;
+    if(!handOff || most === 0) per += cap; else if(most == null) open = true; else per += cap * (1 + most);
+  }
+  const canvases = st.variants.length * (st.repeats || 1);
+  $("estimate").innerHTML = !st.agents.length || !canvases ? `<span class="muted">${st.agents.length} agents · ${canvases} canvases</span>`
+    : open ? `<span class="bad">Some agents may hand off without a cap, so this has no spending ceiling.</span>`
+    : `<b>${canvases} canvas${canvases === 1 ? "" : "es"}, ${st.agents.length} agents each.</b> At most <b>${money(per * canvases)}</b> at list price (${money(per)} a canvas), plus automatic judges.`;
+}
+
+// ---- the editor: the map --------------------------------------------------------------------------------------
+const map = $("map"), mctx = map.getContext("2d");
+function worldBox(){
+  const st = E.st, vp = viewportOf();
+  if(st.canvas.frame) return [0, 0, st.canvas.frame.width || vp, st.canvas.frame.height || vp];
+  let x0 = 0, y0 = 0, x1 = vp * 3, y1 = vp * 2;
+  for(const a of st.agents){ const s = agentSize(a); x0 = Math.min(x0, a.x ?? 0); y0 = Math.min(y0, a.y ?? 0); x1 = Math.max(x1, (a.x ?? 0) + s); y1 = Math.max(y1, (a.y ?? 0) + s); }
+  return [x0 - vp / 2, y0 - vp / 2, x1 + vp / 2, y1 + vp / 2];
+}
+function layout(){
+  const w = $("map-wrap").clientWidth || 600, box = E.drag ? E.world.box : worldBox();
+  const ww = box[2] - box[0], wh = box[3] - box[1], pad = 14;
+  const s = Math.min((w - 2 * pad) / ww, (520 - 2 * pad) / wh);
+  const h = Math.max(160, Math.round(wh * s + 2 * pad));
+  return {box, s, w, h, ox:(w - ww * s) / 2, oy:(h - wh * s) / 2};
+}
+function drawMap(){
+  if(!E.st || $("editor").hidden) return;
+  const L = layout(), d = devicePixelRatio || 1;
+  E.world = L; map.width = L.w * d; map.height = L.h * d; map.style.height = `${L.h}px`;
+  const c = mctx; c.setTransform(d, 0, 0, d, 0, 0); c.clearRect(0, 0, L.w, L.h);
+  const toS = (x, y) => [L.ox + (x - L.box[0]) * L.s, L.oy + (y - L.box[1]) * L.s];
+  const st = E.st, frame = st.canvas.frame, vp = viewportOf();
+  const [fx0, fy0] = frame ? toS(0, 0) : toS(L.box[0], L.box[1]), [fx1, fy1] = frame ? toS(frame.width, frame.height) : toS(L.box[2], L.box[3]);
+  c.fillStyle = "#f0e8d6"; c.fillRect(fx0, fy0, fx1 - fx0, fy1 - fy0);
+  if(frame && E.bg?.complete && E.bg.naturalWidth){ c.globalAlpha = .55; c.drawImage(E.bg, fx0, fy0, fx1 - fx0, fy1 - fy0); c.globalAlpha = 1; }
+  c.strokeStyle = "rgba(47,75,143,.16)"; c.lineWidth = 1; c.beginPath();  // a line every viewport
+  for(let gx = Math.ceil(L.box[0] / vp) * vp; gx <= L.box[2]; gx += vp){ const [sx] = toS(gx, 0); c.moveTo(Math.round(sx) + .5, fy0); c.lineTo(Math.round(sx) + .5, fy1); }
+  for(let gy = Math.ceil(L.box[1] / vp) * vp; gy <= L.box[3]; gy += vp){ const [, sy] = toS(0, gy); c.moveTo(fx0, Math.round(sy) + .5); c.lineTo(fx1, Math.round(sy) + .5); }
+  c.stroke();
+  if(frame){ c.strokeStyle = "#1f2328"; c.lineWidth = 2; c.strokeRect(fx0, fy0, fx1 - fx0, fy1 - fy0); }
+  else { const [ox, oy] = toS(0, 0); c.strokeStyle = "rgba(47,75,143,.5)"; c.beginPath(); c.moveTo(ox - 7, oy); c.lineTo(ox + 7, oy); c.moveTo(ox, oy - 7); c.lineTo(ox, oy + 7); c.stroke(); }
+  c.font = "600 12px -apple-system,system-ui,sans-serif";
+  st.agents.forEach((a, i) => {
+    const [sx, sy] = toS(a.x ?? 0, a.y ?? 0), side = agentSize(a) * L.s, on = E.sel === i || E.hover === i;
+    c.fillStyle = agentColor(i, on ? .28 : .16); c.fillRect(sx, sy, side, side);
+    c.save(); c.strokeStyle = agentColor(i); c.lineWidth = on ? 3 : 2; if(a.kind === "judge") c.setLineDash([6, 4]); c.strokeRect(sx, sy, side, side); c.restore();
+    const text = `${i + 1} ${slotName(a, i)}`.slice(0, 24), tw = c.measureText(text).width + 10;
+    c.fillStyle = agentColor(i); c.fillRect(sx, sy, Math.min(tw, Math.max(side, 22)), 18);
+    c.save(); c.beginPath(); c.rect(sx, sy, Math.max(side, 22), 18); c.clip(); c.fillStyle = "#fff"; c.fillText(text, sx + 5, sy + 13); c.restore();
+  });
+  const label = frame ? `frame ${frame.width} × ${frame.height}` : "no frame: agents may paint anywhere";
+  c.fillStyle = "rgba(31,35,40,.75)"; const lw = c.measureText(label).width + 12; c.fillRect(L.w - lw - 6, L.h - 24, lw, 18);
+  c.fillStyle = "#fff"; c.fillText(label, L.w - lw, L.h - 11);
+}
+function toWorld(e){
+  const r = map.getBoundingClientRect(), L = E.world;
+  return [L.box[0] + (e.clientX - r.left - L.ox) / L.s, L.box[1] + (e.clientY - r.top - L.oy) / L.s];
+}
+function hit(wx, wy){
+  for(let i = E.st.agents.length - 1; i >= 0; i--){ const a = E.st.agents[i], s = agentSize(a); if(wx >= a.x && wx <= a.x + s && wy >= a.y && wy <= a.y + s) return i; }
+  return -1;
+}
+function clamp(a){  // inside the frame, the way the server places a start
+  const f = E.st.canvas.frame, s = agentSize(a);
+  if(!f) return;
+  a.x = Math.round(Math.min(Math.max(a.x, 0), Math.max(0, f.width - s))); a.y = Math.round(Math.min(Math.max(a.y, 0), Math.max(0, f.height - s)));
+}
+map.onpointerdown = e => {
+  const [wx, wy] = toWorld(e), i = hit(wx, wy);
+  try{ map.setPointerCapture(e.pointerId); }catch{}  // keeps a drag going outside the map; not needed for a click
+  E.drag = {i, dx:i >= 0 ? wx - E.st.agents[i].x : 0, dy:i >= 0 ? wy - E.st.agents[i].y : 0, moved:false, wx, wy};
+};
+map.onpointermove = e => {
+  const [wx, wy] = toWorld(e);
+  if(!E.drag){ const i = hit(wx, wy); if(i !== E.hover){ E.hover = i; map.classList.toggle("over", i >= 0); drawMap(); } return; }
+  const g = E.drag; if(g.i < 0) return;
+  if(!g.moved && Math.hypot(wx - g.wx, wy - g.wy) * E.world.s < 4) return;
+  g.moved = true; map.classList.add("dragging");
+  const a = E.st.agents[g.i], snap = 8;
+  a.x = Math.round((wx - g.dx) / snap) * snap; a.y = Math.round((wy - g.dy) / snap) * snap; clamp(a);
+  const ix = document.querySelector(`[data-k="agents.${g.i}.x"]`), iy = document.querySelector(`[data-k="agents.${g.i}.y"]`);
+  if(ix) ix.value = a.x; if(iy) iy.value = a.y;
+  drawMap();
+};
+map.onpointerup = e => {
+  const g = E.drag; E.drag = null; map.classList.remove("dragging"); if(!g) return;
+  if(g.i >= 0){ select(g.i); if(g.moved){ saveDraft(); renderVariants(); } drawMap(); return; }
+  const [wx, wy] = toWorld(e), vp = viewportOf();  // a click on paper: a new agent centred there
+  const a = {label:"", x:Math.round(wx - vp / 2), y:Math.round(wy - vp / 2)}; clamp(a);
+  E.st.agents.push(a); E.sel = E.st.agents.length - 1; renderEditor(); saveDraft(); select(E.sel);
+};
+map.onpointerleave = () => { if(E.hover !== null){ E.hover = null; drawMap(); } };
+function select(i){
+  E.sel = i;
+  for(const row of document.querySelectorAll(".arow")) row.classList.toggle("sel", Number(row.dataset.agent) === i);
+  document.querySelector(`.arow[data-agent="${i}"]`)?.scrollIntoView({block:"nearest", behavior:"smooth"});
+}
+new ResizeObserver(() => drawMap()).observe($("map-wrap"));
+
+// ---- the editor: events ---------------------------------------------------------------------------------------
+function changed(e){
+  const el = e.target;
+  if(el.dataset.pair !== undefined){  // the painters random slots draw from
+    const all = S.catalog.pairs.map(p => p.id), on = [...document.querySelectorAll("[data-pair]")].filter(x => x.checked).map(x => x.dataset.pair);
+    E.st.canvas.painters = on.length === all.length ? null : on; renderPainters(); saveDraft(); return;
+  }
+  if(el.id === "ed-frame"){
+    E.st.canvas.frame = el.checked ? {width:Math.max(1024, E.st.canvas.viewport * 3), height:Math.max(768, E.st.canvas.viewport * 2)} : null;
+    E.st.agents.forEach(clamp); renderEditor(); saveDraft(); return;
+  }
+  if(!el.dataset.k) return;
+  if(e.type === "input" && (el.tagName === "SELECT" || el.type === "radio" || el.type === "checkbox")) return;  // they come as change
+  setPath(el.dataset.k, readInput(el));
+  if(el.dataset.k.startsWith("canvas.frame.") && E.st.canvas.frame){ E.st.agents.forEach(clamp); }
+  if(el.dataset.r && e.type === "change") renderEditor();  // a list to redraw: once the value is in, not per keystroke
+  else { drawMap(); estimate(); if(/^agents\.\d+\.label$/.test(el.dataset.k)) renderVariants(); }
+  saveDraft();
+}
+$("ed-form").addEventListener("input", changed);
+$("ed-form").addEventListener("change", changed);
+$("ed-form").addEventListener("focusin", e => { const row = e.target.closest(".arow"); if(row && Number(row.dataset.agent) !== E.sel){ select(Number(row.dataset.agent)); drawMap(); } });
+$("ed-form").addEventListener("click", e => {
+  const rm = e.target.closest("[data-remove]"), rv = e.target.closest("[data-remove-variant]"), cv = e.target.closest("[data-copy-variant]");
+  if(rm){ const i = Number(rm.dataset.remove); E.st.agents.splice(i, 1); for(const v of E.st.variants) if(v.mode === "each") v.refs.splice(i, 1); E.sel = null; renderEditor(); saveDraft(); }
+  if(rv){ E.st.variants.splice(Number(rv.dataset.removeVariant), 1); renderEditor(); saveDraft(); }
+  if(cv){ const v = E.st.variants[Number(cv.dataset.copyVariant)]; E.st.variants.push({...structuredClone(v), name:uniqueName(`${v.name} copy`)}); renderEditor(); saveDraft(); }
+});
+$("painters-all").onclick = () => { E.st.canvas.painters = null; renderPainters(); saveDraft(); };
+$("painters-none").onclick = () => { E.st.canvas.painters = []; renderPainters(); saveDraft(); };
+function uniqueName(base){ const names = new Set(E.st.variants.map(v => v.name)); let n = base, k = 2; while(names.has(n)) n = `${base} ${k++}`; return n; }
+function renderQuick(){
+  const mixes = ["claude", "gpt", "muse"].filter(k => S.presets[k]);
+  $("quick").innerHTML = Object.keys(S.presets).map(k => `<button type="button" data-add="${esc(k)}">+ ${esc(nameOf(k))}</button>`).join("")
+    + `<button type="button" data-add-mix="1" title="Agents take ${esc(mixes.join(", "))} in turn">+ Mix of ${esc(mixes.map(nameOf).join(", "))}</button><button type="button" data-add-other="1">+ Another model</button>`;
+}
+$("quick").onclick = e => {
+  const b = e.target.closest("button"); if(!b) return;
+  if(b.dataset.add) E.st.variants.push({name:uniqueName(b.dataset.add), mode:"all", refs:[blankRef(b.dataset.add)]});
+  else if(b.dataset.addMix){ const mixes = ["claude", "gpt", "muse"].filter(k => S.presets[k]); E.st.variants.push({name:uniqueName("mix"), mode:"each", refs:E.st.agents.map((_, i) => blankRef(mixes[i % mixes.length]))}); }
+  else E.st.variants.push({name:uniqueName("other"), mode:"all", refs:[{harness:"claude", model:""}]});
+  renderEditor(); saveDraft();
+};
+
+// ---- the editor: opening, JSON, checking, starting ------------------------------------------------------------------
+async function openEditor(spec, from){
+  E.st = fromSpec(spec); E.sel = null; E.bg = null; E.mode = "form";
+  if(from && E.st.canvas.frame){ E.bg = new Image(); E.bg.onload = drawMap; E.bg.src = `/api/canvases/${encodeURIComponent(from)}/export.png?side=1024`; }
+  $("editor").hidden = false; $("plan").hidden = true; $("ed-error").textContent = "";
+  $("ed-form").hidden = false; $("ed-json").hidden = true; $("tab-form").setAttribute("aria-pressed", "true"); $("tab-json").setAttribute("aria-pressed", "false");
+  show(S.data); $("new").hidden = true;
+  history.replaceState(null, "", from ? `/bench?from=${encodeURIComponent(from)}` : "/bench?new");
+  renderQuick(); renderEditor(); window.scrollTo(0, 0);
+}
+function closeEditor(){
+  if(editing()){ $("editor").hidden = true; $("new").hidden = !S.canLaunch; show(S.data); if(S.id) history.replaceState(null, "", `/bench?id=${encodeURIComponent(S.id)}`); }
+}
+$("ed-back").onclick = closeEditor;
+async function fillFrom(){
+  let canvases = [];
+  try{ canvases = await api("/api/canvases"); }catch{}
+  let draft = null; try{ draft = localStorage.getItem(DRAFT); }catch{}
+  $("ed-from").innerHTML = `<option value="">…</option>${draft ? `<option value="draft">Your last draft</option>` : ""}<option value="example">The example</option><option value="blank">A blank setup</option>`
+    + canvases.filter(c => c.agents && !c.config.benchmark).map(c => `<option value="canvas:${esc(c.id)}">Canvas: ${esc(c.name)} (${c.agents} agents)</option>`).join("");
+}
+$("ed-from").onchange = async () => {
+  const v = $("ed-from").value; $("ed-from").value = "";
+  try{
+    if(v === "draft") await openEditor(JSON.parse(localStorage.getItem(DRAFT)));
+    else if(v === "example") await openEditor(S.example);
+    else if(v === "blank") await openEditor({name:"", canvas:{viewport:512, max_calls:100, frame:{width:1536, height:1024}}, agents:[], variants:{}});
+    else if(v.startsWith("canvas:")){ const id = v.slice(7); await openEditor(await api(`/api/canvases/${encodeURIComponent(id)}/spec`), id); }
+  }catch(e){ $("ed-error").textContent = e.message; }
+};
+function setMode(mode){
+  if(mode === E.mode) return;
+  if(mode === "json"){ $("spec-text").value = JSON.stringify(toSpec(), null, 2); }
+  else { try{ E.st = fromSpec(JSON.parse($("spec-text").value)); }catch(e){ $("ed-error").textContent = `That JSON can't be read: ${e.message}`; return; } }
+  E.mode = mode; $("ed-error").textContent = "";
+  $("ed-form").hidden = mode !== "form"; $("ed-json").hidden = mode !== "json";
+  $("tab-form").setAttribute("aria-pressed", String(mode === "form")); $("tab-json").setAttribute("aria-pressed", String(mode === "json"));
+  if(mode === "form"){ renderEditor(); saveDraft(); }
+}
+$("tab-form").onclick = () => setMode("form"); $("tab-json").onclick = () => setMode("json");
+function currentSpec(){
+  if($("token").value) token.set($("token").value);
+  if(E.mode === "json"){ try{ return JSON.parse($("spec-text").value); }catch(e){ throw new Error(`That JSON can't be read: ${e.message}`); } }
+  const names = E.st.variants.map(v => v.name.trim());
+  if(!E.st.agents.length) throw new Error("Place at least one agent: click the frame.");
+  if(!names.length) throw new Error("Add at least one run under Models to compare.");
+  if(names.some(n => !n)) throw new Error("Every run needs a name.");
+  if(new Set(names).size !== names.length) throw new Error("Two runs have the same name.");
+  return toSpec();
+}
+$("check").onclick = async () => {
+  $("ed-error").textContent = ""; $("plan").hidden = false; $("plan").innerHTML = "Checking…";
+  try{
+    const spec = currentSpec(), p = await api("/api/benchmarks/plan", "POST", spec);
+    if(spec.seed == null){  // so Start draws the painters shown here
+      if(E.mode === "json"){ spec.seed = p.seed; $("spec-text").value = JSON.stringify(spec, null, 2); } else { E.st.seed = p.seed; renderEditor(); }
+      saveDraft();
+    }
+    $("plan").innerHTML = `<h3>Ready: nothing has started</h3><p class="hint">${p.canvases} canvases, ${p.agents} agents, ${p.order === "sequential" ? "one canvas at a time" : "all at once"}, seed ${p.seed}. ${p.ceiling == null ? `<span class="bad">Some chains have no cap on hand-offs, so there is no spending ceiling.</span>` : `At most ${money(p.ceiling)} at list price, plus automatic judges.`}</p>`
+      + p.runs.map(r => `<p style="margin:12px 0 4px"><b>${esc(r.label)}</b></p><div class="table-wrap"><table><thead><tr><th>Slot</th><th>Model</th><th>Starts at</th><th>Cap</th><th>Hand-offs</th><th style="text-align:left">Painter</th></tr></thead><tbody>${r.agents.map(a => `<tr><td>${esc(a.slot)}${a.kind === "judge" ? " (judge)" : ""}</td><td>${esc(a.model)}</td><td>${a.x}, ${a.y}</td><td>${money(a.cap)}</td><td>${a.kind === "judge" ? "–" : a.max_successors ?? "no cap"}</td><td class="painter">${esc(a.painter || "–")}</td></tr>`).join("")}</tbody></table></div>`).join("");
+    $("plan").scrollIntoView({behavior:"smooth", block:"start"});
+  }catch(e){ $("plan").hidden = true; $("ed-error").textContent = e.message; }
+};
+$("start").onclick = async () => {
+  $("ed-error").textContent = ""; $("start").disabled = true;
+  try{
+    const b = await api("/api/benchmarks", "POST", currentSpec());
+    try{ localStorage.removeItem(DRAFT); }catch{}
+    closeEditor(); $("message").textContent = `Started ${b.name}: ${b.canvases} canvases, ${b.agents} agents.`; await load(b.id);
+  }catch(e){ $("ed-error").textContent = e.message; }
+  $("start").disabled = false;
+};
+$("new").onclick = async () => {
+  await fillFrom();
+  let draft = null; try{ draft = JSON.parse(localStorage.getItem(DRAFT)); }catch{}
+  await openEditor(draft || S.example);
+};
+$("again").onclick = async () => { if(S.data){ await fillFrom(); await openEditor(S.data.spec); } };  // the same seed: the same painters
+
+// ---- the kill switch ------------------------------------------------------------------------------------------
+function armed(button, label, act){
+  let timer = null; const idle = button.textContent;
+  button.onclick = async () => {
+    if(!timer){ button.textContent = label; button.classList.add("armed"); timer = setTimeout(() => { timer = null; button.textContent = idle; button.classList.remove("armed"); }, 4000); return; }
+    clearTimeout(timer); timer = null; button.textContent = idle; button.classList.remove("armed"); button.disabled = true;
+    try{ $("message").textContent = await act(); }catch(err){ $("message").textContent = err.message; }
+    button.disabled = false; await load(S.id);
+  };
+}
+armed($("stop"), "Stop it?", async () => {
+  const r = await api(`/api/benchmarks/${encodeURIComponent(S.id)}/stop`, "POST", {});
+  return `Stopped the benchmark: ${r.agents} agents stopped or dropped.`;
+});
+armed($("stop-all"), "Stop everything?", async () => {
+  const r = await api("/api/stop-all", "POST", {});
+  return `Stopped ${r.agents} agents on ${r.canvases} canvases, ${r.benchmarks} benchmarks and ${r.runs} runs or paintings.`;
+});
+
+async function init(){
+  const q = new URLSearchParams(location.search);  // read before load() puts the benchmark's id in the address
+  try{
+    const [options, catalog] = await Promise.all([api("/api/options"), api("/api/canvas-catalog")]);
+    S.options = options; S.catalog = catalog; S.canLaunch = Boolean(options.launch);
+    S.references = Boolean(options.harnesses?.references);
+    $("dl-claude").innerHTML = (options.models?.claude || []).map(m => `<option value="${esc(m)}">`).join("");
+    $("dl-pi").innerHTML = [...new Set(Object.values(options.models?.pi || {}).flat())].map(m => `<option value="${esc(m)}">`).join("");
+    $("new").hidden = !options.launch; $("stop-all").hidden = !options.launch; $("token-field").hidden = !options.locked;
+    if(!options.launch) $("message").textContent = "This server is read-only. Run conveyor serve without --no-launch to start benchmarks.";
+    await load(q.get("id"));
+    if(S.canLaunch && q.get("from")){ await fillFrom(); await openEditor(await api(`/api/canvases/${encodeURIComponent(q.get("from"))}/spec`), q.get("from")); }
+    else if(S.canLaunch && q.has("new")) $("new").click();
+  }catch(e){ $("message").textContent = e.message; }
+}
+init();
+</script>
+</body></html>

@@ -318,8 +318,9 @@ class Painter:
             "refusals": [c.get("error", "")[:160] for c in rejected[:5]],
             "ran_dry": sum(1 for c in applied if c.get("dry")), "finished": bool(finish),
         }
-        painting_png = to_png(canvas)
-        artifacts = {"painting": self.store.artifact(painting_png)}
+        # The saved painting is only for people: nearest-neighbour upscaled to about 1024 px. The model never sees it.
+        shown = to_png(canvas, scale=max(1, 1024 // max(canvas.shape[:2])))
+        artifacts = {"painting": self.store.artifact(shown)}
         feedback = {"note": finish.get("note", ""), "stats": stats, "critic": critic}
         if self.target is not None:
             artifacts.update(heat=self.store.artifact(heatmap_png(self.critic.pixel_error(canvas, self.target))),

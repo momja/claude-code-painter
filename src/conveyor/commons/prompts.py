@@ -179,8 +179,10 @@ SUCCESSOR_RULE = """
 - `spawn_successor` ends your session at once and starts a new painter where your viewport is now, with a \
 fresh {max_calls} tool calls and an instrument and instructions drawn at random, which may not be yours. It sees \
 only the canvas: nothing of this conversation goes with it. It only works in your last {window} calls; earlier \
-it is refused and the refusal counts. It counts as one call, so making it your last call costs you nothing. Use it if you want the work to go on after your budget runs out. Your successor gets the same \
-choice."""
+it is refused and the refusal counts. It counts as one call, so making it your last call costs you nothing. Use it if you want the work to go on after your budget runs out. {after}"""
+SUCCESSOR_OPEN = "Your successor gets the same choice."
+SUCCESSOR_LEFT = "The work can be handed on {left} more times, this one included; each successor gets the same choice."
+SUCCESSOR_LAST = "This is the last hand-off allowed: your successor can't spawn one of its own."
 
 SUCCESSOR_REMINDER = "To keep the work going past your budget, spend one of them on spawn_successor."
 HANDED_OFF = ("You have handed your work to a successor, which starts once this session closes. Your session is over: "

@@ -13,7 +13,8 @@ The run log. Everything the dashboard shows is read from one SQLite file written
 The shared canvas (see commons/) adds its own tables: `canvases`, `canvas_agents`, `canvas_ops` (every tool call
 an agent made, in commit order), `canvas_tiles` (every version of every tile, keyed by the op that wrote it) and
 `canvas_heads` (each tile's latest version). Agents' MCP servers write those directly, in transactions, because
-several processes paint the same tiles; everything else goes through the queue below.
+several processes paint the same tiles; everything else goes through the queue below. `benchmarks` holds each
+benchmark: one spec run on several canvases with other models (see commons/bench.py).
 
 Writes go through a queue drained by one writer thread, in the order they were queued, so a row that
 references an artifact is never committed before the artifact. The dashboard opens the file read-only, so it
@@ -100,6 +101,10 @@ CREATE TABLE IF NOT EXISTS canvas_heads (
     PRIMARY KEY (canvas_id, tx, ty)
 );
 CREATE INDEX IF NOT EXISTS canvas_heads_seq ON canvas_heads(canvas_id, seq);
+CREATE TABLE IF NOT EXISTS benchmarks (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, created REAL NOT NULL, ended REAL, status TEXT NOT NULL,
+    config TEXT NOT NULL
+);
 """
 
 SESSION_FIELDS = {"status", "ended", "cost", "usage", "num_turns", "result", "error", "request", "model", "last_ts"}

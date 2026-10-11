@@ -366,14 +366,15 @@ def test_a_shared_reference_picture_reaches_every_other_agent_once(canvas, tmp_p
     assert full["isError"] and "already has the 1 shared" in text_of(full)
 
 
-def test_reference_pictures_are_for_pi_painters_who_ask_for_them(tmp_path):
+def test_reference_pictures_are_for_painters_on_either_harness_who_ask_for_them(tmp_path):
     db = seeded_db(tmp_path)
     row = create_canvas(db, "C", viewport=256, max_calls=20)
     config = lambda made: views.canvas(connect(db, readonly=True), row["id"])["agents"][-1]["config"]  # noqa: E731
     base = {"pair_id": PAIR, "model": "fake-model"}
     assert config(create_agent(db, row["id"], {**base, "harness": "pi"}))["references"] is True
     assert config(create_agent(db, row["id"], {**base, "harness": "pi", "references": False}))["references"] is False
-    assert config(create_agent(db, row["id"], {**base, "harness": "claude"}))["references"] is False
+    assert config(create_agent(db, row["id"], {**base, "harness": "claude"}))["references"] is True  # parity with Pi
+    assert config(create_agent(db, row["id"], {**base, "harness": "claude", "references": False}))["references"] is False
     assert config(create_agent(db, row["id"], {"kind": "judge", "harness": "pi"}))["references"] is False
     with pytest.raises(LaunchError, match="on or off"):
         create_agent(db, row["id"], {**base, "references": "yes"})
@@ -490,9 +491,9 @@ def test_an_agent_task_goes_to_that_agent_alone_and_its_successors(tmp_path):
     assert configs[told["id"]]["agent_task"] == "Paint the lighthouse on the far headland."
     assert configs[other["id"]]["agent_task"] is None
     mine = system_prompt(configs[told["id"]] | {"source": ROUND, "prompt": "Paint big."}, 256, 0, 0, 20, "A harbour at dusk.")
-    assert "A harbour at dusk." in mine and "task of your own" in mine and "the far headland." in mine
+    assert "A harbour at dusk." in mine and "a task of your own, given to you alone" in mine and "the far headland." in mine
     theirs = system_prompt(configs[other["id"]] | {"source": ROUND, "prompt": "Paint big."}, 256, 0, 0, 20, "A harbour at dusk.")
-    assert "task of your own" not in theirs and "headland" not in theirs
+    assert "a task of your own, given to you alone" not in theirs and "headland" not in theirs
     assert told["viewport"] == 512 and create_agent(db, row["id"], {"pair_id": PAIR, "viewport": 128})["viewport"] == 128
     alone = create_agent(db, plain["id"], {"pair_id": PAIR, "task": "Paint a red door."})
     config = views.canvas(conn, plain["id"])["agents"][0]["config"] | {"source": ROUND, "prompt": "Paint big."}
