@@ -224,14 +224,31 @@ function show(data){
   $("sheet").href = `/api/benchmarks/${encodeURIComponent(data.id)}/sheet.png`;
   $("again").hidden = !S.canLaunch;
   $("spec").textContent = JSON.stringify(data.spec, null, 2);
-  $("runs").innerHTML = data.runs.map(r => {
-    const img = `/api/canvases/${encodeURIComponent(r.canvas_id)}/export.png?side=900&v=${r.last_op || 0}`;
-    return `<article class="run"><div class="top"><b>${esc(r.label)}</b><span class="state ${esc(r.state)}">${esc(r.state)}</span></div>
+  const existing = new Map([...$("runs").children].map(el => [el.dataset.canvas, el]));
+  const keep = new Set();
+  for(const r of data.runs){
+    const img = `/api/canvases/${encodeURIComponent(r.canvas_id)}/preview.png?seq=${r.last_op || 0}`;
+    const html = `<article class="run"><div class="top"><b>${esc(r.label)}</b><span class="state ${esc(r.state)}">${esc(r.state)}</span></div>
       <a href="/canvas?canvas=${encodeURIComponent(r.canvas_id)}" title="Open this canvas"><img loading="lazy" src="${img}" alt="${esc(r.label)}: the canvas as it is now"></a>
       <div class="models">${esc([...new Set(r.models)].join(" · "))}</div>
       <div class="muted" style="font-size:12px">${r.agents} sessions · ${count(r.paints)} paint calls · ${money(r.cost)}${r.coverage != null ? ` · ${Math.round(r.coverage * 100)}% covered` : ""} · ${duration(r.seconds)}</div>
       <div class="acts"><a href="/canvas?canvas=${encodeURIComponent(r.canvas_id)}">Open canvas</a><a href="/api/canvases/${encodeURIComponent(r.canvas_id)}/export.png" download>Export PNG</a></div></article>`;
-  }).join("");
+    let card = existing.get(r.canvas_id);
+    const template = document.createElement("template"); template.innerHTML = html;
+    const next = template.content.firstElementChild;
+    if(!card){
+      card = next; card.dataset.canvas = r.canvas_id; $("runs").append(card);
+    }else{
+      // Keep the image connected and leave its src alone when the op is unchanged.
+      for(const selector of [".top", ".models", ".muted", ".acts"])
+        card.querySelector(selector).innerHTML = next.querySelector(selector).innerHTML;
+      const image = card.querySelector("img"), desired = next.querySelector("img");
+      if(image.getAttribute("src") !== img) image.setAttribute("src", img);
+      image.alt = desired.alt;
+    }
+    keep.add(card);
+  }
+  for(const card of existing.values()) if(!keep.has(card)) card.remove();
   table(data.runs);
 }
 // Every number for every run, a column each, with each model's share under it in a mix.
