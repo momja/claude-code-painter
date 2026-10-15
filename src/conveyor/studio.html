@@ -232,7 +232,7 @@ async function chooseRun(id){
   clearTimeout(timer);run=id;selected=null;data=null;$("prompt").value="";$("instrument").value="";
   $("selection-title").textContent="Select a painter";$("selection-preview").innerHTML="";$("source-details").hidden=true;
   history.replaceState(null,"",`/studio?run=${encodeURIComponent(run)}`);$("dashboard").href=`/?run=${encodeURIComponent(run)}`;
-  await refresh();zoom(Math.min(1,($("viewport").clientWidth-24)/graphWidth));$("viewport").scrollTo(0,0);
+  await refresh();zoom(Math.min(1,(($("viewport").clientWidth || $("run-graph").clientWidth)-24)/graphWidth));$("viewport").scrollTo(0,0);
 }
 async function init(){
   try{
