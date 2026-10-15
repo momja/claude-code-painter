@@ -1,5 +1,5 @@
 """
-Reference images: pictures an agent on the Pi harness generates to study before it paints, a hand from three
+Reference images: pictures an agent on either harness generates to study before it paints, a hand from three
 angles before painting hands, say. They never land on the canvas. An agent sees its own, and may share one with
 every other agent through `broadcast`.
 

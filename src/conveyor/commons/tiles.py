@@ -49,7 +49,7 @@ TILE = 128
 PAPER_RGB = np.asarray([round(c * 255) for c in PAPER], dtype=np.uint8)
 DEFAULT_VIEWPORT = 512
 DEFAULT_MAX_CALLS = 100
-VIEWPORT_RANGE = (64, 1024)  # a canvas's default viewport, and any one agent's
+MIN_VIEWPORT = 64  # a canvas's default viewport, and any one agent's; neither has an upper limit
 MAX_TASK = 2000  # characters in a canvas's task
 MAX_FRAME = 1_000_000  # pixels on a side of a canvas's frame
 DEFAULT_INK = "#1d2a3a"
@@ -104,20 +104,65 @@ def create_canvas(db: str | Path, name: str, viewport: int = DEFAULT_VIEWPORT,
     """A new canvas. `task`, when given, is the one image every agent on it is told to make together. `frame`,
     (width, height), bounds the canvas to x 0 to width and y 0 to height: viewports stay inside it, so paint does."""
     init_db(db)
+    row = canvas_record(name, viewport, max_calls, task, frame)
+    conn = sqlite3.connect(db, timeout=BUSY_TIMEOUT)
+    try:
+        insert_canvas(conn, row)
+        conn.commit()
+    finally:
+        conn.close()
+    return row
+
+
+def canvas_record(name: str, viewport: int = DEFAULT_VIEWPORT, max_calls: int = DEFAULT_MAX_CALLS,
+                  task: str | None = None, frame: tuple[int, int] | None = None, extra: dict | None = None) -> dict:
+    """A new canvas's row, not saved yet. `extra` goes into its config as it is."""
     row = {"id": new_id(), "name": name, "created": time.time(),
            "config": {"viewport": int(viewport), "max_calls": int(max_calls), "tile": TILE}}
     if task:
         row["config"]["task"] = task
     if frame:
         row["config"]["frame"] = [0, 0, int(frame[0]), int(frame[1])]
-    conn = sqlite3.connect(db, timeout=BUSY_TIMEOUT)
-    try:
-        conn.execute("INSERT INTO canvases (id, name, created, config) VALUES (?, ?, ?, ?)",
-                     (row["id"], name, row["created"], dumps(row["config"])))
-        conn.commit()
-    finally:
-        conn.close()
+    row["config"].update(extra or {})
     return row
+
+
+def insert_canvas(conn: sqlite3.Connection, row: dict) -> None:
+    conn.execute("INSERT INTO canvases (id, name, created, config) VALUES (?, ?, ?, ?)",
+                 (row["id"], row["name"], row["created"], dumps(row["config"])))
+
+
+def compose(conn: sqlite3.Connection, canvas_id: str, window: tuple[int, int, int, int], scale: float,
+            seq: int | None = None) -> np.ndarray:
+    """The window x0..x1, y0..y1 at `scale` picture px per canvas px (at most 1), as uint8 RGB: the canvas now, or
+    as it stood after op `seq`. Tiles are shrunk one at a time, so a wide window is never held at full size."""
+    x0, y0, x1, y1 = window
+    w, h = max(1, round((x1 - x0) * scale)), max(1, round((y1 - y0) * scale))
+    out = np.broadcast_to(PAPER_RGB, (h, w, 3)).copy()
+    box = (canvas_id, x0 // TILE, (x1 - 1) // TILE, y0 // TILE, (y1 - 1) // TILE)
+    if seq is None:
+        rows = conn.execute(
+            "SELECT t.tx, t.ty, t.data FROM canvas_heads h JOIN canvas_tiles t ON t.canvas_id=h.canvas_id "
+            "AND t.tx=h.tx AND t.ty=h.ty AND t.seq=h.seq WHERE h.canvas_id=? AND h.tx BETWEEN ? AND ? "
+            "AND h.ty BETWEEN ? AND ?", box)
+    else:  # each tile's newest version at or before the op
+        rows = conn.execute(
+            "SELECT t.tx, t.ty, t.data FROM (SELECT tx, ty, max(seq) AS seq FROM canvas_tiles WHERE canvas_id=? "
+            "AND tx BETWEEN ? AND ? AND ty BETWEEN ? AND ? AND seq<=? GROUP BY tx, ty) v JOIN canvas_tiles t "
+            "ON t.canvas_id=? AND t.tx=v.tx AND t.ty=v.ty AND t.seq=v.seq", (*box, seq, canvas_id))
+    for tx, ty, data in rows:
+        left, top = math.floor((tx * TILE - x0) * scale), math.floor((ty * TILE - y0) * scale)
+        right = max(left + 1, math.floor(((tx + 1) * TILE - x0) * scale))
+        bottom = max(top + 1, math.floor(((ty + 1) * TILE - y0) * scale))
+        ys, xs = slice(max(0, top), min(h, bottom)), slice(max(0, left), min(w, right))
+        if ys.start >= ys.stop or xs.start >= xs.stop:
+            continue
+        with Image.open(io.BytesIO(data)) as im:
+            im = im.convert("RGB")
+            small = np.asarray(im if im.size == (right - left, bottom - top)
+                               else im.resize((right - left, bottom - top), Image.Resampling.BOX))
+        out[ys, xs] = small[ys.start - top:ys.stop - top, xs.start - left:xs.stop - left]
+    return out
 
 
 @dataclass
@@ -215,25 +260,8 @@ class SharedCanvas:
         return None if lo[0] is None else (lo[0] * TILE, lo[1] * TILE, (lo[2] + 1) * TILE, (lo[3] + 1) * TILE)
 
     def shrunk(self, window: tuple[int, int, int, int], scale: float) -> np.ndarray:
-        """The window x0..x1, y0..y1 at `scale` picture px per canvas px (at most 1), as uint8 RGB. Tiles are
-        shrunk one at a time, so a wide window is never held at full size."""
-        x0, y0, x1, y1 = window
-        w, h = max(1, round((x1 - x0) * scale)), max(1, round((y1 - y0) * scale))
-        out = np.broadcast_to(PAPER_RGB, (h, w, 3)).copy()
-        for row in self.conn.execute(
-                "SELECT t.tx, t.ty, t.data FROM canvas_heads h JOIN canvas_tiles t ON t.canvas_id=h.canvas_id "
-                "AND t.tx=h.tx AND t.ty=h.ty AND t.seq=h.seq WHERE h.canvas_id=? AND h.tx BETWEEN ? AND ? "
-                "AND h.ty BETWEEN ? AND ?", (self.canvas_id, x0 // TILE, (x1 - 1) // TILE, y0 // TILE, (y1 - 1) // TILE)):
-            left, top = math.floor((row["tx"] * TILE - x0) * scale), math.floor((row["ty"] * TILE - y0) * scale)
-            right = max(left + 1, math.floor(((row["tx"] + 1) * TILE - x0) * scale))
-            bottom = max(top + 1, math.floor(((row["ty"] + 1) * TILE - y0) * scale))
-            ys, xs = slice(max(0, top), min(h, bottom)), slice(max(0, left), min(w, right))
-            if ys.start >= ys.stop or xs.start >= xs.stop:
-                continue
-            with Image.open(io.BytesIO(row["data"])) as im:
-                small = np.asarray(im.convert("RGB").resize((right - left, bottom - top), Image.Resampling.BOX))
-            out[ys, xs] = small[ys.start - top:ys.stop - top, xs.start - left:xs.stop - left]
-        return out
+        """The window x0..x1, y0..y1 at `scale` picture px per canvas px (at most 1), as uint8 RGB."""
+        return compose(self.conn, self.canvas_id, window, scale)
 
     def sketch(self, x0: float, y0: float, x1: float, y1: float) -> list[dict]:
         """Every line of the sketch that reaches into the window x0..x1, y0..y1, oldest first."""

@@ -76,6 +76,36 @@ class LaunchError(ValueError):
     """The form's values can't start a run; the message says why, in words for the person at the form."""
 
 
+def canvas_settings(body: dict, extra: frozenset = frozenset()) -> dict:
+    """A new canvas's request checked: {name, viewport, max_calls, task, frame} for `create_canvas`. Keys in
+    `extra` are allowed and left for the caller."""
+    from conveyor.commons.tiles import DEFAULT_MAX_CALLS, DEFAULT_VIEWPORT, MAX_FRAME, MAX_TASK, MIN_VIEWPORT
+
+    if not isinstance(body, dict) or set(body) - {"name", "viewport", "max_calls", "task", "frame"} - extra:
+        raise LaunchError("Expected " + ", ".join(sorted({"name", "viewport", "max_calls", "task", "frame"} | extra)) + ".")
+    task = body.get("task") or None
+    if task is not None and (not isinstance(task, str) or len(task) > MAX_TASK):
+        raise LaunchError(f"task must be text, at most {MAX_TASK} characters.")
+    name = body.get("name") or "Commons"
+    if not isinstance(name, str) or not name.strip() or len(name) > 60 or "\n" in name:
+        raise LaunchError("name must be a line of text, at most 60 characters.")
+    viewport = Launcher._number("viewport", body.get("viewport", DEFAULT_VIEWPORT), int)
+    if viewport < MIN_VIEWPORT:
+        raise LaunchError(f"viewport must be at least {MIN_VIEWPORT} pixels.")
+    max_calls = Launcher._number("max_calls", body.get("max_calls", DEFAULT_MAX_CALLS), int)
+    if not 1 <= max_calls <= 1000:
+        raise LaunchError("max_calls must be between 1 and 1000.")
+    frame = body.get("frame") or None
+    if frame is not None:
+        if not isinstance(frame, dict) or set(frame) != {"width", "height"}:
+            raise LaunchError("frame must be {width, height} in pixels, or left out for a canvas with no edges.")
+        frame = tuple(Launcher._number(f"frame {k}", frame[k], int) for k in ("width", "height"))
+        if not all(viewport <= side <= MAX_FRAME for side in frame):
+            raise LaunchError(f"The frame's width and height must be from the viewport's {viewport} to {MAX_FRAME:,} pixels.")
+    return {"name": name.strip(), "viewport": viewport, "max_calls": max_calls, "task": (task or "").strip() or None,
+            "frame": frame}
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise LaunchError(message)
@@ -238,11 +268,14 @@ class Launcher:
             claude = {"ok": False, "detail": f"{version}, but not logged in; run `claude auth login`"}
         else:
             claude = {"ok": True, "detail": version}
+        # Reference pictures come through the Codex login and Pi's image helper, for agents on either harness.
+        references = problem is None and references_available()
         out = {"claude": claude,
                "pi": {"ok": problem is None, "detail": problem or "ready", "keys": keys,
                       "env_vars": {k: p.env_var for k, p in PROVIDERS.items() if p.env_var},
                       "login_commands": {k: p.login_command for k, p in PROVIDERS.items() if p.login_command},
-                      "references": problem is None and references_available()}}
+                      "references": references},
+               "references": references}
         self._probe = (time.time(), out)
         return out
 
@@ -368,31 +401,9 @@ class Launcher:
     # ---- the shared canvas --------------------------------------------------------------------------------
 
     def create_canvas(self, body: dict) -> dict:
-        from conveyor.commons.tiles import DEFAULT_MAX_CALLS, DEFAULT_VIEWPORT, MAX_FRAME, MAX_TASK, VIEWPORT_RANGE
         from conveyor.commons.tiles import create_canvas
 
-        if not isinstance(body, dict) or set(body) - {"name", "viewport", "max_calls", "task", "frame"}:
-            raise LaunchError("Expected name, viewport, max_calls, task and frame.")
-        task = body.get("task") or None
-        if task is not None and (not isinstance(task, str) or len(task) > MAX_TASK):
-            raise LaunchError(f"task must be text, at most {MAX_TASK} characters.")
-        name = body.get("name") or "Commons"
-        if not isinstance(name, str) or not name.strip() or len(name) > 60 or "\n" in name:
-            raise LaunchError("name must be a line of text, at most 60 characters.")
-        viewport = self._number("viewport", body.get("viewport", DEFAULT_VIEWPORT), int)
-        if not VIEWPORT_RANGE[0] <= viewport <= VIEWPORT_RANGE[1]:
-            raise LaunchError(f"viewport must be between {VIEWPORT_RANGE[0]} and {VIEWPORT_RANGE[1]} pixels.")
-        max_calls = self._number("max_calls", body.get("max_calls", DEFAULT_MAX_CALLS), int)
-        if not 1 <= max_calls <= 1000:
-            raise LaunchError("max_calls must be between 1 and 1000.")
-        frame = body.get("frame") or None
-        if frame is not None:
-            if not isinstance(frame, dict) or set(frame) != {"width", "height"}:
-                raise LaunchError("frame must be {width, height} in pixels, or left out for a canvas with no edges.")
-            frame = tuple(self._number(f"frame {k}", frame[k], int) for k in ("width", "height"))
-            if not all(viewport <= side <= MAX_FRAME for side in frame):
-                raise LaunchError(f"The frame's width and height must be from the viewport's {viewport} to {MAX_FRAME:,} pixels.")
-        return create_canvas(self.db, name.strip(), viewport, max_calls, (task or "").strip() or None, frame)
+        return create_canvas(self.db, **canvas_settings(body))
 
     def _canvas(self, canvas_id: str):
         from conveyor.commons.tiles import SharedCanvas
@@ -477,7 +488,124 @@ class Launcher:
         from conveyor.commons.agent import create_agent
 
         agent = create_agent(self.db, canvas_id, body, status="starting")
+        self._set_halted(canvas_id, False)  # spawning by hand on a stopped canvas means carry on
         return {**agent, "launch": self._spawn_agent(canvas_id, agent["id"], agent["name"])}
+
+    # ---- the kill switch ----------------------------------------------------------------------------------
+
+    def _set_halted(self, canvas_id: str, on: bool) -> bool:
+        """Mark a canvas stopped (no successor, judge or held agent starts there) or carrying on. False for an
+        unknown canvas."""
+        import json
+
+        from conveyor.store import connect, dumps
+
+        conn = connect(self.db)
+        try:
+            row = conn.execute("SELECT config FROM canvases WHERE id=?", (canvas_id,)).fetchone()
+            if row is None:
+                return False
+            config = json.loads(row["config"])
+            if bool(config.get("halted")) != on:
+                if on:
+                    config["halted"] = time.time()
+                else:
+                    config.pop("halted", None)
+                conn.execute("UPDATE canvases SET config=? WHERE id=?", (dumps(config), canvas_id))
+                conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def stop_canvas(self, canvas_id: str) -> dict | None:
+        """Stop every agent on a canvas: mark it halted first, so no agent finishing now can queue a successor and
+        no judge comes due, then interrupt each running process and drop every agent still waiting. None for an
+        unknown canvas."""
+        from conveyor.store import connect
+
+        if not self._canvas_exists(canvas_id) or not self._set_halted(canvas_id, True):
+            return None
+        with self._lock:
+            running = [launch for c, launch in self._agents.values() if c == canvas_id and launch.proc.poll() is None]
+        for launch in running:
+            self.stop(launch.id)
+        conn = connect(self.db)
+        try:
+            cur = conn.execute("UPDATE canvas_agents SET status='stopped', ended=?, error='Stopped before it started' "
+                               "WHERE canvas_id=? AND status IN ('queued', 'held')", (time.time(), canvas_id))
+            conn.commit()
+            dropped = cur.rowcount
+        finally:
+            conn.close()
+        return {"id": canvas_id, "interrupted": len(running), "dropped": dropped}
+
+    def _canvas_exists(self, canvas_id: str) -> bool:
+        from conveyor.store import connect
+
+        conn = connect(self.db)
+        try:
+            return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvases'").fetchone()
+                        and conn.execute("SELECT 1 FROM canvases WHERE id=?", (canvas_id,)).fetchone())
+        finally:
+            conn.close()
+
+    def stop_everything(self) -> dict:
+        """The kill switch: stop every running benchmark, every canvas with an agent at work or waiting, and every
+        run and painting this server started."""
+        from conveyor.commons import bench
+        from conveyor.store import connect
+
+        conn = connect(self.db)
+        try:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            benchmarks = [r[0] for r in conn.execute("SELECT id FROM benchmarks WHERE status='running'")] \
+                if "benchmarks" in tables else []
+            busy = [r[0] for r in conn.execute("SELECT DISTINCT canvas_id FROM canvas_agents WHERE status IN "
+                                               "('queued', 'held', 'starting', 'running')")] \
+                if "canvas_agents" in tables else []
+        finally:
+            conn.close()
+        for b in benchmarks:
+            bench.stop(self.db, b)
+        with self._lock:
+            busy += [c for c, launch in self._agents.values() if launch.proc.poll() is None]
+        canvases = [self.stop_canvas(c) for c in dict.fromkeys(busy)]
+        with self._lock:
+            others = [x for x in self._launches.values() if x.id not in {launch.id for _, launch in self._agents.values()}]
+        runs = [x.id for x in others if x.proc.poll() is None and not x.stop_requested and self.stop(x.id)]
+        return {"benchmarks": len(benchmarks), "canvases": len([c for c in canvases if c]),
+                "agents": sum(c["interrupted"] + c["dropped"] for c in canvases if c), "runs": len(runs)}
+
+    # ---- benchmarks ---------------------------------------------------------------------------------------
+
+    def plan_benchmark(self, spec: dict) -> dict:
+        """A dry run: what the spec would start, checked, with nothing saved."""
+        from conveyor.commons import bench
+        from conveyor.store import connect, init_db
+
+        init_db(self.db)
+        conn = connect(self.db)
+        try:
+            return bench.preview(bench.plan(conn, spec))
+        finally:
+            conn.close()
+
+    def start_benchmark(self, spec: dict) -> dict:
+        """Save the benchmark; the watcher starts its agents, one canvas at a time when it's sequential."""
+        from conveyor.commons import bench
+
+        made = bench.create(self.db, spec)
+        self.start_queued()
+        return made
+
+    def stop_benchmark(self, bench_id: str) -> dict | None:
+        from conveyor.commons import bench
+
+        canvases = bench.stop(self.db, bench_id)
+        if canvases is None:
+            return None
+        stopped = [self.stop_canvas(c) for c in canvases]
+        return {"id": bench_id, "state": "stopped", "agents": sum(c["interrupted"] + c["dropped"] for c in stopped if c)}
 
     def _spawn_agent(self, canvas_id: str, agent_id: str, name: str | None) -> dict:
         """Start the process for an agent already marked `starting`."""
@@ -517,6 +645,9 @@ class Launcher:
     def start_queued(self) -> list[str]:
         """One pass: queue the judges that are due, then claim each queued agent (queued -> starting, so only one
         claim wins) and start it."""
+        import json
+
+        from conveyor.commons import bench
         from conveyor.commons.agent import queue_judges
         from conveyor.store import connect
 
@@ -524,15 +655,24 @@ class Launcher:
             queue_judges(self.db)
         except Exception as e:  # noqa: BLE001 - a judge that can't be queued mustn't stop the agents that are
             print(f"[canvas] couldn't queue judges: {e}", flush=True)
+        try:
+            bench.advance(self.db)
+        except Exception as e:  # noqa: BLE001 - nor a benchmark that can't move on
+            print(f"[canvas] couldn't advance benchmarks: {e}", flush=True)
 
         conn = connect(self.db)
         try:
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvas_agents'").fetchone() is None:
                 return []
-            queued = conn.execute("SELECT id, canvas_id, name FROM canvas_agents WHERE status='queued' "
-                                  "ORDER BY created").fetchall()
+            queued = conn.execute("SELECT a.id, a.canvas_id, a.name, c.config FROM canvas_agents a JOIN canvases c "
+                                  "ON c.id=a.canvas_id WHERE a.status='queued' ORDER BY a.created").fetchall()
             claimed = []
             for row in queued:
+                if json.loads(row["config"]).get("halted"):  # queued just as the canvas was stopped
+                    conn.execute("UPDATE canvas_agents SET status='stopped', ended=?, error='Stopped before it started' "
+                                 "WHERE id=? AND status='queued'", (time.time(), row["id"]))
+                    conn.commit()
+                    continue
                 cur = conn.execute("UPDATE canvas_agents SET status='starting' WHERE id=? AND status='queued'", (row["id"],))
                 conn.commit()
                 if cur.rowcount == 1:
@@ -571,7 +711,8 @@ class Launcher:
             conn = connect(self.db)
             try:
                 cur = conn.execute("UPDATE canvas_agents SET status='stopped', ended=?, error='Stopped before it started' "
-                                   "WHERE id=? AND canvas_id=? AND status='queued'", (time.time(), agent_id, canvas_id))
+                                   "WHERE id=? AND canvas_id=? AND status IN ('queued', 'held')",
+                                   (time.time(), agent_id, canvas_id))
                 conn.commit()
             finally:
                 conn.close()

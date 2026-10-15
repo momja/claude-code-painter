@@ -76,6 +76,8 @@ def decode_image(value: str, width: int) -> bytes:
             out = io.BytesIO()
             image.save(out, format="PNG")
             return out.getvalue()
+    except LaunchError:
+        raise
     except (binascii.Error, ValueError, IndexError, UnidentifiedImageError, OSError, Image.DecompressionBombError):
         raise LaunchError("Upload a valid PNG, JPEG or WebP image.") from None
 

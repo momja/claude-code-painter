@@ -402,6 +402,140 @@ def cmd_serve(args) -> None:
             launcher.shutdown()
 
 
+def _bench_table(res: dict) -> None:
+    """Each run of a benchmark on a line: its models, how far it got, its paint and its spend."""
+    print(f"\n{res['name']} ({res['id']}), {res['status']}, {_money(res['cost'])} in all")
+    for r in res["runs"]:
+        covered = f", {r['coverage']:.0%} of the frame" if r["coverage"] is not None else ""
+        print(f"  {r['label']:<16} {r['state']:<8} {r['agents']:>3} sessions, {r['paints']:>5} paint calls"
+              f"{covered}, {_money(r['cost'])}: {', '.join(dict.fromkeys(r['models']))}")
+
+
+def cmd_bench(args) -> None:
+    import json
+
+    from conveyor.commons import bench
+    from conveyor.launch import Launcher, LaunchError
+    from conveyor.store import connect, init_db
+
+    db = Path(args.db).resolve()
+    if args.bench_action == "export":
+        conn = connect(db, readonly=True)
+        try:
+            res = bench.results(conn, args.id)
+            out = Path(args.out or db.parent / f"bench-{args.id}")
+            for path in bench.write_results(conn, args.id, out, args.side):
+                print(f"Wrote {path}")
+        except KeyError:
+            sys.exit(f"No benchmark {args.id} in {db}.")
+        finally:
+            conn.close()
+        _bench_table(res)
+        return
+
+    try:
+        spec = json.loads(Path(args.spec).read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        sys.exit(f"Couldn't read the spec: {e}")
+    init_db(db)
+    launcher = Launcher(db, build_parser)
+    try:
+        if args.dry_run:
+            print(json.dumps(launcher.plan_benchmark(spec), indent=2))
+            return
+        made = launcher.start_benchmark(spec)
+    except LaunchError as e:
+        sys.exit(f"The spec doesn't check out: {e}")
+    launcher.watch_canvas()
+    server = None
+    if not args.no_serve:
+        from conveyor.server import make_server
+
+        server = make_server(db, args.host, args.port, launcher)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        print(f"Benchmark at http://{args.host}:{server.server_port}/bench?id={made['id']}")
+    print(f"Benchmark {made['id']}: {made['canvases']} canvases, {made['agents']} agents, {made['order']}. "
+          "Ctrl+C stops every agent in it.")
+    seen: dict[str, str] = {}
+    try:
+        while True:
+            conn = connect(db, readonly=True)
+            try:
+                res = bench.results(conn, made["id"])
+            finally:
+                conn.close()
+            for r in res["runs"]:
+                if seen.get(r["label"]) != r["state"]:
+                    seen[r["label"]] = r["state"]
+                    print(f"  {r['label']}: {r['state']}, {r['agents']} sessions, {_money(r['cost'])}")
+            if res["status"] != "running":
+                break
+            time.sleep(5)
+    except KeyboardInterrupt:
+        print("\nStopping the benchmark's agents...")
+        launcher.stop_benchmark(made["id"])
+    finally:
+        launcher.shutdown()
+        if server is not None:
+            server.shutdown()
+    conn = connect(db, readonly=True)
+    try:
+        out = Path(args.out or db.parent / f"bench-{made['id']}")
+        for path in bench.write_results(conn, made["id"], out, args.side):
+            print(f"Wrote {path}")
+        _bench_table(bench.results(conn, made["id"]))
+    finally:
+        conn.close()
+
+
+def cmd_export(args) -> None:
+    from conveyor.commons.export import export_gif, export_png, export_sheet, filename
+    from conveyor.store import connect
+
+    kind = args.format or ("gif" if args.out and Path(args.out).suffix.lower() == ".gif" else "png")
+    extension = ".gif" if kind == "gif" else ".png"
+    if args.out and Path(args.out).suffix.lower() in {".gif", ".png"} and Path(args.out).suffix.lower() != extension:
+        sys.exit(f"{kind} export needs a {extension} output file.")
+    conn = connect(Path(args.db).resolve(), readonly=True)
+    try:
+        if kind == "gif":
+            data = export_gif(conn, args.canvas, args.side, args.seq, args.frames, args.fps)
+        elif kind == "sheet":
+            data = export_sheet(conn, args.canvas, args.side, args.seq, args.frames, args.columns)
+        else:
+            data = export_png(conn, args.canvas, args.side, args.seq)
+        name = conn.execute("SELECT name FROM canvases WHERE id=?", (args.canvas,)).fetchone()[0]
+    except KeyError:
+        sys.exit(f"No canvas {args.canvas} in {args.db}.")
+    except ValueError as e:
+        sys.exit(str(e))
+    finally:
+        conn.close()
+    out = Path(args.out or filename(name, args.seq, kind))
+    out.write_bytes(data)
+    print(f"Wrote {out}")
+
+
+def cmd_stop(args) -> None:
+    """The kill switch from a terminal: ask the server that started them to stop everything."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    token = args.launch_token or os.environ.get("CONVEYOR_LAUNCH_TOKEN") or ""
+    request = urllib.request.Request(args.url.rstrip("/") + "/api/stop-all", data=b"{}", method="POST",
+                                     headers={"Content-Type": "application/json", "X-Conveyor-Token": token})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as r:
+            done = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        sys.exit(f"The server refused: {e.code} {e.read().decode(errors='replace')}")
+    except OSError as e:
+        sys.exit(f"Couldn't reach {args.url}: {e}. Agents belong to the server that started them; is it running?")
+    print(f"Stopped {done['agents']} canvas agents on {done['canvases']} canvases, {done['benchmarks']} benchmarks "
+          f"and {done['runs']} runs or paintings.")
+
+
 def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParser:
     from conveyor.claude import DEFAULT_EFFORT
     from conveyor.claude import DEFAULT_MODEL
@@ -420,6 +554,37 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
     auth_logout = auth_sub.add_parser("logout", help="Remove saved provider credentials")
     auth_logout.add_argument("provider", choices=["openai"], help="Provider to sign out of")
     auth_sub.add_parser("status", help="Show OpenAI sign-in status")
+    bench = sub.add_parser("bench", help="Run one shared-canvas setup with different models and compare")
+    bench_sub = bench.add_subparsers(dest="bench_action", required=True)
+    bench_run = bench_sub.add_parser("run", help="Start a benchmark from a spec, wait for it, export the results")
+    bench_run.add_argument("spec", help="The benchmark's JSON spec (see GET /api/benchmarks for an example)")
+    bench_run.add_argument("--dry-run", action="store_true", help="Check the spec and print what it would start")
+    bench_run.add_argument("--no-serve", action="store_true", help="Don't serve the dashboard while it runs")
+    bench_run.add_argument("--host", default="127.0.0.1")
+    bench_run.add_argument("--port", type=int, default=8765)
+    bench_export = bench_sub.add_parser("export", help="Write a benchmark's pictures, comparison sheet and results")
+    bench_export.add_argument("id", help="The benchmark's id")
+    for p in (bench_run, bench_export):
+        p.add_argument("--db", default="runs/conveyor.db")
+        p.add_argument("--out", default=None, help="Folder for the PNGs and results.json. Default: "
+                       "bench-<id> beside the database")
+        p.add_argument("--side", type=int, default=None, help="Longest side of each canvas's PNG (default 4096)")
+    export = sub.add_parser("export", help="Write a shared canvas as a PNG, paint-history GIF or progress sheet")
+    export.add_argument("canvas", help="The canvas's id")
+    export.add_argument("-o", "--out", default=None, help="The file to write. Default: the canvas's name")
+    export.add_argument("--format", choices=["png", "gif", "sheet"], default=None,
+                        help="Export format (default png, or gif if --out ends in .gif; sheet is a PNG)")
+    export.add_argument("--side", type=int, default=None,
+                        help="Longest side of the image or sheet panel (default 4096 PNG, 1024 GIF, 512 sheet)")
+    export.add_argument("--frames", type=int, default=None,
+                        help="Most stages, including blank paper and the result (default 60 GIF, 9 sheet)")
+    export.add_argument("--fps", type=int, default=10, help="GIF frames per second, 1 to 30 (default 10)")
+    export.add_argument("--columns", type=int, default=3, help="Progress sheet columns, 1 to 6 (default 3)")
+    export.add_argument("--seq", type=int, default=None, help="Still at this op, or history through this op")
+    export.add_argument("--db", default="runs/conveyor.db")
+    stop = sub.add_parser("stop", help="Kill switch: stop every agent, benchmark and run a server started")
+    stop.add_argument("--url", default="http://127.0.0.1:8765", help="The server that started them")
+    stop.add_argument("--launch-token", default=None, help="Its launch token, if it has one (or CONVEYOR_LAUNCH_TOKEN)")
 
     efforts = ["low", "medium", "high", "xhigh", "max"]
     for p in (run, paint, mutate):
@@ -508,8 +673,11 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
     for p, fn in ((run, cmd_run), (paint, cmd_paint), (mutate, cmd_mutate), (probe, cmd_probe), (serve, cmd_serve)):
         p.set_defaults(func=fn)
     auth.set_defaults(func=cmd_auth)
+    bench.set_defaults(func=cmd_bench)
+    export.set_defaults(func=cmd_export)
+    stop.set_defaults(func=cmd_stop)
     parser.commands = {"run": run, "paint": paint, "mutate": mutate, "probe": probe, "serve": serve,
-                       "auth": auth}
+                       "auth": auth, "bench": bench, "export": export, "stop": stop}
     return parser
 
 

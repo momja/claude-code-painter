@@ -10,7 +10,7 @@ agent the instrument's tools on its viewport, plus `look`, `overview`, `move_vie
 tool-call budget, refused calls included. Past the budget, or once the agent has handed off to a successor, every
 call is refused.
 
-`generate_reference` (Pi agents with the OpenAI Codex login, see references.py) makes a picture the agent studies
+`generate_reference` (agents on either harness, given the OpenAI Codex login; see references.py) makes a picture the agent studies
 and never paints. `broadcast` can carry one of them to every other agent, who get it under their next result.
 
 `spawn_successor` only writes `successor.json` with where the agent's viewport stands. The host

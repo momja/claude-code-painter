@@ -19,8 +19,16 @@ so it works the same during a run and after it, and from another process.
   GET /api/canvases/<id>/history     every tile version and every op, for replay
   GET /api/canvases/<id>/ops/<seq>   one op: the call's arguments and result note
   GET /api/canvases/<id>/tiles/<tx>/<ty>/<seq>  one version of one tile (PNG)
+  GET /api/canvases/<id>/export.png  the frame, or the paint's reach, as one PNG (?side=<longest side>, ?seq=<op>)
+  GET /api/canvases/<id>/export.gif  paint history, evenly spaced by call (?side=1024, ?frames=60, ?fps=10, ?seq=<op>)
+  GET /api/canvases/<id>/progress.png  a sheet of progress stages (?side=512 per panel, ?frames=9, ?columns=3, ?seq=<op>)
+  GET /api/canvases/<id>/spec        a benchmark spec that sets this canvas and its hand-spawned agents up again
   GET /api/canvas-catalog            every instrument and painter prompt in any run, deduplicated, plus the seeds
   GET /api/canvas-catalog/closeup/<name>  a demo sheet with each panel cropped to its marks (PNG)
+  GET /bench                         benchmarks: one canvas setup run with different models, side by side
+  GET /api/benchmarks                benchmarks, the model presets, and an example spec
+  GET /api/benchmarks/<id>           one benchmark: its spec and each run's results
+  GET /api/benchmarks/<id>/sheet.png every run's canvas side by side, captioned (?cell=<px>)
 
 With a launcher (`conveyor serve` on a loopback address) it can also start runs:
 
@@ -33,11 +41,17 @@ With a launcher (`conveyor serve` on a loopback address) it can also start runs:
   POST /api/runs/<run>/paintings      paint with saved instrument_id/prompt_id, text and optional base64 image
   POST /api/canvases                 create a shared canvas from {name, viewport, max_calls, task, frame: {width, height}}
   POST /api/canvases/<id>/agents     spawn an agent: kind (painter or judge), catalog pair_id (or "random"), harness, model, effort,
-                                     provider, start x and y, name, cap, paint_batch, successors, task, viewport
+                                     provider, start x and y, name, cap, paint_batch, successors, max_successors,
+                                     task, viewport, references
   POST /api/canvases/<id>/agents/<agent>/stop   stop it, as Ctrl+C would
   POST /api/canvases/<id>/painters   choose the painters random spawns and successors draw from: {pair_ids: [...] or null}
   POST /api/canvases/<id>/sketches   draw a sketch line from {points: [[x, y], ...], color, width} in canvas pixels
   POST /api/canvases/<id>/sketches/erase        erase sketch lines from {seqs: [...]}
+  POST /api/canvases/<id>/stop       stop every agent on a canvas, and let no successor or judge start there
+  POST /api/benchmarks               start a benchmark from its spec (see commons/bench.py)
+  POST /api/benchmarks/plan          check a spec and show what it would start, starting nothing
+  POST /api/benchmarks/<id>/stop     stop a benchmark: every agent on its canvases, and the canvases still waiting
+  POST /api/stop-all                 the kill switch: every benchmark, canvas agent, run and painting started here
 
 On a loopback address launching needs nothing more. Served to a network, it needs a token: the launcher is given
 one, and then these endpoints answer only to a request carrying it in X-Conveyor-Token. The dashboard's reads stay
@@ -71,6 +85,7 @@ LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
 DASHBOARD = Path(__file__).parent / "dashboard.html"
 STUDIO = Path(__file__).parent / "studio.html"
 COMMONS = Path(__file__).parent / "commons.html"
+BENCH = Path(__file__).parent / "bench.html"
 ARTIFACT_RE = re.compile(r"^[0-9a-f]{24}\.(png|jpg)$")
 JSON_COLS = {"data", "config", "genome", "traits", "details", "artifacts", "usage", "request"}
 STALL_ITERATIONS = 4
@@ -447,6 +462,24 @@ class Views:
             return canvas_views.canvas(self.conn, cid, int(q.get("since") or 0)), "json"
         if parts[3:] == ["history"]:
             return canvas_views.history(self.conn, cid), "json"
+        if parts[3:] in (["export.png"], ["export.gif"], ["progress.png"]):
+            from conveyor.commons.export import export_gif, export_png, export_sheet, filename
+
+            seq = int(q["seq"]) if q.get("seq") else None
+            side = int(q["side"]) if q.get("side") else None
+            kind = {"export.png": "png", "export.gif": "gif", "progress.png": "sheet"}[parts[3]]
+            if kind == "png":
+                data = export_png(self.conn, cid, side, seq)
+            else:
+                frames = int(q["frames"]) if q.get("frames") else None
+                data = (export_gif(self.conn, cid, side, seq, frames, int(q.get("fps") or 10)) if kind == "gif"
+                        else export_sheet(self.conn, cid, side, seq, frames, int(q.get("columns") or 3)))
+            name = self.conn.execute("SELECT name FROM canvases WHERE id=?", (cid,)).fetchone()[0]
+            return (data, filename(name, seq, kind), "image/gif" if kind == "gif" else "image/png"), "export"
+        if parts[3:] == ["spec"]:
+            from conveyor.commons.bench import spec_from_canvas
+
+            return spec_from_canvas(self.conn, cid), "json"
         if len(parts) == 5 and parts[3] == "ops" and parts[4].isdigit():
             return canvas_views.op(self.conn, cid, int(parts[4])), "json"
         if len(parts) == 7 and parts[3] == "tiles" and all(re.fullmatch(r"-?\d+", p) for p in parts[4:]):
@@ -454,6 +487,23 @@ class Views:
             if data is None:
                 raise KeyError("tile")
             return data, "png"
+        return None
+
+    def bench_get(self, parts: list[str], q: dict) -> tuple[Any, str] | None:
+        """The benchmarks' reads, under /api/benchmarks. (body, content type), or None."""
+        from conveyor.commons import bench
+        from conveyor.commons.export import filename
+
+        if parts[:2] != ["api", "benchmarks"]:
+            return None
+        if len(parts) == 2:
+            return {"benchmarks": bench.listing(self.conn), "presets": bench.PRESETS, "example": bench.EXAMPLE}, "json"
+        if len(parts) == 3:
+            return bench.results(self.conn, parts[2]), "json"
+        if parts[3:] == ["sheet.png"]:
+            data = bench.sheet_png(self.conn, parts[2], int(q.get("cell") or 640))
+            name = self.conn.execute("SELECT name FROM benchmarks WHERE id=?", (parts[2],)).fetchone()[0]
+            return (data, filename(f"{name}-comparison"), "image/png"), "export"
         return None
 
 
@@ -468,11 +518,13 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
         def log_message(self, *args) -> None:  # quiet
             pass
 
-        def _send(self, status: int, body: bytes, ctype: str, cache: bool = False) -> None:
+        def _send(self, status: int, body: bytes, ctype: str, cache: bool = False, download: str | None = None) -> None:
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "public, max-age=31536000, immutable" if cache else "no-store")
+            if download:  # a file name made of [A-Za-z0-9_-.] only, so it needs no quoting
+                self.send_header("Content-Disposition", f'inline; filename="{download}"')
             self.end_headers()
             self.wfile.write(body)
 
@@ -502,8 +554,10 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                 painting_post = len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "paintings"
                 canvas_post = parts[:2] == ["api", "canvases"]
                 target_post = parts == ["api", "targets"]
+                bench_post = parts[:2] == ["api", "benchmarks"]
+                kill_post = parts == ["api", "stop-all"]
                 if launcher is None or (parts[:2] != ["api", "launches"] and not painting_post and not canvas_post
-                                        and not target_post):
+                                        and not target_post and not bench_post and not kill_post):
                     return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 if (why := self._guard_post()) is not None:
                     return self._json({"error": why}, HTTPStatus.FORBIDDEN)
@@ -526,10 +580,28 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                         self._json(launcher.import_target(body), HTTPStatus.CREATED)
                     except LaunchError as e:
                         self._json({"error": str(e)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                elif kill_post:
+                    self._json(launcher.stop_everything())
+                elif bench_post:
+                    try:
+                        if len(parts) == 2:
+                            self._json(launcher.start_benchmark(body), HTTPStatus.CREATED)
+                        elif parts[2:] == ["plan"]:
+                            self._json(launcher.plan_benchmark(body))
+                        elif len(parts) == 4 and parts[3] == "stop":
+                            stopped = launcher.stop_benchmark(parts[2])
+                            self._json(stopped or {"error": "not found"}, HTTPStatus.OK if stopped else HTTPStatus.NOT_FOUND)
+                        else:
+                            self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+                    except LaunchError as e:
+                        self._json({"error": str(e)}, HTTPStatus.UNPROCESSABLE_ENTITY)
                 elif canvas_post:
                     try:
                         if len(parts) == 2:
                             self._json(launcher.create_canvas(body), HTTPStatus.CREATED)
+                        elif parts[3:] == ["stop"]:
+                            stopped = launcher.stop_canvas(parts[2])
+                            self._json(stopped or {"error": "not found"}, HTTPStatus.OK if stopped else HTTPStatus.NOT_FOUND)
                         elif len(parts) == 4 and parts[3] == "agents":
                             self._json(launcher.start_agent(parts[2], body), HTTPStatus.CREATED)
                         elif parts[3:] == ["painters"]:
@@ -572,10 +644,14 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                     self._send(200, STUDIO.read_bytes(), "text/html; charset=utf-8")
                 elif parts == ["canvas"]:
                     self._send(200, COMMONS.read_bytes(), "text/html; charset=utf-8")
-                elif (found := views.canvas_get(parts, q)) is not None:
+                elif parts == ["bench"]:
+                    self._send(200, BENCH.read_bytes(), "text/html; charset=utf-8")
+                elif (found := views.canvas_get(parts, q) or views.bench_get(parts, q)) is not None:
                     body, kind = found
                     if kind == "png":
                         self._send(200, body, "image/png", cache=True)
+                    elif kind == "export":  # generated downloads, including live canvas history: never cached
+                        self._send(200, body[0], body[2], download=body[1])
                     else:
                         self._json(body)
                 elif parts[0] == "artifacts" and len(parts) == 2 and ARTIFACT_RE.match(parts[1]):

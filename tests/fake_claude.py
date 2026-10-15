@@ -5,7 +5,8 @@ It reads the first user message from stdin, launches the MCP server named in --m
   - the canvas server: calls each instrument tool once with arguments built from its schema, then look and finish
   - the shared canvas: looks, paints, writes a message, moves, batches, takes an overview, then looks until its
     budget runs out;
-    if FAKE_CLAUDE_HANDOFF names a file that exists, it deletes it and calls spawn_successor instead of looking
+    if FAKE_CLAUDE_HANDOFF names a file that exists, it deletes it and calls spawn_successor instead of looking;
+    with FAKE_CLAUDE_REFERENCE set and generate_reference offered, it asks for a reference picture of that prompt
   - the workbench: submits the source in FAKE_CLAUDE_SUBMIT (or tries it, then submits)
   - no server and --json-schema: returns FAKE_CLAUDE_STRUCTURED as the structured output
   - FAKE_CLAUDE_CUT_OFF names a file: if it exists, the painter deletes it and hits the usage limit after its
@@ -165,6 +166,8 @@ if cfg:
         script.append(("overview", {}))
         if "broadcast" in names:
             script.append(("broadcast", {"text": "fake here, painting a red line"}))
+        if "generate_reference" in names and os.environ.get("FAKE_CLAUDE_REFERENCE"):
+            script.append(("generate_reference", {"prompt": os.environ["FAKE_CLAUDE_REFERENCE"]}))
         for name, arguments in script:
             i += 1
             call(server, i, name, arguments)

@@ -21,7 +21,12 @@ like a random spawn's, so a chain changes instrument and prompt at every hand-of
 carry over. A successor starts exactly like an agent spawned by hand at that spot: no note, and nothing in its
 prompt says it is one. A
 successor only queues while the session's usage windows are under `--max-usage`, so a chain of agents stops
-itself before it eats the rest of a plan's window.
+itself before it eats the rest of a plan's window. `max_successors` caps a chain: the agent spawned by hand may hand
+off that many times in all, and the last successor gets no `spawn_successor` tool. A stopped (halted) canvas
+queues no successors at all, so the kill switch also ends every chain.
+
+A canvas with a `draw_seed` (every benchmark canvas has one) draws painters from a seeded generator keyed by the
+agent's slot and generation, so the same benchmark run with other models hands every slot the same painters.
 """
 
 from __future__ import annotations
@@ -46,7 +51,7 @@ from conveyor.commons.server import MAX_REFERENCES
 from conveyor.commons.server import SUCCESSOR_WINDOW
 from conveyor.commons.server import agent_name
 from conveyor.commons.tiles import MOVE_SHARE
-from conveyor.commons.tiles import VIEWPORT_RANGE
+from conveyor.commons.tiles import MIN_VIEWPORT
 from conveyor.commons.tiles import clamp_to_frame
 from conveyor.commons.tiles import SharedCanvas
 from conveyor.commons.views import STALE_SECONDS
@@ -67,6 +72,7 @@ KINDS = ("painter", "judge")
 JUDGE_VIEWPORT = 512
 JUDGE_EVERY = 1000  # ops on a canvas between the judges that start by themselves
 JUDGE_CALLS = 20  # a judge's whole budget, whatever the canvas gives painters: given more, it wrote junk
+MAX_SUCCESSORS = 100  # the highest cap a spawn may set on its chain's hand-offs
 
 
 def session_scope(canvas_id: str) -> str:
@@ -82,15 +88,43 @@ def _text(body: dict, key: str, limit: int, default: str | None = None) -> str |
     return value.strip()
 
 
+SPAWN_FIELDS = frozenset({"kind", "pair_id", "harness", "model", "effort", "provider", "x", "y", "name", "cap",
+                          "paint_batch", "successors", "max_successors", "task", "viewport", "references"})
+
+
 def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued", extra: dict | None = None) -> dict:
     """Check a spawn request and save the agent. `queued` waits for the launcher's watcher; the launcher passes
     `starting` when it starts the process itself, so the watcher never starts it a second time. An agent is a
     painter, or a judge: no instrument, a 512 px viewport, and notes instead of paint. `extra` goes into its
     settings as it is."""
+    init_db(db)
+    conn = connect(db)
+    try:
+        canvas = conn.execute("SELECT * FROM canvases WHERE id=?", (canvas_id,)).fetchone()
+        if canvas is None:
+            raise LaunchError("Canvas not found.")
+        made = agent_row(conn, json.loads(canvas["config"]), body, extra)
+        insert_agent(conn, canvas_id, made, status)
+        conn.commit()
+        return made["reply"] | {"canvas_id": canvas_id}
+    finally:
+        conn.close()
+
+
+def insert_agent(conn, canvas_id: str, made: dict, status: str) -> None:
+    conn.execute("INSERT INTO canvas_agents (id, canvas_id, name, created, status, config, x, y, calls_used, "
+                 "max_calls) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                 (made["id"], canvas_id, made["name"], time.time(), status, dumps(made["config"]), made["x"],
+                  made["y"], made["max_calls"]))
+
+
+def agent_row(conn, canvas_config: dict, body: dict, extra: dict | None = None,
+              rng: random.Random | None = None) -> dict:
+    """A checked spawn request as the row it becomes, for a canvas with `canvas_config`, which need not exist yet:
+    a benchmark checks every agent of every run this way before it creates anything. Raises LaunchError."""
     from conveyor.pi import PROVIDERS
 
-    allowed = {"kind", "pair_id", "harness", "model", "effort", "provider", "x", "y", "name", "cap",
-               "paint_batch", "successors", "task", "viewport", "references"}
+    allowed = SPAWN_FIELDS
     if not isinstance(body, dict) or set(body) - allowed:
         raise LaunchError("Expected " + ", ".join(sorted(allowed)) + ".")
     kind = body.get("kind") or "painter"
@@ -126,61 +160,56 @@ def create_agent(db: Path, canvas_id: str, body: dict, status: str = "queued", e
     references = body.get("references", True)
     if not isinstance(paint_batch, bool) or not isinstance(successors, bool) or not isinstance(references, bool):
         raise LaunchError("paint_batch, successors and references must be on or off.")
+    max_successors = body.get("max_successors")
+    if max_successors in ("", None):
+        max_successors = None  # no cap: the chain runs until it's stopped or a usage window fills
+    elif isinstance(max_successors, bool) or not isinstance(max_successors, int) \
+            or not 0 <= max_successors <= MAX_SUCCESSORS:
+        raise LaunchError(f"max_successors must be a whole number from 0 to {MAX_SUCCESSORS}, or left out for no cap.")
     if judge:  # a judge has nothing to batch, and its work ends with its budget
         paint_batch = successors = False
-    references = references and harness == "pi" and not judge  # pictures come through Pi's Codex login
-    init_db(db)
-    conn = connect(db)
-    try:
-        canvas = conn.execute("SELECT * FROM canvases WHERE id=?", (canvas_id,)).fetchone()
-        if canvas is None:
-            raise LaunchError("Canvas not found.")
-        drawn, pair = body.get("pair_id") == RANDOM, None
-        chosen = json.loads(canvas["config"]).get("pairs")  # the painters picked for this canvas, or None for all
-        if judge:
-            drawn = False
-        elif drawn:
-            pair = draw_pair(conn, chosen)
-            if pair is None and chosen:
-                raise LaunchError("None of the painters chosen for this canvas is in the catalog any more. "
-                                  "Choose its painters again.")
-        else:
-            pair = catalog_module.entry(conn, body["pair_id"]) if isinstance(body.get("pair_id"), str) else None
-        if pair is None and not judge:
-            raise LaunchError("Choose a painter from the catalog.")
-        config = {**(painter(pair, drawn) if pair else {}), "kind": kind, "harness": harness, "model": model, "effort": effort,
-                  "provider": provider if harness == "pi" else None, "cap": cap, "paint_batch": paint_batch,
-                  "successors": successors, "references": references, "agent_task": agent_task, "start": [x, y],
-                  "generation": 1}
-        config.update(extra or {})
-        agent_id = new_id()
-        name = name or f"{'judge ' if judge else ''}{re.sub(r'^claude-', '', model.split('/')[-1])} {agent_id[:4]}"
-        config.update(lineage=agent_id, base_name=name)
-        canvas_config = json.loads(canvas["config"])
-        max_calls = JUDGE_CALLS if judge else int(canvas_config.get("max_calls", 100))
-        viewport = JUDGE_VIEWPORT if judge else body.get("viewport")
-        if viewport in (None, ""):
-            viewport = int(canvas_config["viewport"])
-        elif isinstance(viewport, bool) or not isinstance(viewport, (int, float)) or viewport != int(viewport) \
-                or not VIEWPORT_RANGE[0] <= viewport <= VIEWPORT_RANGE[1]:
-            raise LaunchError(f"viewport must be a whole number of pixels from {VIEWPORT_RANGE[0]} to {VIEWPORT_RANGE[1]}.")
-        config["viewport"] = int(viewport)
-        frame = canvas_config.get("frame")
-        if frame and (viewport > frame[2] - frame[0] or viewport > frame[3] - frame[1]):
-            raise LaunchError(f"A {viewport} px viewport doesn't fit in this canvas's {frame[2] - frame[0]} x "
-                              f"{frame[3] - frame[1]} frame.")
-        x, y = clamp_to_frame(frame, x, y, int(viewport))  # a start outside the frame moves to its nearest edge
-        config["start"] = [x, y]
-        conn.execute("INSERT INTO canvas_agents (id, canvas_id, name, created, status, config, x, y, calls_used, "
-                     "max_calls) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
-                     (agent_id, canvas_id, name, time.time(), status, dumps(config), x, y, max_calls))
-        conn.commit()
-        return {"id": agent_id, "canvas_id": canvas_id, "name": name, "x": x, "y": y, "max_calls": max_calls,
-                "viewport": config["viewport"], "kind": kind,
-                "painter": {"id": pair["id"], "random": drawn, "instrument": config["instrument_label"],
-                            "prompt": config["prompt_label"], "best_score": pair["best_score"]} if pair else None}
-    finally:
-        conn.close()
+    successors = successors and max_successors != 0
+    references = references and not judge  # any harness: the pictures come through the Codex login, not the model
+    drawn, pair = body.get("pair_id") == RANDOM, None
+    chosen = canvas_config.get("pairs")  # the painters picked for this canvas, or None for all
+    if judge:
+        drawn = False
+    elif drawn:
+        pair = draw_pair(conn, chosen, rng)
+        if pair is None and chosen:
+            raise LaunchError("None of the painters chosen for this canvas is in the catalog any more. "
+                              "Choose its painters again.")
+    else:
+        pair = catalog_module.entry(conn, body["pair_id"]) if isinstance(body.get("pair_id"), str) else None
+    if pair is None and not judge:
+        raise LaunchError("Choose a painter from the catalog.")
+    config = {**(painter(pair, drawn) if pair else {}), "kind": kind, "harness": harness, "model": model, "effort": effort,
+              "provider": provider if harness == "pi" else None, "cap": cap, "paint_batch": paint_batch,
+              "successors": successors, "max_successors": max_successors if successors else None,
+              "references": references, "agent_task": agent_task, "start": [x, y], "generation": 1}
+    config.update(extra or {})
+    agent_id = new_id()
+    name = name or f"{'judge ' if judge else ''}{re.sub(r'^claude-', '', model.split('/')[-1])} {agent_id[:4]}"
+    config.update(lineage=agent_id, base_name=name)
+    max_calls = JUDGE_CALLS if judge else int(canvas_config.get("max_calls", 100))
+    viewport = JUDGE_VIEWPORT if judge else body.get("viewport")
+    if viewport in (None, ""):
+        viewport = int(canvas_config["viewport"])
+    elif isinstance(viewport, bool) or not isinstance(viewport, (int, float)) or viewport != int(viewport) \
+            or viewport < MIN_VIEWPORT:
+        raise LaunchError(f"viewport must be a whole number of pixels, at least {MIN_VIEWPORT}.")
+    config["viewport"] = int(viewport)
+    frame = canvas_config.get("frame")
+    if frame and (viewport > frame[2] - frame[0] or viewport > frame[3] - frame[1]):
+        raise LaunchError(f"A {viewport} px viewport doesn't fit in this canvas's {frame[2] - frame[0]} x "
+                          f"{frame[3] - frame[1]} frame.")
+    x, y = clamp_to_frame(frame, x, y, int(viewport))  # a start outside the frame moves to its nearest edge
+    config["start"] = [x, y]
+    return {"id": agent_id, "name": name, "x": x, "y": y, "max_calls": max_calls, "config": config,
+            "reply": {"id": agent_id, "name": name, "x": x, "y": y, "max_calls": max_calls,
+                      "viewport": config["viewport"], "kind": kind,
+                      "painter": {"id": pair["id"], "random": drawn, "instrument": config["instrument_label"],
+                                  "prompt": config["prompt_label"], "best_score": pair["best_score"]} if pair else None}}
 
 
 def queue_judges(db: Path) -> list[str]:
@@ -197,6 +226,9 @@ def queue_judges(db: Path) -> list[str]:
         due = []
         now = time.time()
         for canvas_id in busy:
+            canvas_config = json.loads(conn.execute("SELECT config FROM canvases WHERE id=?", (canvas_id,)).fetchone()[0])
+            if canvas_config.get("halted") or canvas_config.get("auto_judges") is False:
+                continue  # stopped, so nothing new starts there; or a canvas set up without automatic judges
             agents = [(dict(r), json.loads(r["config"] or "{}")) for r in conn.execute(
                 "SELECT * FROM canvas_agents WHERE canvas_id=? ORDER BY created", (canvas_id,)).fetchall()]
 
@@ -213,9 +245,10 @@ def queue_judges(db: Path) -> list[str]:
             last = max((int(c.get("at_ops", 0)) for _, c in autos), default=0)
             if ops // JUDGE_EVERY <= last // JUDGE_EVERY:
                 continue
-            canvas_row = conn.execute("SELECT config FROM canvases WHERE id=?", (canvas_id,)).fetchone()
-            cx, cy = _centre(conn, canvas_id, json.loads(canvas_row["config"]))
+            cx, cy = _centre(conn, canvas_id, canvas_config)
             hand = next((c for _, c in reversed(agents) if not c.get("auto") and int(c.get("generation", 1)) == 1), {})
+            if canvas_config.get("judge_model"):  # a benchmark gives every canvas the same judge
+                hand = {**hand, "model": None, "provider": None, "effort": None, **canvas_config["judge_model"]}
             due.append((canvas_id, ops, {
                 "kind": "judge", "harness": hand.get("harness") or "claude", "model": hand.get("model"),
                 "effort": hand.get("effort") or "high", "provider": hand.get("provider"),
@@ -262,11 +295,25 @@ def judge_prompt(config: dict, size: int, x: int, y: int, max_calls: int, task: 
         area_cap=Canvas(size, size).area_cap)
 
 
-def draw_pair(conn, chosen: list[str] | None = None) -> dict | None:
+def halted(conn, canvas_id: str) -> bool:
+    """Whether the canvas was stopped: no successor, judge or held benchmark agent starts on it until someone
+    spawns an agent there by hand."""
+    row = conn.execute("SELECT config FROM canvases WHERE id=?", (canvas_id,)).fetchone()
+    return bool(row and json.loads(row[0]).get("halted"))
+
+
+def draw_rng(canvas_config: dict, slot, generation: int) -> random.Random | None:
+    """The generator a draw on a seeded canvas uses: the same seed, slot and generation always draw the same
+    painter from the same catalog. None on a canvas without a seed, which draws from the module's generator."""
+    seed = canvas_config.get("draw_seed")
+    return None if seed is None or slot is None else random.Random(f"{seed}/{slot}/{generation}")
+
+
+def draw_pair(conn, chosen: list[str] | None = None, rng: random.Random | None = None) -> dict | None:
     """A painter drawn at random: every pair in the catalog the canvas can run is equally likely, scored or not.
-    `chosen`, the painters picked for a canvas, narrows the draw to those."""
+    `chosen`, the painters picked for a canvas, narrows the draw to those. `rng` makes the draw repeatable."""
     usable = [p for p in catalog_module.catalog(conn)["pairs"] if chosen is None or p["id"] in chosen]
-    return random.choice(usable) if usable else None
+    return (rng.choice(usable) if rng else random.choice(usable)) if usable else None
 
 
 def painter(pair: dict, drawn: bool) -> dict:
@@ -283,10 +330,13 @@ def queue_successor(canvas: SharedCanvas, row: dict, config: dict, x: int, y: in
     since its predecessor started. With nothing to draw, it keeps its predecessor's painter."""
     generation = int(config.get("generation", 1)) + 1
     base = config.get("base_name") or row["name"]
-    current = canvas.conn.execute("SELECT config FROM canvases WHERE id=?", (row["canvas_id"],)).fetchone()
-    pair = draw_pair(canvas.conn, json.loads(current[0]).get("pairs"))
+    current = json.loads(canvas.conn.execute("SELECT config FROM canvases WHERE id=?", (row["canvas_id"],)).fetchone()[0])
+    pair = draw_pair(canvas.conn, current.get("pairs"), draw_rng(current, config.get("slot"), generation))
+    cap = config.get("max_successors")
     child = {**config, **(painter(pair, True) if pair else {}), "generation": generation, "parent_id": row["id"], "lineage": config.get("lineage") or row["id"],
-             "base_name": base, "start": [x, y]}
+             "base_name": base, "start": [x, y],
+             # The chain has handed off generation - 1 times; with a cap, the one that reaches it can't hand off.
+             "successors": bool(config.get("successors")) and (cap is None or generation - 1 < cap)}
     agent_id, name = new_id(), f"{base} #{generation}"
     canvas.conn.execute("INSERT INTO canvas_agents (id, canvas_id, name, created, status, config, x, y, calls_used, "
                         "max_calls) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, 0, ?)",
@@ -335,8 +385,18 @@ def system_prompt(config: dict, size: int, x: int, y: int, max_calls: int, task:
         views=prompts.VIEWS_RULE if inst.spec.views else "", reference=inst.reference(size, size) + _renamed(inst),
         references=prompts.REFERENCES_RULE.format(max_references=MAX_REFERENCES, canvas_shared=CANVAS_SHARED)
         if config.get("references") else "",
-        successor=prompts.SUCCESSOR_RULE.format(max_calls=max_calls, window=SUCCESSOR_WINDOW) if config.get("successors") else "")
+        successor=prompts.SUCCESSOR_RULE.format(max_calls=max_calls, window=SUCCESSOR_WINDOW, after=_hand_offs(config))
+        if config.get("successors") else "")
     return config["prompt"].strip() + "\n\n" + prompts.STRATEGY_BRIDGE + "\n\n" + rules
+
+
+def _hand_offs(config: dict) -> str:
+    """What the successor rule says about the chain's cap: nothing new without one, else how many hand-offs remain."""
+    cap = config.get("max_successors")
+    if cap is None:
+        return prompts.SUCCESSOR_OPEN
+    left = cap - (int(config.get("generation", 1)) - 1)
+    return prompts.SUCCESSOR_LAST if left <= 1 else prompts.SUCCESSOR_LEFT.format(left=left)
 
 
 def _renamed(inst) -> str:
@@ -377,9 +437,9 @@ def run_agent(db: Path, agent_id: str) -> None:
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         canvas.update_agent(agent_id, status="running", last_ts=time.time())
-        # Asked for at spawn, and only if this host can make them now: a tool that always fails wastes calls.
-        config["references"] = bool(config.get("references")) and config["harness"] == "pi" and not judge \
-            and references_available()
+        # Asked for at spawn, and only if this host can make them now: a tool that always fails wastes calls. Any
+        # harness: the commons server makes the picture through the Codex login, whatever model the agent runs on.
+        config["references"] = bool(config.get("references")) and not judge and references_available()
         args = _args(config, db)
         harness = _harness(config["harness"], config["model"], config["effort"], args, store,
                            Meter(max_usage=args.max_usage), {})
@@ -451,7 +511,9 @@ def run_agent(db: Path, agent_id: str) -> None:
         if handoff is not None:
             # The session reported its usage windows to this meter; a successor would only push them further.
             full = harness.meter.should_stop()
-            if full:
+            if halted(canvas.conn, row["canvas_id"]):
+                status, error = "finished", "It asked for a successor, but the canvas was stopped."
+            elif full:
                 status, error = "finished", f"It asked for a successor, but none was started: {full}."
             else:
                 child = queue_successor(canvas, row, config, latest["x"], latest["y"])
