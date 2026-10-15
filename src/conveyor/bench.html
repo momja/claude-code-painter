@@ -73,6 +73,46 @@ details summary{cursor:pointer;color:var(--muted)}
 #plan table{font-size:12px}#plan th,#plan td{padding:4px 6px}#plan td.painter{text-align:left;white-space:normal}
 #painters-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:4px 12px;max-height:220px;overflow:auto;margin-top:8px}
 @media(max-width:1000px){.ed-top,.agents-grid{grid-template-columns:1fr}header,main{padding-left:14px;padding-right:14px}}
+
+/* Keep controls usable with touch and allow long names to fit narrow screens. */
+header > *, main > *, aside, label { min-width:0; }
+input, select, textarea { max-width:100%; }
+button, a, input, select, textarea { touch-action:manipulation; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible,
+textarea:focus-visible, summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+@media(max-width:760px), (pointer:coarse) {
+  button, select, input:not([type=checkbox]):not([type=radio]):not([type=range]), textarea { min-height:44px; }
+  input:not([type=checkbox]):not([type=radio]), select, textarea { font-size:16px; }
+  input[type=range] { min-height:44px; }
+  input[type=checkbox], input[type=radio] { width:20px; height:20px; flex-shrink:0; }
+  header a, summary { min-height:44px; display:inline-flex; align-items:center; }
+  header { gap:6px 12px; }
+  header select { max-width:100%; }
+}
+
+.runs { grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr)); }
+.fields > *, .arow, .arow > *, .line > *, .run .top > *, .summary > * { min-width:0; }
+.run b, .models, .task, #facts, #message { overflow-wrap:anywhere; }
+.picker { max-width:100%; }.picker input { max-width:100%; }
+.table-wrap { overscroll-behavior-x:contain; }
+@media(max-width:760px) {
+  header, main { padding-left:12px; padding-right:12px; }
+  main { gap:16px; }
+  #bench-select { flex:1 1 100%; }
+  .panel { padding:12px; }
+  .ed-foot { bottom:0; padding:10px 12px; }
+  .ed-foot .spacer { display:none; }
+  .ed-foot #estimate { flex-basis:100%; }
+  .check { min-height:44px; }
+  .acts a { min-height:44px; display:inline-flex; align-items:center; }
+  .ed-head > .check { margin-left:0!important; flex-wrap:wrap; }
+  .picker { width:100%; }
+  .picker select, .picker input { flex:1 1 120px; width:100%; }
+  .line .grow { min-width:0; flex-basis:100%; }
+  #agent-list { max-height:none; overflow:visible; }
+  #plan .table-wrap, #plan { max-width:100%; overflow-x:auto; }
+
+}
 </style>
 </head>
 <body>
@@ -471,7 +511,8 @@ function worldBox(){
 function layout(){
   const w = $("map-wrap").clientWidth || 600, box = E.drag ? E.world.box : worldBox();
   const ww = box[2] - box[0], wh = box[3] - box[1], pad = 14;
-  const s = Math.min((w - 2 * pad) / ww, (520 - 2 * pad) / wh);
+  const maxHeight = Math.min(520, Math.max(160, innerHeight * .6));
+  const s = Math.min((w - 2 * pad) / ww, (maxHeight - 2 * pad) / wh);
   const h = Math.max(160, Math.round(wh * s + 2 * pad));
   return {box, s, w, h, ox:(w - ww * s) / 2, oy:(h - wh * s) / 2};
 }

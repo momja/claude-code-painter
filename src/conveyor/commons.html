@@ -80,6 +80,56 @@ dialog::backdrop{background:#0006}
 .pcard .clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 [hidden]{display:none!important}
 @media(max-width:900px){main{grid-template-columns:1fr;height:auto}.stage{height:70dvh;min-height:420px}aside{border-left:0;border-top:1px solid var(--line)}header{padding:10px 14px}}
+
+/* Keep controls usable with touch and allow long names to fit narrow screens. */
+header > *, main > *, aside, label { min-width:0; }
+input, select, textarea { max-width:100%; }
+button, a, input, select, textarea { touch-action:manipulation; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible,
+textarea:focus-visible, summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+@media(max-width:760px), (pointer:coarse) {
+  button, select, input:not([type=checkbox]):not([type=radio]):not([type=range]), textarea { min-height:44px; }
+  input:not([type=checkbox]):not([type=radio]), select, textarea { font-size:16px; }
+  input[type=range] { min-height:44px; }
+  input[type=checkbox], input[type=radio] { width:20px; height:20px; flex-shrink:0; }
+  header a, summary { min-height:44px; display:inline-flex; align-items:center; }
+  header { gap:6px 12px; }
+  header select { max-width:100%; }
+}
+
+.mobile-link { display:none; }
+#canvas-select { max-width:min(38ch,100%); }
+#task-bar, .pair, .agent .meta, #message { overflow-wrap:anywhere; }
+.agent .top > *, .vhead > *, .pcard .head > * { min-width:0; }
+.pgrid { grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr)); }
+.ptools input[type=search] { min-width:0; }
+dialog { max-height:calc(100dvh - 24px); overflow:auto; }
+#viewer img { height:65dvh; }
+@media(max-width:900px) {
+  main { min-height:0; }
+  .stage { height:auto; min-height:0; }
+  #wrap { flex:none; height:60dvh; min-height:300px; }
+  .mobile-link { display:inline-flex; min-height:44px; align-items:center; }
+}
+@media(max-width:760px) {
+  #canvas-select { flex:1 1 100%; max-width:100%; }
+  .tag { white-space:normal; }
+  .toolbar, .replay { padding:10px 12px; gap:6px; }
+  .toolbar .spacer { display:none; }
+  #where { flex-basis:100%; text-align:left; }
+  #hint { right:12px; bottom:8px; }
+  aside { padding:18px 14px; }
+  .row3 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .row, .row3 { min-width:0; }
+  .check { min-height:44px; }
+  .agent .acts a, .ref .acts a { min-height:44px; display:inline-flex; align-items:center; }
+  .agent .acts button, .ref button { min-height:44px; }
+  .ptools input[type=search] { flex-basis:100%; }
+  #painters-dialog, #viewer { padding:12px; width:calc(100% - 16px); }
+  #painters-dialog .ptools { flex-shrink:0; }
+  .pcard img { height:150px; }
+  .vhead b { flex-basis:100%; overflow-wrap:anywhere; }
+}
 </style>
 </head>
 <body>
@@ -107,7 +157,7 @@ dialog::backdrop{background:#0006}
     <span id="pen-opts" class="pen-opts" hidden><input id="pen-color" type="color" value="#0a84ff" aria-label="Pen colour">
       <select id="pen-width" aria-label="Pen width"><option value="3">Thin</option><option value="6" selected>Medium</option><option value="14">Thick</option></select>
       <button id="undo" title="Erase the newest line (Ctrl+Z)">Undo</button><button id="clear-sketch">Clear</button></span>
-    <span class="spacer"></span><span id="where" class="muted"></span>
+    <a class="mobile-link" href="#spawn-title">Agent controls ↓</a><span class="spacer"></span><span id="where" class="muted"></span>
   </div>
   <div id="task-bar" hidden><b>Task</b> <span id="task-text"></span></div>
   <div id="wrap"><canvas id="view" aria-label="The shared canvas. Drag to pan, scroll to zoom, click to set where a new agent starts."></canvas>
