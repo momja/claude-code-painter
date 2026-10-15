@@ -205,12 +205,66 @@ dialog#nr::backdrop { background: rgba(20, 18, 14, .5); }
 #nr-form-view { display: contents; }
 #nr-form-view[hidden], #nr-unlock[hidden] { display: none; }
 .nr-scroll { min-height: 0; }
+
+/* Keep controls usable with touch and allow long names to fit narrow screens. */
+header > *, main > *, aside, label { min-width:0; }
+input, select, textarea { max-width:100%; }
+button, a, input, select, textarea { touch-action:manipulation; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible,
+textarea:focus-visible, summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+@media(max-width:760px), (pointer:coarse) {
+  button, select, input:not([type=checkbox]):not([type=radio]):not([type=range]), textarea { min-height:44px; }
+  input:not([type=checkbox]):not([type=radio]), select, textarea { font-size:16px; }
+  input[type=range] { min-height:44px; }
+  input[type=checkbox], input[type=radio] { width:20px; height:20px; flex-shrink:0; }
+  header a, summary { min-height:44px; display:inline-flex; align-items:center; }
+  header { gap:6px 12px; }
+  header select { max-width:100%; }
+}
+
+.row { grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr)); }
+.live-list { grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr)); }
+.kv > *, .node > *, .imgs figure, .canvas-now > *, .note { min-width:0; overflow-wrap:anywhere; }
+.scroll, .lineage, .archive-scroll { overscroll-behavior-x:contain; }
+#drawer { visibility:hidden; }
+#drawer.open { visibility:visible; }
+#drawer .bar { flex-shrink:0; }
+#drawer .body { min-height:0; overscroll-behavior:contain; }
+body.drawer-open { overflow:hidden; }
+.nr-head, .nr-foot { flex-shrink:0; }
+dialog#nr, #nr form { max-height:calc(100dvh - 24px); }
+.nr-fields { grid-template-columns:repeat(auto-fill,minmax(min(100%,180px),1fr)); }
+.nr-fields > *, .nr-roles > * { min-width:0; }
+@media(max-width:760px) {
+  header { position:static; padding:10px 12px; }
+  #run { flex:1 1 100%; order:1; }
+  #pills { flex-basis:100%; order:2; }
+  main { padding:12px 10px 36px; gap:12px; }
+  section { padding:12px; }
+  .row { gap:12px; }
+  /* Every niche remains reachable by scrolling within its section. */
+  .archive { grid-template-columns:72px repeat(6,minmax(90px,1fr)); min-width:684px; }
+  .archive .wide-only { display:flex; }
+  .archive .head.wide-only { display:block; }
+  .archive-scroll { overflow-x:auto; }
+  .scroll table { min-width:520px; }
+  .lineage-bar input { width:100%; }
+  .chart svg { min-width:540px; }
+  .chart-scroll { overflow-x:auto; }
+  #drawer { width:100%; border-left:0; }
+  #drawer .bar, #drawer .body { padding-left:12px; padding-right:12px; }
+  .nr-head, .nr-foot { padding-left:14px; padding-right:14px; }
+  .nr-scroll { padding-left:14px; padding-right:14px; }
+  .nr-actions { flex-wrap:wrap; }
+  .nr-roles label { display:grid; gap:4px; }
+  .f.check, .nr-seeds label { min-height:44px; align-items:center; }
+}
 </style>
 </head>
 <body>
 <header>
   <h1>conveyor</h1>
-  <select id="run"></select>
+  <select id="run" aria-label="Run"></select>
   <a id="studio-link" href="/studio">Painter studio</a>
   <a href="/canvas">Shared canvas</a>
   <a href="/bench">Benchmarks</a>
@@ -246,7 +300,7 @@ dialog#nr::backdrop { background: rgba(20, 18, 14, .5); }
     </div>
   </form>
 </dialog>
-<aside id="drawer" aria-hidden="true">
+<aside id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" aria-hidden="true" inert>
   <div class="bar"><span class="title" id="drawer-title"></span><button id="drawer-close">Close</button></div>
   <div class="body" id="drawer-body"></div>
 </aside>
@@ -393,7 +447,7 @@ function archiveView(a) {
   const filled = Object.keys(a.cells).length;
   let html = `<section><h2>Instrument archive · ${filled} of ${a.niches.length} niches filled</h2>
     <div class="muted" style="font-size:12.5px;margin:-4px 0 10px">Best instrument per niche. Rows: does any tool keep state between calls. Columns: does any tool take a list (a path, a set of offsets), and how far one call reaches.</div>
-    <div class="archive"><div></div>`;
+    <div class="archive-scroll" tabindex="0" role="region" aria-label="All instrument niches, scroll horizontally"><div class="archive"><div></div>`;
   for (const g of args) for (const r of reach) html += `<div class="head">${g} · ${r}</div>`;
   for (const s of states) {
     html += `<div class="side">${s}</div>`;
@@ -406,7 +460,7 @@ function archiveView(a) {
         : `<div class="cell empty">empty</div>`;
     }
   }
-  return html + `</div></section>`;
+  return html + `</div></div></section>`;
 }
 
 function liveView(live) {
@@ -468,7 +522,7 @@ function chartView(hist, ov) {
       svg += `<circle cx="${x(e.ended)}" cy="${y(e.score)}" r="${rescore || repeat ? 2.6 : 4.5}" fill="${rescore ? "none" : color}" stroke="${color}" fill-opacity="${repeat ? .45 : .7}" stroke-opacity="${repeat ? .45 : 1}" data-org="${esc(e.organism_id)}" style="cursor:pointer"><title>${esc(node)} ${short(e.organism_id)} ${fmt(e.score)} · ${esc(e.mutator || "seed")} · ${esc(e.reason)}${e.niche ? " · " + esc(e.niche) : ""}</title></circle>`;
     }
   }
-  return `<section class="chart"><h2>Scores over time</h2><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${svg}</svg>
+  return `<section class="chart"><h2>Scores over time</h2><div class="chart-scroll" tabindex="0" role="region" aria-label="Scores over time, scroll horizontally"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${svg}</svg></div>
     <div class="legend">${nodes.map((n) => `<span><span class="dot" style="background:${NODE_COLORS[n] || "#777"}"></span>${esc(n)}</span>`).join("")}<span>line: the champion's mean score · small: a repeat painting to confirm a challenger or the champion · hollow: rescore after the partner changed</span></div></section>`;
 }
 
@@ -739,21 +793,40 @@ function bindLinks(root) {
 }
 
 // ---- drawer ------------------------------------------------------------------------------------------------
+let drawerReturnFocus = null;
 function openDrawer(kind, id, push = true) {
+  if (!state.drawer) drawerReturnFocus = document.activeElement;
   state.drawer = { kind, id };
   if (push) history.pushState(null, "", `?run=${state.run}#${kind}=${id}`);
+  $("#drawer").inert = false;
+  $("#main").inert = true; $("header").inert = true;
+  document.body.classList.add("drawer-open");
   $("#drawer").classList.add("open");
   $("#drawer").setAttribute("aria-hidden", "false");
+  $("#drawer-close").focus();
   $("#drawer-body").innerHTML = `<div class="muted">Loading…</div>`;
   loadDrawer();
 }
 function closeDrawer(push = true) {
   state.drawer = null; clearTimeout(state.drawerTimer);
   $("#drawer").classList.remove("open"); $("#drawer").setAttribute("aria-hidden", "true");
+  $("#drawer").inert = true;
+  $("#main").inert = false; $("header").inert = false;
+  document.body.classList.remove("drawer-open");
+  if (drawerReturnFocus?.isConnected) drawerReturnFocus.focus({preventScroll:true});
   if (push) history.pushState(null, "", `?run=${state.run}`);
 }
 $("#drawer-close").onclick = () => closeDrawer();
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.drawer) closeDrawer(); });
+document.addEventListener("keydown", (e) => {
+  if (!state.drawer) return;
+  if (e.key === "Escape") closeDrawer();
+  if (e.key === "Tab") {
+    const controls = [...$("#drawer").querySelectorAll('button, a[href], input, select, textarea, summary, [tabindex="0"]')].filter(el => !el.disabled && el.getClientRects().length);
+    const first = controls[0], last = controls[controls.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+  }
+});
 window.addEventListener("popstate", () => routeHash());
 function routeHash() {
   const m = location.hash.match(/^#(org|session)=([\w-]+)/);

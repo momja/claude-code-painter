@@ -13,6 +13,40 @@ main{max-width:1700px;padding:24px;margin:auto}.layout{display:grid;grid-templat
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(245px,1fr));gap:14px}.card{border:1px solid var(--line);border-radius:9px;background:var(--surface);padding:12px;display:flex;flex-direction:column;gap:9px;min-width:0}.card.selected{outline:2px solid var(--accent)}.card img{width:100%;height:200px;object-fit:contain;background:#fff;border-radius:5px}.card .thumb{border:0;padding:0;background:transparent}.card .blank{display:grid;place-items:center;height:200px;background:var(--bg);border-radius:5px;color:var(--muted)}.card p{font-size:13px;margin:0;overflow-wrap:anywhere}.card .acts{margin-top:auto}.batch{margin-bottom:24px}.batch-head{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 12px}.empty{border:1px dashed var(--line);padding:56px 24px;text-align:center;border-radius:10px}.empty h2{font-size:23px}.empty p{max-width:500px;margin:8px auto;color:var(--muted)}#message{white-space:pre-wrap;margin-bottom:12px}#message:empty{display:none}.brief{white-space:pre-wrap;max-width:850px}.inspector{margin-top:22px;scroll-margin-top:16px}.inspect-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(260px,1fr);gap:20px}.preview{width:100%;max-height:540px;object-fit:contain;background:#fff;border:1px solid var(--line);border-radius:6px}.replay-controls{display:flex;gap:12px;align-items:center;margin:10px 0}.replay-controls input{flex:1;min-width:0}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:330px;overflow:auto;font:12px/1.5 ui-monospace,monospace;background:var(--code);padding:12px;border-radius:6px;margin:6px 0}details>summary{cursor:pointer;color:var(--muted)}.auditions{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}.auditions img{width:100%;background:#fff}.auditions p{font-size:12px}dialog{color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:24px;width:min(560px,95vw)}dialog::backdrop{background:#0006}#auth{margin:12px 22px}#new-form{display:grid;gap:15px}
 @media(max-width:1050px){.layout{grid-template-columns:285px minmax(0,1fr)}.inspect-grid{grid-template-columns:1fr}.cards{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}}
 @media(max-width:760px){main{padding:14px}.layout{grid-template-columns:1fr}.editor{position:static}.cards{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}header{padding:12px 14px}}
+
+/* Keep controls usable with touch and allow long names to fit narrow screens. */
+header > *, main > *, aside, label { min-width:0; }
+input, select, textarea { max-width:100%; }
+button, a, input, select, textarea { touch-action:manipulation; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible,
+textarea:focus-visible, summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+@media(max-width:760px), (pointer:coarse) {
+  button, select, input:not([type=checkbox]):not([type=radio]):not([type=range]), textarea { min-height:44px; }
+  input:not([type=checkbox]):not([type=radio]), select, textarea { font-size:16px; }
+  input[type=range] { min-height:44px; }
+  input[type=checkbox], input[type=radio] { width:20px; height:20px; flex-shrink:0; }
+  header a, summary { min-height:44px; display:inline-flex; align-items:center; }
+  header { gap:6px 12px; }
+  header select { max-width:100%; }
+}
+
+select { min-width:0; max-width:100%; }
+.batch-head > *, .inspect-grid > *, .replay-controls > * { min-width:0; }
+.brief, #lab-name, .batch-head, #message { overflow-wrap:anywhere; }
+.cards { grid-template-columns:repeat(auto-fill,minmax(min(100%,245px),1fr)); }
+dialog { max-height:calc(100dvh - 24px); overflow:auto; }
+@media(max-width:760px) {
+  #lab-select { flex:1 1 100%; }
+  .layout { gap:16px; }
+  .panel { padding:12px; }
+  .cards { grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr)); }
+  .inspect-grid { gap:12px; }
+  .check { min-height:44px; align-items:center; }
+  .replay-controls { flex-wrap:wrap; gap:8px; }
+  .replay-controls input { flex:1 1 100%; }
+  .empty { padding:28px 14px; }
+  dialog { padding:16px; }
+}
 </style>
 </head>
 <body>
