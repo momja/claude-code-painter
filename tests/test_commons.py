@@ -1012,7 +1012,9 @@ def test_the_page_and_its_reads(served, tmp_path):
     assert http(base, "GET", "/api/canvases") == (200, [])
     status, made = http(base, "POST", "/api/canvases", {"name": "Commons", "viewport": 256})
     assert status == 201 and made["config"]["viewport"] == 256
-    assert http(base, "POST", "/api/canvases", {"viewport": 9000})[0] == 422
+    assert http(base, "POST", "/api/canvases", {"viewport": 32})[0] == 422
+    status, wide = http(base, "POST", "/api/canvases", {"viewport": 4096})  # no upper limit
+    assert status == 201 and wide["config"]["viewport"] == 4096
     assert http(base, "POST", "/api/canvases", {"task": "x" * 2001})[0] == 422
     assert http(base, "POST", "/api/canvases", {"viewport": 256, "frame": {"width": 128, "height": 600}})[0] == 422
     assert http(base, "POST", "/api/canvases", {"frame": {"width": 2048}})[0] == 422

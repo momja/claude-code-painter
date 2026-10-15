@@ -51,7 +51,7 @@ from conveyor.commons.server import MAX_REFERENCES
 from conveyor.commons.server import SUCCESSOR_WINDOW
 from conveyor.commons.server import agent_name
 from conveyor.commons.tiles import MOVE_SHARE
-from conveyor.commons.tiles import VIEWPORT_RANGE
+from conveyor.commons.tiles import MIN_VIEWPORT
 from conveyor.commons.tiles import clamp_to_frame
 from conveyor.commons.tiles import SharedCanvas
 from conveyor.commons.views import STALE_SECONDS
@@ -196,8 +196,8 @@ def agent_row(conn, canvas_config: dict, body: dict, extra: dict | None = None,
     if viewport in (None, ""):
         viewport = int(canvas_config["viewport"])
     elif isinstance(viewport, bool) or not isinstance(viewport, (int, float)) or viewport != int(viewport) \
-            or not VIEWPORT_RANGE[0] <= viewport <= VIEWPORT_RANGE[1]:
-        raise LaunchError(f"viewport must be a whole number of pixels from {VIEWPORT_RANGE[0]} to {VIEWPORT_RANGE[1]}.")
+            or viewport < MIN_VIEWPORT:
+        raise LaunchError(f"viewport must be a whole number of pixels, at least {MIN_VIEWPORT}.")
     config["viewport"] = int(viewport)
     frame = canvas_config.get("frame")
     if frame and (viewport > frame[2] - frame[0] or viewport > frame[3] - frame[1]):

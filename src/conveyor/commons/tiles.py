@@ -49,7 +49,7 @@ TILE = 128
 PAPER_RGB = np.asarray([round(c * 255) for c in PAPER], dtype=np.uint8)
 DEFAULT_VIEWPORT = 512
 DEFAULT_MAX_CALLS = 100
-VIEWPORT_RANGE = (64, 1024)  # a canvas's default viewport, and any one agent's
+MIN_VIEWPORT = 64  # a canvas's default viewport, and any one agent's; neither has an upper limit
 MAX_TASK = 2000  # characters in a canvas's task
 MAX_FRAME = 1_000_000  # pixels on a side of a canvas's frame
 DEFAULT_INK = "#1d2a3a"

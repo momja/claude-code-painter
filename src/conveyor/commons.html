@@ -99,7 +99,7 @@ dialog::backdrop{background:#0006}
     <div class="seg" role="group" aria-label="Mode"><button id="mode-live" aria-pressed="true">Live</button><button id="mode-replay" aria-pressed="false">Replay</button></div>
     <button id="zoom-out" aria-label="Zoom out">−</button><span id="zoom-label" class="muted">100%</span><button id="zoom-in" aria-label="Zoom in">+</button>
     <button id="fit">Fit painting</button><button id="home">Origin</button>
-    <button id="export" title="Download the frame, or the paint's reach, as one PNG; in replay, as it stood at the replayed call">Export PNG</button>
+    <button id="export" title="Download a still PNG, an animated GIF or a sheet of the painting's progress">Export</button>
     <button id="to-bench" hidden title="Make a benchmark from this canvas and the agents spawned on it by hand">Benchmark this</button>
     <label class="check" style="margin:0"><input id="show-agents" type="checkbox" checked> Viewports</label>
     <label class="check" style="margin:0"><input id="show-sketch" type="checkbox" checked> Sketch</label>
@@ -142,7 +142,7 @@ dialog::backdrop{background:#0006}
       <label id="provider-field" hidden>Provider<select id="provider"></select></label>
       <label>Model<input id="model" list="models" placeholder="Harness default" autocomplete="off"><datalist id="models"></datalist></label>
       <div class="row3"><label>Start x<input id="x" type="number" step="1" value="0"></label><label>Start y<input id="y" type="number" step="1" value="0"></label><label>Cap, $<input id="cap" type="number" step="any" min="0.01" max="100" value="5"></label></div>
-      <div class="row"><label>Name<input id="name" maxlength="60" placeholder="Model name"></label><label class="painter-only">Viewport, px<input id="viewport" type="number" min="64" max="1024" step="1" placeholder="canvas default"></label></div>
+      <div class="row"><label>Name<input id="name" maxlength="60" placeholder="Model name"></label><label class="painter-only">Viewport, px<input id="viewport" type="number" min="64" step="1" placeholder="canvas default"></label></div>
       <label>Task for this agent, optional<textarea id="agent-task" rows="3" maxlength="1000" placeholder="Its own part of the work. Only this agent reads it; its successors carry it on."></textarea></label>
       <label class="check painter-only"><input id="batch" type="checkbox" checked> Offer paint_batch (40 strokes for one call)</label>
       <label class="check painter-only"><input id="successors" type="checkbox" checked> May spawn a successor to keep working</label>
@@ -171,10 +171,22 @@ dialog::backdrop{background:#0006}
   <div class="vhead"><b id="viewer-title"></b><span class="spacer"></span><span id="viewer-tabs" class="vtabs"></span><button type="button" id="viewer-close">Close</button></div>
   <img id="viewer-img" alt=""><p id="viewer-note" class="muted" style="font-size:12px;margin:8px 0 0"></p>
 </dialog>
+<dialog id="export-dialog" aria-labelledby="export-title"><form id="export-form">
+  <h2 id="export-title">Export painting</h2>
+  <p id="export-range" class="muted" style="font-size:12px"></p>
+  <label>Format<select id="export-format"><option value="png">Still PNG</option><option value="gif">Animated GIF</option><option value="sheet">Progress sheet PNG</option></select></label>
+  <label><span id="export-side-label">Longest side, px</span><input id="export-side" type="number" min="16" max="8192" step="1" value="4096" required></label>
+  <label id="export-frames-field" hidden>Most stages<input id="export-frames" type="number" min="2" max="240" step="1" value="60" required></label>
+  <div class="row"><label id="export-fps-field" hidden>Frames per second<input id="export-fps" type="number" min="1" max="30" step="1" value="10" required></label>
+    <label id="export-columns-field" hidden>Columns<input id="export-columns" type="number" min="1" max="6" step="1" value="3" required></label></div>
+  <p class="muted" style="font-size:12px">Paint only, without sketches or viewports. Animations and progress sheets start on blank paper, space stages evenly by tool call and include the result. Every stage uses the same crop. Short histories need fewer stages.</p>
+  <div id="export-status" role="status" aria-live="polite" style="font-size:12px;margin-bottom:10px"></div>
+  <div style="display:flex;gap:8px;justify-content:flex-end"><button type="button" id="export-cancel">Cancel</button><button type="submit" id="export-download" class="primary">Download</button></div>
+</form></dialog>
 <dialog id="canvas-dialog"><form method="dialog" id="canvas-form">
   <h2>New canvas</h2>
   <label>Name<input id="canvas-name" maxlength="60" value="Commons" required></label>
-  <div class="row"><label>Viewport, px<input id="canvas-viewport" type="number" min="128" max="1024" step="1" value="512"></label><label>Calls per agent<input id="canvas-calls" type="number" min="1" max="1000" value="100"></label></div>
+  <div class="row"><label>Viewport, px<input id="canvas-viewport" type="number" min="128" step="1" value="512"></label><label>Calls per agent<input id="canvas-calls" type="number" min="1" max="1000" value="100"></label></div>
   <div class="row"><label>Frame width, px<input id="canvas-frame-w" type="number" min="64" step="1" placeholder="no frame"></label><label>Frame height, px<input id="canvas-frame-h" type="number" min="64" step="1" placeholder="no frame"></label></div>
   <label>Task, optional<textarea id="canvas-task" rows="3" maxlength="2000" placeholder="One image every agent works on together. Leave it empty for no goal."></textarea></label>
   <p class="muted" style="font-size:12px">Every agent on this canvas sees a square viewport this size, gets this many tool calls, and is given the task word for word, with no other instructions about it. A frame bounds the canvas to x 0 to its width and y 0 to its height; leave it empty for a canvas with no edges. None of this can be changed later.</p>
@@ -478,6 +490,7 @@ $("messages").onclick = e => { const m = e.target.closest("[data-at]"); if(m){ c
 // ---- replay ---------------------------------------------------------------------------------------------
 async function enterReplay(){
   setPen(false); $("pen").disabled = true;
+  S.history = {ops:[], versions:[]}; S.byTile = new Map(); S.tracks = new Map();  // draws can happen while history loads
   S.mode = "replay"; $("mode-live").setAttribute("aria-pressed", "false"); $("mode-replay").setAttribute("aria-pressed", "true"); $("replay-bar").hidden = false;
   const h = await api(`/api/canvases/${encodeURIComponent(S.cid)}/history`);
   S.history = h; S.byTile = new Map(); S.tracks = new Map();
@@ -635,11 +648,51 @@ $("spawn").onsubmit = async e => {
 };
 
 // ---- export and the kill switch -------------------------------------------------------------------------
-$("export").onclick = () => {  // the paint alone, at full size up to 4096 px; in replay, as of the replayed call
+let exportContext = null, exportRequest = null;
+function exportFields(){
+  const kind = $("export-format").value, history = kind !== "png";
+  $("export-frames-field").hidden = !history; $("export-frames").disabled = !history;
+  $("export-fps-field").hidden = kind !== "gif"; $("export-fps").disabled = kind !== "gif";
+  $("export-columns-field").hidden = kind !== "sheet"; $("export-columns").disabled = kind !== "sheet";
+  $("export-side-label").textContent = kind === "sheet" ? "Longest side per panel, px" : "Longest side, px";
+  $("export-side").min = kind === "sheet" ? 128 : 16;
+  $("export-side").max = {png:8192, gif:2048, sheet:1024}[kind];
+  $("export-side").value = {png:4096, gif:1024, sheet:512}[kind];
+  $("export-frames").max = kind === "sheet" ? 24 : 240;
+  $("export-frames").value = kind === "sheet" ? 9 : 60;
+}
+$("export-format").onchange = exportFields;
+$("export").onclick = () => {
   if(!S.cid) return;
-  const seq = S.mode === "replay" ? S.history.ops[S.idx]?.[0] : null;
-  const a = document.createElement("a");
-  a.href = `/api/canvases/${encodeURIComponent(S.cid)}/export.png${seq ? `?seq=${seq}` : ""}`; a.download = ""; a.click();
+  exportContext = {cid:S.cid, seq:S.mode === "replay" ? (S.history?.ops[S.idx]?.[0] ?? 0) : null};
+  S.playing = false; $("play").textContent = "▶";
+  $("export-range").textContent = exportContext.seq === null ? "Export the latest paint, or its history through the latest call." : `Export the paint at op ${exportContext.seq}, or its history through that op.`;
+  if(!exportRequest) $("export-status").textContent = "";
+  exportFields(); $("export-dialog").showModal();
+};
+$("export-cancel").onclick = () => $("export-dialog").close();
+$("export-dialog").addEventListener("close", () => exportRequest?.abort());
+$("export-form").onsubmit = async e => {
+  e.preventDefault();
+  if(!exportContext || exportRequest) return;
+  const kind = $("export-format").value, q = new URLSearchParams({side:$("export-side").value});
+  if(exportContext.seq !== null) q.set("seq", exportContext.seq);
+  if(kind !== "png") q.set("frames", $("export-frames").value);
+  if(kind === "gif") q.set("fps", $("export-fps").value);
+  if(kind === "sheet") q.set("columns", $("export-columns").value);
+  const route = {png:"export.png", gif:"export.gif", sheet:"progress.png"}[kind];
+  const controller = exportRequest = new AbortController();
+  $("export-download").disabled = true; $("export-download").textContent = "Making export...";
+  $("export-status").classList.remove("bad"); $("export-status").textContent = kind === "png" ? "Reading the paint. Large exports may take a moment." : "Reading the paint history. Large exports may take a moment.";
+  try{
+    const r = await fetch(`/api/canvases/${encodeURIComponent(exportContext.cid)}/${route}?${q}`, {signal:controller.signal});
+    if(!r.ok){ const error = await r.json(); throw new Error(error.error || `Export failed (${r.status})`); }
+    const blob = await r.blob(), url = URL.createObjectURL(blob), a = document.createElement("a");
+    a.href = url; a.download = r.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1] || `canvas.${kind === "gif" ? "gif" : "png"}`;
+    document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
+    exportRequest = null; $("export-dialog").close();
+  }catch(err){ if(err.name !== "AbortError"){ $("export-status").textContent = err.message; $("export-status").classList.add("bad"); } }
+  finally{ exportRequest = null; $("export-download").disabled = false; $("export-download").textContent = "Download"; }
 };
 $("to-bench").onclick = () => { if(S.cid) location.href = `/bench?from=${encodeURIComponent(S.cid)}`; };
 // A button that spends nothing until it's clicked twice within four seconds.

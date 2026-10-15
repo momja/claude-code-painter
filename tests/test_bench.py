@@ -217,7 +217,7 @@ def test_a_spec_lays_out_one_canvas_per_variant_with_the_same_agents_and_painter
     ({"variants": {f"v{i}": "fake" for i in range(5)}, "repeats": 5}, "at most 24"),
     ({"repeats": 0}, "repeats"),
     ({"order": "random"}, "order"),
-    ({"canvas": {"viewport": 9000}}, "viewport"),
+    ({"canvas": {"viewport": 32}}, "viewport"),
     ({"agents": [{"x": 0, "viewport": 1024}]}, r"agents\[0\] \(#1\) in claude: A 1024 px viewport"),
     ({"agents": []}, "agents must be"),
     ({"defaults": {"x": 3}}, "defaults takes"),

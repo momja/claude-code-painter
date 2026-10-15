@@ -127,7 +127,7 @@ details summary{cursor:pointer;color:var(--muted)}
           <p class="hint">Every model gets a canvas exactly like this.</p>
           <div class="fields">
             <label class="f wide">Task every agent is given<textarea data-k="canvas.task" data-t="text" rows="3" maxlength="2000" placeholder="A harbour at dusk: fishing boats coming in, gulls, lamps on the quay. Leave empty for no shared goal."></textarea></label>
-            <label class="f">Viewport, px<input data-k="canvas.viewport" data-t="int" type="number" min="64" max="1024" data-r="1"></label>
+            <label class="f">Viewport, px<input data-k="canvas.viewport" data-t="int" type="number" min="64" data-r="1"></label>
             <label class="f">Calls per agent<input data-k="canvas.max_calls" data-t="int" type="number" min="1" max="1000"></label>
             <label class="f" style="grid-column:span 2"><span class="check" style="font-weight:600"><input id="ed-frame" type="checkbox"> Frame, px <span class="muted" style="font-weight:400">(width × height)</span></span><span class="line"><input data-k="canvas.frame.width" data-t="int" type="number" min="64" step="64" aria-label="Frame width" style="width:80px"> × <input data-k="canvas.frame.height" data-t="int" type="number" min="64" step="64" aria-label="Frame height" style="width:80px"></span></label>
             <div class="f wide">Judges<div class="line">
@@ -373,7 +373,7 @@ function renderAgents(){
       <details ${overrides ? "open" : ""}><summary>${overrides ? `${overrides} setting${overrides === 1 ? "" : "s"} of its own` : "Settings of its own"}</summary><div class="over">
         <label class="f">Cap, $<input data-k="${p}.cap" data-t="num" type="number" min="0.01" max="100" step="any" value="${a.cap ?? ""}" placeholder="${d.cap ?? 5}"></label>
         <label class="f">Effort<select data-k="${p}.effort"><option value="">default</option>${EFFORTS.map(e => `<option ${a.effort === e ? "selected" : ""}>${e}</option>`).join("")}</select></label>
-        ${judge ? "" : `<label class="f">Viewport, px<input data-k="${p}.viewport" data-t="int" type="number" min="64" max="1024" value="${a.viewport ?? ""}" placeholder="${st.canvas.viewport}"></label>
+        ${judge ? "" : `<label class="f">Viewport, px<input data-k="${p}.viewport" data-t="int" type="number" min="64" value="${a.viewport ?? ""}" placeholder="${st.canvas.viewport}"></label>
         <label class="f">Most hand-offs<select data-k="${p}.max_successors" data-t="maxs">${maxsOptions("max_successors" in a ? a.max_successors : undefined, true)}</select></label>
         ${tri(`${p}.successors`, a.successors, "May hand off")}${tri(`${p}.paint_batch`, a.paint_batch, "paint_batch")}${tri(`${p}.references`, a.references, "References")}`}
       </div></details></div>`;

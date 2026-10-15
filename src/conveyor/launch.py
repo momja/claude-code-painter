@@ -79,7 +79,7 @@ class LaunchError(ValueError):
 def canvas_settings(body: dict, extra: frozenset = frozenset()) -> dict:
     """A new canvas's request checked: {name, viewport, max_calls, task, frame} for `create_canvas`. Keys in
     `extra` are allowed and left for the caller."""
-    from conveyor.commons.tiles import DEFAULT_MAX_CALLS, DEFAULT_VIEWPORT, MAX_FRAME, MAX_TASK, VIEWPORT_RANGE
+    from conveyor.commons.tiles import DEFAULT_MAX_CALLS, DEFAULT_VIEWPORT, MAX_FRAME, MAX_TASK, MIN_VIEWPORT
 
     if not isinstance(body, dict) or set(body) - {"name", "viewport", "max_calls", "task", "frame"} - extra:
         raise LaunchError("Expected " + ", ".join(sorted({"name", "viewport", "max_calls", "task", "frame"} | extra)) + ".")
@@ -90,8 +90,8 @@ def canvas_settings(body: dict, extra: frozenset = frozenset()) -> dict:
     if not isinstance(name, str) or not name.strip() or len(name) > 60 or "\n" in name:
         raise LaunchError("name must be a line of text, at most 60 characters.")
     viewport = Launcher._number("viewport", body.get("viewport", DEFAULT_VIEWPORT), int)
-    if not VIEWPORT_RANGE[0] <= viewport <= VIEWPORT_RANGE[1]:
-        raise LaunchError(f"viewport must be between {VIEWPORT_RANGE[0]} and {VIEWPORT_RANGE[1]} pixels.")
+    if viewport < MIN_VIEWPORT:
+        raise LaunchError(f"viewport must be at least {MIN_VIEWPORT} pixels.")
     max_calls = Launcher._number("max_calls", body.get("max_calls", DEFAULT_MAX_CALLS), int)
     if not 1 <= max_calls <= 1000:
         raise LaunchError("max_calls must be between 1 and 1000.")

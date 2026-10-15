@@ -489,12 +489,21 @@ def cmd_bench(args) -> None:
 
 
 def cmd_export(args) -> None:
-    from conveyor.commons.export import export_png, filename
+    from conveyor.commons.export import export_gif, export_png, export_sheet, filename
     from conveyor.store import connect
 
+    kind = args.format or ("gif" if args.out and Path(args.out).suffix.lower() == ".gif" else "png")
+    extension = ".gif" if kind == "gif" else ".png"
+    if args.out and Path(args.out).suffix.lower() in {".gif", ".png"} and Path(args.out).suffix.lower() != extension:
+        sys.exit(f"{kind} export needs a {extension} output file.")
     conn = connect(Path(args.db).resolve(), readonly=True)
     try:
-        data = export_png(conn, args.canvas, args.side, args.seq)
+        if kind == "gif":
+            data = export_gif(conn, args.canvas, args.side, args.seq, args.frames, args.fps)
+        elif kind == "sheet":
+            data = export_sheet(conn, args.canvas, args.side, args.seq, args.frames, args.columns)
+        else:
+            data = export_png(conn, args.canvas, args.side, args.seq)
         name = conn.execute("SELECT name FROM canvases WHERE id=?", (args.canvas,)).fetchone()[0]
     except KeyError:
         sys.exit(f"No canvas {args.canvas} in {args.db}.")
@@ -502,7 +511,7 @@ def cmd_export(args) -> None:
         sys.exit(str(e))
     finally:
         conn.close()
-    out = Path(args.out or filename(name, args.seq))
+    out = Path(args.out or filename(name, args.seq, kind))
     out.write_bytes(data)
     print(f"Wrote {out}")
 
@@ -560,11 +569,18 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
         p.add_argument("--out", default=None, help="Folder for the PNGs and results.json. Default: "
                        "bench-<id> beside the database")
         p.add_argument("--side", type=int, default=None, help="Longest side of each canvas's PNG (default 4096)")
-    export = sub.add_parser("export", help="Write a shared canvas as one PNG")
+    export = sub.add_parser("export", help="Write a shared canvas as a PNG, paint-history GIF or progress sheet")
     export.add_argument("canvas", help="The canvas's id")
-    export.add_argument("-o", "--out", default=None, help="The PNG to write. Default: the canvas's name")
-    export.add_argument("--side", type=int, default=None, help="Longest side in pixels (default 4096, at most 8192)")
-    export.add_argument("--seq", type=int, default=None, help="The canvas as it stood after this op")
+    export.add_argument("-o", "--out", default=None, help="The file to write. Default: the canvas's name")
+    export.add_argument("--format", choices=["png", "gif", "sheet"], default=None,
+                        help="Export format (default png, or gif if --out ends in .gif; sheet is a PNG)")
+    export.add_argument("--side", type=int, default=None,
+                        help="Longest side of the image or sheet panel (default 4096 PNG, 1024 GIF, 512 sheet)")
+    export.add_argument("--frames", type=int, default=None,
+                        help="Most stages, including blank paper and the result (default 60 GIF, 9 sheet)")
+    export.add_argument("--fps", type=int, default=10, help="GIF frames per second, 1 to 30 (default 10)")
+    export.add_argument("--columns", type=int, default=3, help="Progress sheet columns, 1 to 6 (default 3)")
+    export.add_argument("--seq", type=int, default=None, help="Still at this op, or history through this op")
     export.add_argument("--db", default="runs/conveyor.db")
     stop = sub.add_parser("stop", help="Kill switch: stop every agent, benchmark and run a server started")
     stop.add_argument("--url", default="http://127.0.0.1:8765", help="The server that started them")

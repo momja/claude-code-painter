@@ -23,6 +23,8 @@ so it works the same during a run and after it, and from another process.
   GET /api/canvases/<id>/ops/<seq>   one op: the call's arguments and result note
   GET /api/canvases/<id>/tiles/<tx>/<ty>/<seq>  one version of one tile (PNG)
   GET /api/canvases/<id>/export.png  the frame, or the paint's reach, as one PNG (?side=<longest side>, ?seq=<op>)
+  GET /api/canvases/<id>/export.gif  paint history, evenly spaced by call (?side=1024, ?frames=60, ?fps=10, ?seq=<op>)
+  GET /api/canvases/<id>/progress.png  a sheet of progress stages (?side=512 per panel, ?frames=9, ?columns=3, ?seq=<op>)
   GET /api/canvases/<id>/spec        a benchmark spec that sets this canvas and its hand-spawned agents up again
   GET /api/canvas-catalog            every instrument and painter prompt in any run, deduplicated, plus the seeds
   GET /api/canvas-catalog/closeup/<name>  a demo sheet with each panel cropped to its marks (PNG)
@@ -469,13 +471,20 @@ class Views:
             return canvas_views.canvas(self.conn, cid, int(q.get("since") or 0)), "json"
         if parts[3:] == ["history"]:
             return canvas_views.history(self.conn, cid), "json"
-        if parts[3:] == ["export.png"]:
-            from conveyor.commons.export import export_png, filename
+        if parts[3:] in (["export.png"], ["export.gif"], ["progress.png"]):
+            from conveyor.commons.export import export_gif, export_png, export_sheet, filename
 
             seq = int(q["seq"]) if q.get("seq") else None
-            data = export_png(self.conn, cid, int(q["side"]) if q.get("side") else None, seq)
+            side = int(q["side"]) if q.get("side") else None
+            kind = {"export.png": "png", "export.gif": "gif", "progress.png": "sheet"}[parts[3]]
+            if kind == "png":
+                data = export_png(self.conn, cid, side, seq)
+            else:
+                frames = int(q["frames"]) if q.get("frames") else None
+                data = (export_gif(self.conn, cid, side, seq, frames, int(q.get("fps") or 10)) if kind == "gif"
+                        else export_sheet(self.conn, cid, side, seq, frames, int(q.get("columns") or 3)))
             name = self.conn.execute("SELECT name FROM canvases WHERE id=?", (cid,)).fetchone()[0]
-            return (data, filename(name, seq)), "export"
+            return (data, filename(name, seq, kind), "image/gif" if kind == "gif" else "image/png"), "export"
         if parts[3:] == ["spec"]:
             from conveyor.commons.bench import spec_from_canvas
 
@@ -503,7 +512,7 @@ class Views:
         if parts[3:] == ["sheet.png"]:
             data = bench.sheet_png(self.conn, parts[2], int(q.get("cell") or 640))
             name = self.conn.execute("SELECT name FROM benchmarks WHERE id=?", (parts[2],)).fetchone()[0]
-            return (data, filename(f"{name}-comparison")), "export"
+            return (data, filename(f"{name}-comparison"), "image/png"), "export"
         return None
 
 
@@ -678,8 +687,8 @@ def make_server(db: str | Path, host: str = "127.0.0.1", port: int = 8765, launc
                     body, kind = found
                     if kind == "png":
                         self._send(200, body, "image/png", cache=True)
-                    elif kind == "export":  # the canvas as it is now: never cached
-                        self._send(200, body[0], "image/png", download=body[1])
+                    elif kind == "export":  # generated downloads, including live canvas history: never cached
+                        self._send(200, body[0], body[2], download=body[1])
                     else:
                         self._json(body)
                 elif parts[0] == "artifacts" and len(parts) == 2 and ARTIFACT_RE.match(parts[1]):
