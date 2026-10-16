@@ -138,7 +138,7 @@ def model_spec(value, models: dict, where: str) -> dict:
 
 
 def describe(config: dict) -> str:
-    """An agent's model in a few words: `claude-opus-5-5 high`, `gpt-5.4 (openai-codex) medium`."""
+    """An agent's model in a few words: `claude-opus-5-5 high`, `gpt-6.1-sol (openai-codex) medium`."""
     where = f" ({config['provider']})" if config.get("harness") == "pi" and config.get("provider") else ""
     return f"{config.get('model') or 'unknown model'}{where} {config.get('effort') or ''}".strip()
 

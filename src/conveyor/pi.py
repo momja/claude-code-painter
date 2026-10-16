@@ -56,7 +56,7 @@ PROVIDERS = {p.key: p for p in (
     Provider("opencode-go", "OpenCode Go", "https://opencode.ai/zen/go/v1", "OPENCODE_API_KEY", "glm-5.3-flash",
              session_header="x-opencode-session", max_images=8),
     Provider("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", "z-ai/glm-5.3-flash"),
-    Provider("openai-codex", "OpenAI Codex", "https://chatgpt.com/backend-api", None, "gpt-5.4",
+    Provider("openai-codex", "OpenAI Codex", "https://chatgpt.com/backend-api", None, "gpt-6.1-sol",
              oauth=True, login_command="conveyor auth login openai"),
 )}
 DEFAULT_PROVIDER = "opencode-go"

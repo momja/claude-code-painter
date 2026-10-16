@@ -48,7 +48,7 @@ test("OpenAI Codex resolves the saved ChatGPT OAuth credential", async () => {
 		}));
 		const models = createModels({ credentials });
 		models.setProvider(openaiCodexProvider());
-		const model = models.getModel("openai-codex", "gpt-5.4");
+		const model = models.getModel("openai-codex", "gpt-6.1-sol");
 		assert.ok(model);
 		assert.equal(model.api, "openai-codex-responses");
 		assert.equal((await models.checkAuth("openai-codex")).type, "oauth");

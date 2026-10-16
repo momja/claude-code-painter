@@ -33,14 +33,17 @@ export function boundedPainterContext(messages, { keepTurns, state, onTrim }) {
 	const viewEnd = starts.find((i) => i > latestView) ?? messages.length;
 	const retained = [];
 	let dropped = 0;
+	// Pi 1.x carries the system prompt as messages[0]; the task's target/demo images live on the first user
+	// message, which is what the i === 0 exemption meant on pi 0.x.
+	const firstUser = messages.findIndex((m) => m.role === "user");
 	for (let i = 0; i < messages.length; i++) {
 		const message = messages[i];
-		if (i !== 0 && i < tail && !(i >= viewStart && viewStart >= 0 && i < viewEnd)) {
+		if (i !== 0 && i !== firstUser && i < tail && !(i >= viewStart && viewStart >= 0 && i < viewEnd)) {
 			dropped += 1;
 			continue;
 		}
 		// Older images in the retained turns are stale. Keep the target/demo and the newest view result.
-		if (i !== 0 && i !== latestView && Array.isArray(message.content)) {
+		if (i !== 0 && i !== firstUser && i !== latestView && Array.isArray(message.content)) {
 			const content = message.content.map((block) => block.type === "image"
 				? { type: "text", text: "[older canvas image omitted]" } : block);
 			retained.push({ ...message, content });

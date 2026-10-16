@@ -61,7 +61,7 @@ def test_pi_compacts_after_n_looks(env):
     assert [e["subtype"] for e in events].count("compact_boundary") == 1
     starts = [e for e in events if e["subtype"] == "request_start"]
     assert len(starts) == 3 and all(e["images"] >= 1 for e in starts)  # each request logs what it sent
-    assert [e["messages"] for e in starts] == [1, 4, 5]  # the third goes out compacted: 7 messages became 5
+    assert [e["messages"] for e in starts] == [2, 5, 5]  # pi 1.x carries the system prompt in the transcript
     assert sum(e["subtype"] == "request_end" for e in events) == 3
     [(usage,)] = rows(store, "SELECT usage FROM sessions")
     usage = json.loads(usage)
@@ -147,7 +147,7 @@ def test_batches_and_bounded_context_keep_full_recording(env):
     assert turns == 8 and usage["compactions"] == 0 and usage["context_trims"] >= 4
     events = [json.loads(d) for (d,) in rows(store, "SELECT data FROM session_events WHERE kind='other'")]
     starts = [e for e in events if e["subtype"] == "request_start"]
-    assert len(starts) == 8 and max(e["messages"] for e in starts) <= 9
+    assert len(starts) == 8 and max(e["messages"] for e in starts) <= 10  # pi 1.x keeps the system prompt too
     assert all(e["images"] >= 1 for e in starts) and starts[-1]["images"] == 3  # target, demo, older latest view
     assert starts[-1]["text_chars"] < starts[3]["text_chars"] + 200
     trims = [e for e in events if e["subtype"] == "painter_context"]
@@ -214,7 +214,7 @@ def test_openai_codex_provider_uses_the_chatgpt_subscription_api(monkeypatch, tm
     from conveyor.pi import provider_authenticated
 
     provider = PROVIDERS["openai-codex"]
-    assert provider.default_model == "gpt-5.4"
+    assert provider.default_model == "gpt-6.1-sol"
     assert provider.oauth and provider.env_var is None
     assert model_api(provider, provider.default_model) == "openai-codex-responses"
     monkeypatch.setenv(AUTH_FILE_ENV, str(tmp_path / "pi-auth.json"))

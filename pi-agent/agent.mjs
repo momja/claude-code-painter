@@ -10,13 +10,15 @@
 // `respond` tool whose parameters are the job's JSON schema.
 
 import { spawn } from "node:child_process";
-import {
-	Agent,
-	BACKGROUND_CONTEXT,
-	COMPACTION_SUMMARY_PREFIX,
-	COMPACTION_SUMMARY_SUFFIX,
-	generateSummaryWithUsage,
-} from "@earendil-works/pi-agent-core";
+import { Agent } from "@earendil-works/pi-agent-core";
+
+// Pi 1.x removed the compaction helpers (BACKGROUND_CONTEXT, COMPACTION_SUMMARY_*, generateSummaryWithUsage),
+// so the sidecar carries its own equivalents. Prefix/suffix match pi 0.x's harness/messages.js verbatim.
+const COMPACTION_SUMMARY_PREFIX =
+	"The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
+const COMPACTION_SUMMARY_SUFFIX = "\n</summary>";
+const SUMMARIZATION_SYSTEM_PROMPT =
+	"You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.\n\nDo NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.";
 import {
 	createModels,
 	fauxAssistantMessage,
@@ -210,10 +212,50 @@ function makeCompactor({ models, model, everyLooks, headers, reserveTokens, onSu
 	let boundary = 1; // messages[1..boundary) are summarized; messages[boundary..] are live
 	let summary = null;
 	let broken = false;
-	// The summary request is a plain completion; this wrapper adds the provider's session header to it.
-	const withHeaders = {
-		completeSimple: (m, aiContext, options) =>
-			models.completeSimple(m, aiContext, { ...options, headers: { ...options?.headers, ...headers } }),
+	// One message as a line or two of text for the summarizer. Images never survive summarization anyway,
+	// so note where they were instead of sending bytes the summary request would drop.
+	const summarizeLine = (m) => {
+		if (m.role === "system") return `system: ${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`;
+		if (m.role === "user") {
+			const text = typeof m.content === "string"
+				? m.content
+				: (m.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+			return text ? `user: ${text}` : null;
+		}
+		if (m.role === "assistant") {
+			const parts = [];
+			for (const b of m.content || []) {
+				if (b.type === "text" && b.text) parts.push(b.text);
+				else if (b.type === "thinking" && b.thinking) parts.push(`(thinking) ${b.thinking.slice(0, 2000)}`);
+				else if (b.type === "toolCall") parts.push(`(tool call ${b.name} ${JSON.stringify(b.arguments || {}).slice(0, 1000)})`);
+			}
+			return parts.length ? `assistant: ${parts.join("\n")}` : null;
+		}
+		if (m.role === "toolResult") {
+			const text = (m.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+			const images = (m.content || []).some((b) => b.type === "image") ? " [included an image]" : "";
+			return text || images ? `tool result (${m.toolName || m.toolCallId})${images}: ${text.slice(0, 4000)}` : null;
+		}
+		return null;
+	};
+
+	// Pi 0.x's generateSummaryWithUsage, inlined: one plain completion over the text of the messages.
+	// Returns the summary text with the provider usage so the run's cost accounting stays exact.
+	const summarizeWithUsage = async (toSummarize) => {
+		const transcript = toSummarize.map(summarizeLine).filter(Boolean).join("\n\n").slice(0, 200_000);
+		const systemPrompt = SUMMARIZATION_SYSTEM_PROMPT +
+			`\n\nAdditional instructions: ${COMPACT_INSTRUCTIONS}` +
+			(summary ? `\n\nPrevious summary:\n${summary}` : "");
+		const response = await models.completeSimple(
+			model,
+			{ systemPrompt, messages: [{ role: "user", content: transcript, timestamp: Date.now() }] },
+			{ headers, maxTokens: reserveTokens, maxRetries: 3 },
+		);
+		if (response.stopReason === "error" || response.stopReason === "aborted")
+			throw new Error(response.errorMessage || response.stopReason);
+		const text = (response.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+		if (!text) throw new Error("the summarizer returned no text");
+		return { text, usage: response.usage };
 	};
 	const view = (messages) =>
 		summary === null
@@ -229,21 +271,9 @@ function makeCompactor({ models, model, everyLooks, headers, reserveTokens, onSu
 			if (looksIn(messages.slice(boundary)) < everyLooks) return view(messages);
 			const cut = cutBeforeLastLook(messages, boundary);
 			if (cut <= boundary) return view(messages);
-			const result = await generateSummaryWithUsage(
-				messages.slice(boundary, cut),
-				withHeaders,
-				model,
-				reserveTokens,
-				COMPACT_INSTRUCTIONS,
-				summary ?? undefined,
-				undefined,
-				undefined,
-				undefined,
-				BACKGROUND_CONTEXT,
-			);
-			if (!result.ok) throw new Error(result.error?.message || String(result.error));
-			summary = result.value.text;
-			onSummary({ summarized: cut - boundary, kept: messages.length - cut, chars: summary.length, usage: result.value.usage });
+			const result = await summarizeWithUsage(messages.slice(boundary, cut));
+			summary = result.text;
+			onSummary({ summarized: cut - boundary, kept: messages.length - cut, chars: summary.length, usage: result.usage });
 			boundary = cut;
 		} catch (error) {
 			broken = true; // one failure and we stop trying; the image trim still holds the request down
@@ -416,7 +446,7 @@ async function main() {
 		},
 		sessionId: cfg.sessionId,
 		toolExecution: "sequential",
-		shouldStopAfterTurn: async () => stopRequested || overBudget || turn >= (cfg.maxTurns || 400),
+		finishTurn: () => (stopRequested || overBudget || turn >= (cfg.maxTurns || 400) ? { action: "end" } : undefined),
 	});
 
 	agent.subscribe(async (event) => {
