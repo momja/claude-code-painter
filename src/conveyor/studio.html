@@ -10,16 +10,56 @@
 header{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:14px 22px;background:var(--surface);border-bottom:1px solid var(--line)}h1{font-size:17px;margin:0}h2{font-size:16px;margin:0 0 10px}h3{font-size:13px;margin:20px 0 8px}a{color:var(--accent)}button,input,select,textarea{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:7px 9px}button{cursor:pointer}button:disabled{cursor:default;opacity:.55}button:hover:not(:disabled){border-color:var(--accent)}button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}select{max-width:100%}.primary{background:var(--accent);color:var(--surface);border-color:var(--accent)}.muted{color:var(--muted)}.bad{color:var(--painter)}.spacer{flex:1}.tag{font-size:12px;border:1px solid var(--line);border-radius:12px;padding:2px 8px}
 main{display:grid;grid-template-columns:minmax(0,1fr) 365px;height:calc(100dvh - 70px);min-height:500px}.graph-area{display:flex;flex-direction:column;min-width:0;min-height:0}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:14px 20px;border-bottom:1px solid var(--line)}#search{min-width:120px;flex:1}.legend{display:flex;gap:16px;font-size:12px;padding:0 20px 12px}.legend span:before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--accent)}.legend .prompt:before{background:var(--painter)}.legend .painting:before{background:var(--good)}#viewport{overflow:auto;flex:1;position:relative;background-image:radial-gradient(var(--line) 1px,transparent 1px);background-size:18px 18px;cursor:grab}#viewport.dragging{cursor:grabbing;user-select:none}#canvas{position:relative}#graph{transform-origin:0 0;display:block}.edge{fill:none;stroke:var(--line);stroke-width:1.6}.edge.related{stroke:var(--accent);stroke-width:2.5}.edge.parent{stroke-dasharray:4 4}.card{width:100%;height:100%;padding:11px;text-align:left;display:flex;flex-direction:column;gap:7px;border-radius:10px;border-left:3px solid var(--accent);background:var(--surface);overflow:hidden;box-shadow:0 2px 6px #0000000a;cursor:pointer}.card.prompt{border-left-color:var(--painter)}.card.painting{border-left-color:var(--good)}.card.selected{outline:3px solid var(--accent);outline-offset:-3px}.card.match{background:var(--code)}.card small{color:var(--muted);font-size:11px}.card strong{font-size:13px;font-weight:600}.card p{font-size:12px;margin:0;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.card img{height:112px;width:100%;object-fit:contain;background:var(--bg);border-radius:4px}.card .tools{font-size:11px;color:var(--accent);overflow:hidden;line-height:1.5}.column{fill:var(--muted);font-size:12px;font-family:inherit}.empty{padding:36px;max-width:650px;color:var(--muted)}aside{overflow:auto;background:var(--surface);border-left:1px solid var(--line);padding:22px}aside p{margin:8px 0 16px}label{display:grid;gap:5px;margin-bottom:13px;font-size:12px;font-weight:600}label select,label textarea,label input{font-weight:400;font-size:14px;width:100%}textarea{resize:vertical;min-height:100px}pre{font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--code);padding:12px;border-radius:6px;max-height:350px;overflow:auto}details summary{cursor:pointer}.preview{display:block;width:100%;max-height:280px;object-fit:contain;background:var(--bg);border-radius:6px;margin:10px 0}#upload-preview{max-height:150px}#message,#page-error{white-space:pre-wrap}#message{margin-top:12px;font-size:13px}#settings{font-size:12px;line-height:1.7;background:var(--bg);padding:10px;border-radius:6px;margin:12px 0}.action-row{display:flex;gap:8px;align-items:center}.action-row button{flex:1}[hidden]{display:none!important}
 @media(max-width:850px){main{grid-template-columns:1fr;height:auto}.graph-area{height:65dvh;min-height:420px}aside{border-left:0;border-top:1px solid var(--line)}header{padding:10px 14px}#run{max-width:55vw}}
+
+/* Keep controls usable with touch and allow long names to fit narrow screens. */
+header > *, main > *, aside, label { min-width:0; }
+input, select, textarea { max-width:100%; }
+button, a, input, select, textarea { touch-action:manipulation; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible,
+textarea:focus-visible, summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+@media(max-width:760px), (pointer:coarse) {
+  button, select, input:not([type=checkbox]):not([type=radio]):not([type=range]), textarea { min-height:44px; }
+  input:not([type=checkbox]):not([type=radio]), select, textarea { font-size:16px; }
+  input[type=range] { min-height:44px; }
+  input[type=checkbox], input[type=radio] { width:20px; height:20px; flex-shrink:0; }
+  header a, summary { min-height:44px; display:inline-flex; align-items:center; }
+  header { gap:6px 12px; }
+  header select { max-width:100%; }
+}
+
+#node-list { overflow:auto; padding:14px 20px; flex:1; min-height:0; }
+#node-list h2 { margin:12px 0 8px; }
+.node-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,230px),1fr)); gap:12px; }
+#node-list .card { min-height:175px; height:auto; }
+#node-list .card img { height:120px; }
+#view-controls { display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap; }
+#viewport { overscroll-behavior:contain; touch-action:pan-x pan-y; }
+.mobile-link { display:none; }
+aside, #settings, #selection-preview { overflow-wrap:anywhere; }
+@media(max-width:850px) {
+  main { min-height:0; }
+  .graph-area { height:auto; min-height:0; }
+  #viewport, #node-list { flex:none; height:60dvh; min-height:300px; }
+  #run { max-width:100%; flex:1 1 100%; }
+  #counts { white-space:normal; }
+  .legend { flex-wrap:wrap; gap:6px 14px; }
+  .toolbar, #node-list { padding:12px; }
+  .toolbar #search { flex:1 1 100%; }
+  .mobile-link { display:inline-flex; align-items:center; min-height:44px; }
+  aside { padding:18px 14px; scroll-margin-top:12px; }
+  #selection-title { scroll-margin-top:12px; }
+}
 </style>
 </head>
 <body>
 <header><a id="dashboard" href="/">Conveyor</a><h1>Painter studio</h1><a href="/brush-lab">Brush lab</a><select id="run" aria-label="Run"></select><span class="spacer"></span><span id="counts" class="tag"></span></header>
-<main><section class="graph-area" aria-label="Run graph">
-<div class="toolbar"><input id="search" type="search" placeholder="Find an ID, tool or prompt" aria-label="Highlight matching nodes"><button id="zoom-out" aria-label="Zoom out">−</button><span id="zoom-label" class="muted">100%</span><button id="zoom-in" aria-label="Zoom in">+</button><button id="fit">Fit all</button><button id="reset">100%</button></div>
+<main><section id="run-graph" class="graph-area" aria-label="Run graph">
+<div class="toolbar"><input id="search" type="search" placeholder="Find an ID, tool or prompt" aria-label="Highlight matching nodes"><select id="view-mode" aria-label="Painter view"><option value="graph">Graph</option><option value="list">List</option></select><span id="view-controls"><button id="zoom-out" aria-label="Zoom out">−</button><span id="zoom-label" class="muted">100%</span><button id="zoom-in" aria-label="Zoom in">+</button><button id="fit">Fit all</button><button id="reset">100%</button></span><a class="mobile-link" href="#painting-controls">New painting ↓</a></div>
 <div class="legend"><span class="prompt">Painter prompts</span><span>Instruments and their tools</span><span class="painting">Every painting</span></div>
 <div id="page-error" class="bad" role="alert"></div><div id="viewport" tabindex="0" aria-label="Scrollable graph. Drag the background to pan."><div id="canvas"><svg id="graph" xmlns="http://www.w3.org/2000/svg" aria-label="Painters, instruments and paintings"></svg></div><div id="empty" class="empty">Loading the run graph…</div></div>
+<div id="node-list" aria-label="Painters, instruments and paintings" hidden></div>
 </section>
-<aside aria-label="Selected painter and new painting">
+<aside id="painting-controls" aria-label="Selected painter and new painting"><a class="mobile-link" href="#run-graph">↑ Back to painters</a>
 <h2 id="selection-title">Select a painter</h2><p id="selection-help" class="muted">Click a painting to reuse its exact prompt and instrument. Or select a prompt or an instrument, then choose its partner.</p>
 <div id="selection-preview"></div><details id="source-details" hidden><summary id="source-title">Saved source</summary><pre id="source"></pre></details>
 <form id="request-form"><h3>New painting</h3>
@@ -94,11 +134,17 @@ function draw(){
     const artifact=node.type==="painting" ? node.artifacts?.painting : node.sheet;
     const title=node.type==="prompt" ? "Painter prompt" : node.type==="instrument" ? "Instrument" : node.request ? "Requested painting" : "Painting";
     const names=toolsOf(node);
-    return `<foreignObject x="${node.x}" y="${node.y}" width="230" height="200"><button xmlns="http://www.w3.org/1999/xhtml" class="card ${node.type}${selected===node.key ? " selected" : ""}${match ? " match" : ""}" data-key="${esc(node.key)}" aria-label="${title} ${esc(node.id)}" aria-pressed="${selected===node.key}"><small>${title} · ${short(node.id)}</small>${artifact ? `<img src="/artifacts/${esc(artifact)}" alt="${title}" loading="lazy"/>` : `<strong>${esc(node.summary || node.niche || node.status || "Strategy")}</strong>`}${node.type==="painting" ? `<p>${esc(node.status)}${node.score != null ? ` · score ${Number(node.score).toFixed(3)}` : " · no score"}${node.brief ? ` · ${esc(node.brief)}` : ""}</p>` : `<p>${esc(node.summary || (node.type === "prompt" ? node.genome?.prompt : node.niche) || "")}</p>${names.length ? `<div class="tools">${esc(names.join(" · "))}</div>` : ""}${node.viable===0 ? `<small class="bad">Not viable</small>` : ""}`}</button></foreignObject>`;
+    return `<button xmlns="http://www.w3.org/1999/xhtml" class="card ${node.type}${selected===node.key ? " selected" : ""}${match ? " match" : ""}" data-key="${esc(node.key)}" aria-label="${title} ${esc(node.id)}" aria-pressed="${selected===node.key}"><small>${title} · ${short(node.id)}</small>${artifact ? `<img src="/artifacts/${esc(artifact)}" alt="${title}" loading="lazy"/>` : `<strong>${esc(node.summary || node.niche || node.status || "Strategy")}</strong>`}${node.type==="painting" ? `<p>${esc(node.status)}${node.score != null ? ` · score ${Number(node.score).toFixed(3)}` : " · no score"}${node.brief ? ` · ${esc(node.brief)}` : ""}</p>` : `<p>${esc(node.summary || (node.type === "prompt" ? node.genome?.prompt : node.niche) || "")}</p>${names.length ? `<div class="tools">${esc(names.join(" · "))}</div>` : ""}${node.viable===0 ? `<small class="bad">Not viable</small>` : ""}`}</button>`;
   });
   $("graph").setAttribute("width",graphWidth);$("graph").setAttribute("height",graphHeight);
-  $("graph").innerHTML=`<text class="column" x="28" y="28">PAINTER PROMPTS · ${prompts.length}</text><text class="column" x="368" y="28">INSTRUMENTS · ${instruments.length}</text><text class="column" x="708" y="28">PAINTINGS · ${data.paintings.length}</text>${paths.join("")}${cards.join("")}`;
-  $("graph").querySelectorAll("[data-key]").forEach(button=>button.onclick=()=>selectNode(button.dataset.key));
+  $("graph").innerHTML=`<text class="column" x="28" y="28">PAINTER PROMPTS · ${prompts.length}</text><text class="column" x="368" y="28">INSTRUMENTS · ${instruments.length}</text><text class="column" x="708" y="28">PAINTINGS · ${data.paintings.length}</text>${paths.join("")}${nodes.map((node,i)=>`<foreignObject x="${node.x}" y="${node.y}" width="230" height="200">${cards[i]}</foreignObject>`).join("")}`;
+  const listScroll=$("node-list").scrollTop;
+  $("node-list").innerHTML=[['prompt','Painter prompts'],['instrument','Instruments'],['painting','Paintings']].map(([type,title])=>{
+    const matches=nodes.map((node,i)=>({node,card:cards[i]})).filter(({node})=>node.type===type && (!find || JSON.stringify(node).toLowerCase().includes(find)));
+    return matches.length ? `<h2>${title} · ${matches.length}</h2><div class="node-cards">${matches.map(m=>m.card).join("")}</div>` : '';
+  }).join('') || `<p class="muted">${find ? 'No matching painters, instruments or paintings.' : 'No saved painters, instruments or paintings yet.'}</p>`;
+  $("node-list").scrollTop=listScroll;
+  document.querySelectorAll("[data-key]").forEach(button=>button.onclick=()=>selectNode(button.dataset.key));
   $("counts").textContent=`${prompts.length} prompts · ${instruments.length} instruments · ${data.paintings.length} paintings`;
   $("empty").hidden=nodes.length>0;$("empty").textContent="No painters, instruments or paintings have been saved in this run yet.";
   applyZoom();
@@ -131,8 +177,14 @@ function zoom(value){const old=scale;scale=Math.max(.02,Math.min(2,value));apply
 $("zoom-in").onclick=()=>zoom(scale*1.25);$("zoom-out").onclick=()=>zoom(scale/1.25);$("reset").onclick=()=>zoom(1);
 $("fit").onclick=()=>{zoom(Math.min(($("viewport").clientWidth-20)/graphWidth,($("viewport").clientHeight-20)/graphHeight));$("viewport").scrollTo(0,0);};
 $("search").oninput=()=>{draw();const query=$("search").value.trim().toLowerCase();const hit=query && nodes.find(n=>JSON.stringify(n).toLowerCase().includes(query));if(hit)$("viewport").scrollTo({left:hit.x*scale,top:Math.max(0,hit.y*scale-30),behavior:"smooth"});};
+function setView(){
+  const list=$("view-mode").value==='list';
+  $("viewport").hidden=list;$("node-list").hidden=!list;$("view-controls").hidden=list;
+}
+$("view-mode").value=matchMedia('(max-width:850px)').matches ? 'list' : 'graph';
+$("view-mode").onchange=setView;setView();
 let drag=null;
-$("viewport").onpointerdown=e=>{if(e.target.closest("button") || e.button!==0)return;drag={x:e.clientX,y:e.clientY,left:$("viewport").scrollLeft,top:$("viewport").scrollTop};$("viewport").setPointerCapture(e.pointerId);$("viewport").classList.add("dragging");};
+$("viewport").onpointerdown=e=>{if(e.pointerType!=="mouse" || e.target.closest("button") || e.button!==0)return;drag={x:e.clientX,y:e.clientY,left:$("viewport").scrollLeft,top:$("viewport").scrollTop};$("viewport").setPointerCapture(e.pointerId);$("viewport").classList.add("dragging");};
 $("viewport").onpointermove=e=>{if(drag){$("viewport").scrollLeft=drag.left-e.clientX+drag.x;$("viewport").scrollTop=drag.top-e.clientY+drag.y;}};
 $("viewport").onpointerup=$("viewport").onpointercancel=()=>{drag=null;$("viewport").classList.remove("dragging");};
 function updateSubmit(){
@@ -180,7 +232,7 @@ async function chooseRun(id){
   clearTimeout(timer);run=id;selected=null;data=null;$("prompt").value="";$("instrument").value="";
   $("selection-title").textContent="Select a painter";$("selection-preview").innerHTML="";$("source-details").hidden=true;
   history.replaceState(null,"",`/studio?run=${encodeURIComponent(run)}`);$("dashboard").href=`/?run=${encodeURIComponent(run)}`;
-  await refresh();zoom(Math.min(1,($("viewport").clientWidth-24)/graphWidth));$("viewport").scrollTo(0,0);
+  await refresh();zoom(Math.min(1,(($("viewport").clientWidth || $("run-graph").clientWidth)-24)/graphWidth));$("viewport").scrollTo(0,0);
 }
 async function init(){
   try{

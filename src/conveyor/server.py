@@ -22,6 +22,7 @@ so it works the same during a run and after it, and from another process.
   GET /api/canvases/<id>/history     every tile version and every op, for replay
   GET /api/canvases/<id>/ops/<seq>   one op: the call's arguments and result note
   GET /api/canvases/<id>/tiles/<tx>/<ty>/<seq>  one version of one tile (PNG)
+  GET /api/canvases/<id>/preview.png?seq=<op>  cached 900px historical display preview
   GET /api/canvases/<id>/export.png  the frame, or the paint's reach, as one PNG (?side=<longest side>, ?seq=<op>)
   GET /api/canvases/<id>/export.gif  paint history, evenly spaced by call (?side=1024, ?frames=60, ?fps=10, ?seq=<op>)
   GET /api/canvases/<id>/progress.png  a sheet of progress stages (?side=512 per panel, ?frames=9, ?columns=3, ?seq=<op>)
@@ -121,6 +122,9 @@ class Views:
     def __init__(self, db: Path) -> None:
         self.db = db
         self._local = threading.local()
+        from conveyor.commons.preview import PreviewCache
+
+        self.previews = PreviewCache()
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -471,6 +475,10 @@ class Views:
             return canvas_views.canvas(self.conn, cid, int(q.get("since") or 0)), "json"
         if parts[3:] == ["history"]:
             return canvas_views.history(self.conn, cid), "json"
+        if parts[3:] == ["preview.png"]:
+            if "seq" not in q:
+                raise ValueError("preview requires seq")
+            return self.previews.get(self.conn, cid, int(q["seq"])), "png"
         if parts[3:] in (["export.png"], ["export.gif"], ["progress.png"]):
             from conveyor.commons.export import export_gif, export_png, export_sheet, filename
 

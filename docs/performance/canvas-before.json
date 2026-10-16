@@ -1,0 +1,211 @@
+{
+  "codecs": {
+    "sparse": {
+      "png": {
+        "bytes": 844,
+        "encode_ms": 1.529,
+        "decode_ms": 0.145,
+        "max_error": 0
+      },
+      "webp_lossless": {
+        "bytes": 296,
+        "encode_ms": 2.852,
+        "decode_ms": 0.143,
+        "max_error": 0
+      },
+      "webp_q85": {
+        "bytes": 1040,
+        "encode_ms": 0.781,
+        "decode_ms": 0.197,
+        "max_error": 27
+      },
+      "avif_q85": {
+        "bytes": 688,
+        "encode_ms": 9.78,
+        "decode_ms": 0.978,
+        "max_error": 9
+      },
+      "avif_q100": {
+        "bytes": 598,
+        "encode_ms": 10.498,
+        "decode_ms": 0.908,
+        "max_error": 2
+      },
+      "jxl_lossless": {
+        "bytes": 215,
+        "encode_ms": 4.168,
+        "decode_ms": 1.518,
+        "max_error": 0
+      }
+    },
+    "gradient": {
+      "png": {
+        "bytes": 298,
+        "encode_ms": 0.375,
+        "decode_ms": 0.19,
+        "max_error": 0
+      },
+      "webp_lossless": {
+        "bytes": 68,
+        "encode_ms": 5.879,
+        "decode_ms": 0.169,
+        "max_error": 0
+      },
+      "webp_q85": {
+        "bytes": 592,
+        "encode_ms": 0.988,
+        "decode_ms": 0.177,
+        "max_error": 7
+      },
+      "avif_q85": {
+        "bytes": 731,
+        "encode_ms": 4.596,
+        "decode_ms": 0.962,
+        "max_error": 4
+      },
+      "avif_q100": {
+        "bytes": 9704,
+        "encode_ms": 19.075,
+        "decode_ms": 1.95,
+        "max_error": 3
+      },
+      "jxl_lossless": {
+        "bytes": 101,
+        "encode_ms": 7.926,
+        "decode_ms": 2.615,
+        "max_error": 0
+      }
+    },
+    "texture": {
+      "png": {
+        "bytes": 44170,
+        "encode_ms": 1.686,
+        "decode_ms": 0.315,
+        "max_error": 0
+      },
+      "webp_lossless": {
+        "bytes": 42436,
+        "encode_ms": 25.32,
+        "decode_ms": 0.457,
+        "max_error": 0
+      },
+      "webp_q85": {
+        "bytes": 7814,
+        "encode_ms": 2.149,
+        "decode_ms": 0.544,
+        "max_error": 91
+      },
+      "avif_q85": {
+        "bytes": 14951,
+        "encode_ms": 28.954,
+        "decode_ms": 1.645,
+        "max_error": 41
+      },
+      "avif_q100": {
+        "bytes": 41068,
+        "encode_ms": 24.633,
+        "decode_ms": 8.068,
+        "max_error": 3
+      },
+      "jxl_lossless": {
+        "bytes": 44081,
+        "encode_ms": 43.672,
+        "decode_ms": 4.948,
+        "max_error": 0
+      }
+    },
+    "lettering": {
+      "png": {
+        "bytes": 3033,
+        "encode_ms": 0.517,
+        "decode_ms": 0.158,
+        "max_error": 0
+      },
+      "webp_lossless": {
+        "bytes": 1354,
+        "encode_ms": 1.1,
+        "decode_ms": 0.158,
+        "max_error": 0
+      },
+      "webp_q85": {
+        "bytes": 5324,
+        "encode_ms": 1.526,
+        "decode_ms": 0.337,
+        "max_error": 45
+      },
+      "avif_q85": {
+        "bytes": 5140,
+        "encode_ms": 32.071,
+        "decode_ms": 4.515,
+        "max_error": 25
+      },
+      "avif_q100": {
+        "bytes": 11359,
+        "encode_ms": 37.854,
+        "decode_ms": 1.449,
+        "max_error": 2
+      },
+      "jxl_lossless": {
+        "bytes": 2535,
+        "encode_ms": 7.7,
+        "decode_ms": 2.033,
+        "max_error": 0
+      }
+    }
+  },
+  "browser_codecs": {
+    "browser": "154.0.8037.57",
+    "png": {
+      "supported": true,
+      "decode_ms": 2.400000000023283
+    },
+    "webp_lossless": {
+      "supported": true,
+      "decode_ms": 1.5
+    },
+    "webp_q85": {
+      "supported": true,
+      "decode_ms": 2
+    },
+    "avif_q85": {
+      "supported": true,
+      "decode_ms": 4.199999999953434
+    },
+    "avif_q100": {
+      "supported": true,
+      "decode_ms": 4.7999999999883585
+    },
+    "jxl_lossless": {
+      "supported": false
+    }
+  },
+  "viewport": {
+    "cold": {
+      "first_ms": 271.29999999998836,
+      "center_ms": 4512.299999999988,
+      "complete_ms": 13324.599999999977,
+      "draw_calls": 2080,
+      "decoded": 64,
+      "requests": 64,
+      "bytes": 773520
+    },
+    "warm": {
+      "first_ms": 12.899999999965075,
+      "center_ms": 28.79999999998836,
+      "complete_ms": 66.79999999998836,
+      "draw_calls": 2080,
+      "decoded": 64,
+      "requests": 0,
+      "bytes": 0
+    },
+    "scrub": {
+      "first_ms": 103629.90000000002,
+      "center_ms": 109325.09999999998,
+      "complete_ms": 118326,
+      "draw_calls": 2102,
+      "decoded": 576,
+      "requests": 576,
+      "bytes": 6961680
+    }
+  }
+}
