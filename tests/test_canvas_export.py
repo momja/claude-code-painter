@@ -110,9 +110,9 @@ def test_stages_sample_this_canvass_call_ranks_not_database_sequence_numbers(tmp
         for _ in range(20):
             look(other)
         last = look(canvas)
-        assert export.stages(conn, a["id"], frames=3) == [(0, 0), (second, 2), (last, 4)]
+        assert export.stages(conn, a["id"], frames=3) == [(0, 0), (first, 1), (last, 4)]
         assert export.stages(conn, a["id"], frames=60) == [(0, 0), (first, 1), (second, 2), (third, 3), (last, 4)]
-        assert export.stages(conn, a["id"], frames=3, seq=third) == [(0, 0), (second, 2), (third, 3)]
+        assert export.stages(conn, a["id"], frames=3, seq=third) == [(0, 0), (first, 1), (third, 3)]
         assert export.stages(conn, a["id"], frames=3, seq=0) == [(0, 0)]
     finally:
         conn.close()
@@ -320,3 +320,29 @@ def test_export_filenames_remain_safe():
     assert export.filename("Shore line", kind="sheet") == "Shore-line-progress.png"
     with pytest.raises(ValueError):
         export.filename("C", kind="other")
+
+
+def test_stages_give_early_calls_more_frames_and_respect_replay_cutoffs(tmp_path):
+    db = tmp_path / "canvas.db"
+    row = create_canvas(db, "Progress", viewport=128)
+    canvas = SharedCanvas(db, row["id"])
+    conn = connect(db, readonly=True)
+    try:
+        ops = [look(canvas) for _ in range(1000)]
+        sampled = export.stages(conn, row["id"], frames=9)
+        expected = [0, 2, 16, 53, 125, 244, 422, 670, 1000]
+        assert sampled == [(ops[rank - 1] if rank else 0, rank) for rank in expected]
+        assert export.stages(conn, row["id"], frames=2) == [(0, 0), (ops[-1], 1000)]
+        for count in (1, 2, 3, 8, 24, 60, 239, 240, 1000):
+            for frames in (2, 9, 60, 240):
+                sampled = export.stages(conn, row["id"], frames=frames, seq=ops[count - 1])
+                ranks = [rank for _, rank in sampled]
+                assert len(ranks) == min(frames, count + 1)
+                assert ranks == sorted(set(ranks))
+                assert sampled[0] == (0, 0)
+                assert sampled[-1] == (ops[count - 1], count)
+                if frames > count:
+                    assert ranks == list(range(count + 1))
+    finally:
+        conn.close()
+        canvas.close()

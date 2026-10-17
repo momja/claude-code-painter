@@ -1,7 +1,7 @@
 """
 Export a canvas's paint as a still PNG, an animated GIF, or a PNG sheet of its progress.
 
-History exports start on blank paper and sample evenly by tool-call count, including the last call. They read
+History exports start on blank paper and sample tool-call counts on a cubic curve, including the last call. They read
 stored tile versions, never rerun instruments, and keep the frame or the final paint's reach as one fixed crop.
 `seq` stops the history at that op, so replay can export only the work it shows. Sketches and viewports stay out.
 """
@@ -90,7 +90,7 @@ def export_png(conn: sqlite3.Connection, canvas_id: str, side: int | None = None
 
 
 def stages(conn: sqlite3.Connection, canvas_id: str, frames: int, seq: int | None = None) -> list[tuple[int, int]]:
-    """Evenly spaced (op sequence, call count) pairs, from blank paper to the last op at or before `seq`.
+    """Early-weighted (op sequence, call count) pairs, from blank paper to the last op at or before `seq`.
 
     Sequences are database-wide, not per-canvas counters. Sample ranks within this canvas's calls instead of
     numeric sequence gaps. Pin the last op once, so agents can keep painting without changing this export.
@@ -106,7 +106,16 @@ def stages(conn: sqlite3.Connection, canvas_id: str, frames: int, seq: int | Non
     if not count:
         return [(0, 0)]
     frames = min(frames, count + 1)
-    ranks = {(i * count + (frames - 1) // 2) // (frames - 1) for i in range(1, frames)}
+    # Cubic spacing gives the first 10% of calls roughly 46% of the stages in a long history.
+    # Keep ranks distinct after rounding, leaving room for every remaining stage and the final call.
+    ranks = set()
+    previous = 0
+    denominator = (frames - 1) ** 3
+    for i in range(1, frames):
+        target = (i ** 3 * count + denominator // 2) // denominator
+        rank = min(count - (frames - 1 - i), max(previous + 1, target))
+        ranks.add(rank)
+        previous = rank
     result = [(0, 0)]
     for rank, (op,) in enumerate(conn.execute("SELECT seq FROM canvas_ops WHERE canvas_id=? AND seq<=? ORDER BY seq",
                                             (canvas_id, end)), 1):
@@ -164,7 +173,7 @@ def _clip(draw: ImageDraw.ImageDraw, text: str, font, width: int) -> str:
 
 def export_sheet(conn: sqlite3.Connection, canvas_id: str, side: int | None = None, seq: int | None = None,
                  frames: int | None = None, columns: int = 3) -> bytes:
-    """A small-multiple PNG of evenly spaced stages. `side` bounds each painting, not the whole sheet.
+    """A small-multiple PNG of early-weighted stages. `side` bounds each painting, not the whole sheet.
     Each panel uses the same crop and scale and names its percentage of calls and exact op sequence.
     """
     name, config = _canvas(conn, canvas_id)

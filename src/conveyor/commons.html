@@ -229,7 +229,7 @@ dialog { max-height:calc(100dvh - 24px); overflow:auto; }
   <label id="export-frames-field" hidden>Most stages<input id="export-frames" type="number" min="2" max="240" step="1" value="60" required></label>
   <div class="row"><label id="export-fps-field" hidden>Frames per second<input id="export-fps" type="number" min="1" max="30" step="1" value="10" required></label>
     <label id="export-columns-field" hidden>Columns<input id="export-columns" type="number" min="1" max="6" step="1" value="3" required></label></div>
-  <p class="muted" style="font-size:12px">Paint only, without sketches or viewports. Animations and progress sheets start on blank paper, space stages evenly by tool call and include the result. Every stage uses the same crop. Short histories need fewer stages.</p>
+  <p class="muted" style="font-size:12px">Paint only, without sketches or viewports. Animations and progress sheets start on blank paper, give early tool calls more stages and include the result. Every stage uses the same crop. Short histories need fewer stages.</p>
   <div id="export-status" role="status" aria-live="polite" style="font-size:12px;margin-bottom:10px"></div>
   <div style="display:flex;gap:8px;justify-content:flex-end"><button type="button" id="export-cancel">Cancel</button><button type="submit" id="export-download" class="primary">Download</button></div>
 </form></dialog>
